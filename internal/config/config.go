@@ -268,6 +268,9 @@ func (c Config) Validate() error {
 	if c.Risk.MinConfidence < 0 || c.Risk.MinConfidence > 100 {
 		problems = append(problems, "risk.min_confidence must be between 0 and 100")
 	}
+	if c.Risk.MaxSpreadBps < 0 {
+		problems = append(problems, "risk.max_spread_bps must be greater than or equal to zero")
+	}
 
 	if len(problems) > 0 {
 		return fmt.Errorf("config validation failed: %s", strings.Join(problems, "; "))

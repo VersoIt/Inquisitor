@@ -7,10 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/VersoIt/Inquisitor/internal/app/realtime"
+	realtimeapp "github.com/VersoIt/Inquisitor/internal/app/realtime"
 	"github.com/VersoIt/Inquisitor/internal/config"
 	bybitws "github.com/VersoIt/Inquisitor/internal/exchanges/bybit/websocket"
 	"github.com/VersoIt/Inquisitor/internal/logger"
+	realtimequality "github.com/VersoIt/Inquisitor/internal/marketdata/realtime"
+	"github.com/shopspring/decimal"
 )
 
 func main() {
@@ -47,7 +49,7 @@ func main() {
 		intervals = splitCSV(*intervalsValue)
 	}
 
-	topics, err := realtime.BuildBybitTopics(realtime.TopicRequest{
+	topics, err := realtimeapp.BuildBybitTopics(realtimeapp.TopicRequest{
 		Symbols:        symbols,
 		Intervals:      intervals,
 		Streams:        splitCSV(*streamsValue),
@@ -78,6 +80,10 @@ func main() {
 	}
 
 	parser := bybitws.NewParser(cfg.Exchange.Category)
+	qualityPolicy := realtimequality.QualityPolicy{
+		MaxStaleness: time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
+		MaxSpreadBPS: decimal.NewFromInt(int64(cfg.Risk.MaxSpreadBps)),
+	}
 	log.Info("collector subscribed", "topics", topics, "messages", *messages)
 	for i := 0; i < *messages; i++ {
 		payload, err := client.Read(ctx)
@@ -85,7 +91,7 @@ func main() {
 			log.Error("failed to read websocket message", "error", err)
 			os.Exit(1)
 		}
-		logPayload(log, parser, payload)
+		logPayload(log, parser, payload, qualityPolicy, time.Now().UTC())
 	}
 	log.Info("collector completed", "messages_read", *messages)
 }
@@ -93,7 +99,7 @@ func main() {
 func logPayload(log interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
-}, parser *bybitws.Parser, payload []byte) {
+}, parser *bybitws.Parser, payload []byte, qualityPolicy realtimequality.QualityPolicy, observedAt time.Time) {
 	raw := string(payload)
 	switch {
 	case strings.Contains(raw, `"op":"subscribe"`), strings.Contains(raw, `"op":"ping"`):
@@ -126,6 +132,31 @@ func logPayload(log interface {
 			return
 		}
 		log.Info("orderbook message", "symbol", orderbook.Symbol, "type", orderbook.Type, "bids", len(orderbook.Bids), "asks", len(orderbook.Asks))
+		if !strings.EqualFold(orderbook.Type, "snapshot") {
+			return
+		}
+
+		assessment, events, err := realtimequality.AssessOrderbookSnapshot(orderbook, observedAt, qualityPolicy)
+		if err != nil {
+			log.Warn("failed to assess orderbook quality", "error", err, "symbol", orderbook.Symbol)
+			return
+		}
+		log.Info(
+			"orderbook quality",
+			"symbol", assessment.Symbol,
+			"spread_bps", assessment.Spread.SpreadBPS.String(),
+			"stale", assessment.Stale,
+			"spread_too_wide", assessment.SpreadTooWide,
+		)
+		for _, event := range events {
+			log.Warn(
+				"orderbook quality event",
+				"event_type", event.EventType,
+				"severity", event.Severity,
+				"symbol", event.Symbol,
+				"data", string(event.DataJSON),
+			)
+		}
 	default:
 		log.Info("websocket message", "raw", raw)
 	}

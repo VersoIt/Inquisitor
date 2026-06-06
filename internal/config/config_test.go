@@ -128,6 +128,13 @@ func TestValidateTableDriven(t *testing.T) {
 			},
 			wantErrSub: "risk.min_confidence must be between 0 and 100",
 		},
+		{
+			name: "rejects negative max spread",
+			mutate: func(cfg *config.Config) {
+				cfg.Risk.MaxSpreadBps = -1
+			},
+			wantErrSub: "risk.max_spread_bps must be greater than or equal to zero",
+		},
 	}
 
 	for _, tt := range tests {
