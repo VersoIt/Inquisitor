@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+
+.idea/
+.vscode/
+
+bin/
+dist/
+coverage/
+*.test
+*.out
+
+tmp/
+logs/
+
+docker-compose.override.yml

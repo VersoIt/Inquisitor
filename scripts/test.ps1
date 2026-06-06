@@ -1,0 +1,6 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+go mod tidy
+go test ./...
+go vet ./...

@@ -1,0 +1,114 @@
+app:
+  name: crypto-quant-platform
+  env: local
+  mode: collector
+  log_level: info
+
+exchange:
+  primary: bybit
+  rest_base_url: https://api-testnet.bybit.com
+  testnet: true
+  category: linear
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  multi_exchange_enabled: false
+
+database:
+  dsn: ${DATABASE_DSN}
+  max_open_conns: 10
+  max_idle_conns: 5
+
+market_data:
+  candle_intervals:
+    - "1"
+    - "5"
+    - "15"
+    - "60"
+    - "240"
+  backfill_days: 365
+  orderbook_depth: 50
+  store_trades: true
+  store_orderbook_snapshots: true
+  store_funding: true
+  store_open_interest: true
+  max_data_staleness_ms: 3000
+  gap_backfill_enabled: true
+  reconnect_backoff_ms: 1000
+
+fees:
+  maker_bps: 2
+  taker_bps: 5
+  use_account_fee_rate_if_available: true
+
+slippage:
+  default_bps: 3
+  use_orderbook_model: true
+  conservative_multiplier: 1.5
+
+trading:
+  enabled: false
+  mode: paper
+  allow_live: false
+  allow_short: false
+  max_open_positions: 2
+  max_leverage: 1
+  base_currency: USDT
+
+risk:
+  risk_per_trade_pct: 0.25
+  max_daily_loss_pct: 1.0
+  max_weekly_loss_pct: 3.0
+  max_total_drawdown_pct: 8.0
+  max_losing_streak: 5
+  max_spread_bps: 5
+  max_slippage_bps: 10
+  min_confidence: 70
+  min_liquidity_usdt: 100000
+  portfolio_max_crypto_exposure_pct: 30
+  portfolio_max_correlated_exposure_pct: 20
+
+regime:
+  min_confidence: 70
+  adx_trend_threshold: 25
+  adx_range_threshold: 18
+  atr_spike_multiplier: 2.5
+
+research:
+  min_trades: 200
+  min_profit_factor: 1.15
+  min_expectancy_r: 0.05
+  max_drawdown_pct: 15
+  require_out_of_sample: true
+  require_walk_forward: true
+  require_regime_analysis: true
+
+paper:
+  initial_balance: 1000
+  minimum_days: 30
+  simulate_fees: true
+  simulate_slippage: true
+  simulate_spread: true
+
+live:
+  require_env_confirmation: true
+  confirmation_env: TRADING_LIVE_CONFIRM
+  api_key_env: BYBIT_API_KEY
+  api_secret_env: BYBIT_API_SECRET
+  require_subaccount: true
+  withdrawal_permission_allowed: false
+  initial_live_capital_usdt: 50
+
+edge_decay:
+  enabled: true
+  rolling_window_days: 30
+  min_recent_profit_factor: 1.0
+  max_recent_drawdown_pct: 8
+  disable_on_decay: true
+
+monitoring:
+  health_port: 8080
+  dashboard_api_enabled: false
+  telegram_enabled: false
+  telegram_token_env: TELEGRAM_BOT_TOKEN
+  telegram_chat_id_env: TELEGRAM_CHAT_ID
