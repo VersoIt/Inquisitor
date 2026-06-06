@@ -45,7 +45,10 @@ func ValidateDataQualityEvent(event marketdata.DataQualityEvent) error {
 
 func isKnownDataQualityEventType(eventType string) bool {
 	switch eventType {
-	case marketdata.DataQualityEventCandleGap, marketdata.DataQualityEventStaleData:
+	case marketdata.DataQualityEventCandleGap,
+		marketdata.DataQualityEventOrderbookInvalid,
+		marketdata.DataQualityEventSpreadTooWide,
+		marketdata.DataQualityEventStaleData:
 		return true
 	default:
 		return false

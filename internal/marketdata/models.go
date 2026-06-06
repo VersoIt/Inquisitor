@@ -7,8 +7,10 @@ import (
 )
 
 const (
-	DataQualityEventCandleGap = "CANDLE_GAP"
-	DataQualityEventStaleData = "STALE_DATA"
+	DataQualityEventCandleGap        = "CANDLE_GAP"
+	DataQualityEventOrderbookInvalid = "ORDERBOOK_INVALID"
+	DataQualityEventSpreadTooWide    = "SPREAD_TOO_WIDE"
+	DataQualityEventStaleData        = "STALE_DATA"
 
 	DataQualitySeverityInfo     = "info"
 	DataQualitySeverityWarning  = "warning"
