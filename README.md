@@ -4,7 +4,7 @@ Inquisitor is being built as a research-first crypto quant platform, not as a mo
 
 ## Current Scope
 
-This repository is on the first Phase 1 slice:
+This repository has completed the first Phase 1 market-data foundation slice and is moving through the first Phase 2 realtime slice:
 
 - Go module and baseline package layout.
 - Docker Compose PostgreSQL service.
@@ -23,8 +23,12 @@ This repository is on the first Phase 1 slice:
 - Candle gap detection.
 - Initial PostgreSQL migrations for `instruments` and `candles`.
 - Table-driven tests for config, migration loading, instrument validation, candle validation, gap detection, Bybit mapping, and backfill orchestration.
+- Bybit V5 public WebSocket topic builders, client wrapper, and message parsers for klines, tickers, public trades, and orderbooks.
+- Realtime topic orchestration for safe public stream subscriptions.
+- Smoke-only realtime collector command that reads public WebSocket messages without writing to storage or trading.
+- Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, and realtime topic orchestration.
 
-The next Phase 1 slice should add data quality event persistence, scripts, and broader integration coverage.
+The next Phase 2 slice should turn validated realtime events into an application service with explicit persistence and gap/reconciliation rules.
 
 ## What This Is Not
 
@@ -121,6 +125,17 @@ Or use the helper script:
 ```
 
 The command stores instrument constraints first, validates candle structure, upserts without duplicates, logs inserted/updated counts separately, logs detected gaps, and persists `CANDLE_GAP` data quality events. It does not trade and does not require API keys.
+
+## Realtime Collector
+
+The collector subscribes to public Bybit WebSocket streams and reads a bounded number of messages for smoke verification. It does not write to PostgreSQL, does not use private streams, and cannot place orders.
+
+```powershell
+$env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?sslmode=disable"
+go run ./cmd/collector -config configs/config.example.yaml -symbols BTCUSDT -intervals 1 -streams trade -messages 2 -timeout 25s
+```
+
+The default public endpoint is configured with `exchange.public_ws_url`.
 
 ## Make Targets
 

@@ -7,6 +7,7 @@ app:
 exchange:
   primary: bybit
   rest_base_url: https://api-testnet.bybit.com
+  public_ws_url: wss://stream-testnet.bybit.com/v5/public/linear
   testnet: true
   category: linear
   symbols:

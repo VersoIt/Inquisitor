@@ -42,6 +42,7 @@ type AppConfig struct {
 type ExchangeConfig struct {
 	Primary              string   `yaml:"primary"`
 	RestBaseURL          string   `yaml:"rest_base_url"`
+	PublicWSURL          string   `yaml:"public_ws_url"`
 	Testnet              bool     `yaml:"testnet"`
 	Category             string   `yaml:"category"`
 	Symbols              []string `yaml:"symbols"`
@@ -194,6 +195,9 @@ func (c Config) Validate() error {
 	if err := validateHTTPURL(c.Exchange.RestBaseURL); err != nil {
 		problems = append(problems, "exchange.rest_base_url "+err.Error())
 	}
+	if err := validateWSURL(c.Exchange.PublicWSURL); err != nil {
+		problems = append(problems, "exchange.public_ws_url "+err.Error())
+	}
 	if strings.TrimSpace(c.Exchange.Category) == "" {
 		problems = append(problems, "exchange.category is required")
 	}
@@ -306,6 +310,24 @@ func validateHTTPURL(value string) error {
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return fmt.Errorf("must use http or https")
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("must include a host")
+	}
+	return nil
+}
+
+func validateWSURL(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("is required")
+	}
+
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("must be a valid URL: %w", err)
+	}
+	if parsed.Scheme != "ws" && parsed.Scheme != "wss" {
+		return fmt.Errorf("must use ws or wss")
 	}
 	if parsed.Host == "" {
 		return fmt.Errorf("must include a host")

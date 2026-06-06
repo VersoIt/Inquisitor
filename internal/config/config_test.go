@@ -23,6 +23,9 @@ func TestLoadExampleConfigExpandsRequiredEnvironment(t *testing.T) {
 	if cfg.Exchange.RestBaseURL == "" {
 		t.Fatal("expected exchange rest base url")
 	}
+	if cfg.Exchange.PublicWSURL == "" {
+		t.Fatal("expected exchange public websocket url")
+	}
 	if cfg.Trading.Enabled || cfg.Trading.AllowLive {
 		t.Fatalf("live trading must be disabled by default: %#v", cfg.Trading)
 	}
@@ -82,6 +85,13 @@ func TestValidateTableDriven(t *testing.T) {
 				cfg.Exchange.RestBaseURL = "ftp://api-testnet.bybit.com"
 			},
 			wantErrSub: "exchange.rest_base_url must use http or https",
+		},
+		{
+			name: "rejects invalid websocket url",
+			mutate: func(cfg *config.Config) {
+				cfg.Exchange.PublicWSURL = "https://stream-testnet.bybit.com/v5/public/linear"
+			},
+			wantErrSub: "exchange.public_ws_url must use ws or wss",
 		},
 		{
 			name: "rejects unsupported exchange category",
@@ -153,6 +163,7 @@ func validConfig() config.Config {
 		Exchange: config.ExchangeConfig{
 			Primary:     "bybit",
 			RestBaseURL: "https://api-testnet.bybit.com",
+			PublicWSURL: "wss://stream-testnet.bybit.com/v5/public/linear",
 			Category:    "linear",
 			Symbols:     []string{"BTCUSDT"},
 		},
