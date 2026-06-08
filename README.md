@@ -28,9 +28,10 @@ This repository has completed the first Phase 1 market-data foundation slice and
 - Realtime topic orchestration for safe public stream subscriptions.
 - Smoke-only realtime collector command that reads public WebSocket messages without writing to storage or trading.
 - Realtime orderbook freshness, spread, and validity checks that emit data quality events.
+- Realtime application service that persists public trades and valid orderbook snapshots while recording quality events.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 2 slice should wire validated realtime events into an application service with explicit persistence and gap/reconciliation rules.
+The next Phase 2 slice should wire the collector CLI to the realtime application service and add reconnect/staleness runtime behavior.
 
 ## What This Is Not
 
