@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/shopspring/decimal"
 
+	realtimeapp "github.com/VersoIt/Inquisitor/internal/app/realtime"
 	bybitws "github.com/VersoIt/Inquisitor/internal/exchanges/bybit/websocket"
 	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	realtimequality "github.com/VersoIt/Inquisitor/internal/marketdata/realtime"
@@ -17,10 +19,10 @@ func TestLogPayloadAssessesOrderbookSnapshotQuality(t *testing.T) {
 	payload := fmt.Sprintf(`{"topic":"orderbook.50.BTCUSDT","type":"snapshot","ts":%d,"cts":%d,"data":{"s":"BTCUSDT","b":[["99.5","2"],["99","1"]],"a":[["100.5","3"],["101","1"]],"u":100,"seq":200}}`, dataTime.UnixMilli(), dataTime.UnixMilli())
 	log := &captureLogger{}
 
-	logPayload(log, bybitws.NewParser("linear"), []byte(payload), realtimequality.QualityPolicy{
+	logPayload(context.Background(), log, bybitws.NewParser("linear"), []byte(payload), realtimequality.QualityPolicy{
 		MaxStaleness: 3 * time.Second,
 		MaxSpreadBPS: decimal.NewFromInt(50),
-	}, dataTime.Add(5*time.Second))
+	}, dataTime.Add(5*time.Second), nil)
 
 	qualityLog := log.find("info", "orderbook quality")
 	if qualityLog == nil {
@@ -53,16 +55,98 @@ func TestLogPayloadSkipsOrderbookDeltaQualityAssessment(t *testing.T) {
 	payload := fmt.Sprintf(`{"topic":"orderbook.50.BTCUSDT","type":"delta","ts":%d,"cts":%d,"data":{"s":"BTCUSDT","b":[["99.5","0"]],"a":[],"u":101,"seq":201}}`, dataTime.UnixMilli(), dataTime.UnixMilli())
 	log := &captureLogger{}
 
-	logPayload(log, bybitws.NewParser("linear"), []byte(payload), realtimequality.QualityPolicy{
+	logPayload(context.Background(), log, bybitws.NewParser("linear"), []byte(payload), realtimequality.QualityPolicy{
 		MaxStaleness: 3 * time.Second,
 		MaxSpreadBPS: decimal.NewFromInt(50),
-	}, dataTime.Add(time.Second))
+	}, dataTime.Add(time.Second), nil)
 
 	if got := log.find("info", "orderbook quality"); got != nil {
 		t.Fatalf("delta must not be assessed as snapshot, got %#v", got)
 	}
 	if got := log.find("warn", "orderbook quality event"); got != nil {
 		t.Fatalf("delta must not emit quality events, got %#v", got)
+	}
+}
+
+func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
+	dataTime := time.Date(2026, 6, 7, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name              string
+		payload           string
+		wantTradeCalls    int
+		wantOrderbookCall int
+		wantLog           string
+		wantIgnoredDeltas int
+	}{
+		{
+			name: "persists public trades",
+			payload: fmt.Sprintf(
+				`{"topic":"publicTrade.BTCUSDT","type":"snapshot","ts":%d,"data":[{"T":%d,"s":"BTCUSDT","S":"Buy","v":"0.01","p":"100","i":"trade-1","BT":false,"seq":100}]}`,
+				dataTime.UnixMilli(),
+				dataTime.UnixMilli(),
+			),
+			wantTradeCalls: 1,
+			wantLog:        "public trades persisted",
+		},
+		{
+			name: "persists orderbook snapshots",
+			payload: fmt.Sprintf(
+				`{"topic":"orderbook.50.BTCUSDT","type":"snapshot","ts":%d,"cts":%d,"data":{"s":"BTCUSDT","b":[["99.5","2"],["99","1"]],"a":[["100.5","3"],["101","1"]],"u":100,"seq":200}}`,
+				dataTime.UnixMilli(),
+				dataTime.UnixMilli(),
+			),
+			wantOrderbookCall: 1,
+			wantLog:           "orderbook persisted",
+		},
+		{
+			name: "passes orderbook deltas to processor as ignored",
+			payload: fmt.Sprintf(
+				`{"topic":"orderbook.50.BTCUSDT","type":"delta","ts":%d,"cts":%d,"data":{"s":"BTCUSDT","b":[["99.5","0"]],"a":[],"u":101,"seq":201}}`,
+				dataTime.UnixMilli(),
+				dataTime.UnixMilli(),
+			),
+			wantOrderbookCall: 1,
+			wantLog:           "orderbook persisted",
+			wantIgnoredDeltas: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			log := &captureLogger{}
+			orderbookResult := realtimeapp.ProcessOrderbookResult{}
+			if tt.wantOrderbookCall > 0 {
+				orderbookResult.Received = 1
+				orderbookResult.IgnoredDeltas = tt.wantIgnoredDeltas
+				if tt.wantIgnoredDeltas == 0 {
+					orderbookResult.SnapshotsInserted = 1
+					orderbookResult.Valid = true
+				}
+			}
+			processor := &captureProcessor{
+				tradeResult: realtimeapp.ProcessTradesResult{
+					Received: 1,
+					Inserted: 1,
+				},
+				orderbookResult: orderbookResult,
+			}
+
+			logPayload(context.Background(), log, bybitws.NewParser("linear"), []byte(tt.payload), realtimequality.QualityPolicy{
+				MaxStaleness: 3 * time.Second,
+				MaxSpreadBPS: decimal.NewFromInt(150),
+			}, dataTime.Add(time.Second), processor)
+
+			if processor.tradeCalls != tt.wantTradeCalls {
+				t.Fatalf("trade calls mismatch: got %d want %d", processor.tradeCalls, tt.wantTradeCalls)
+			}
+			if processor.orderbookCalls != tt.wantOrderbookCall {
+				t.Fatalf("orderbook calls mismatch: got %d want %d", processor.orderbookCalls, tt.wantOrderbookCall)
+			}
+			if got := log.find("info", tt.wantLog); got == nil {
+				t.Fatalf("expected log %q, got %#v", tt.wantLog, log.entries)
+			}
+		})
 	}
 }
 
@@ -110,4 +194,21 @@ func (e captureEntry) arg(key string) any {
 		}
 	}
 	return nil
+}
+
+type captureProcessor struct {
+	tradeCalls      int
+	orderbookCalls  int
+	tradeResult     realtimeapp.ProcessTradesResult
+	orderbookResult realtimeapp.ProcessOrderbookResult
+}
+
+func (p *captureProcessor) ProcessTrades(context.Context, []marketdata.PublicTrade) (realtimeapp.ProcessTradesResult, error) {
+	p.tradeCalls++
+	return p.tradeResult, nil
+}
+
+func (p *captureProcessor) ProcessOrderbook(context.Context, marketdata.Orderbook) (realtimeapp.ProcessOrderbookResult, error) {
+	p.orderbookCalls++
+	return p.orderbookResult, nil
 }

@@ -11,7 +11,9 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/config"
 	bybitws "github.com/VersoIt/Inquisitor/internal/exchanges/bybit/websocket"
 	"github.com/VersoIt/Inquisitor/internal/logger"
+	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	realtimequality "github.com/VersoIt/Inquisitor/internal/marketdata/realtime"
+	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 	"github.com/shopspring/decimal"
 )
 
@@ -23,6 +25,7 @@ func main() {
 	depth := flag.Int("depth", 50, "orderbook depth")
 	messages := flag.Int("messages", 5, "number of websocket messages to read before exit")
 	timeout := flag.Duration("timeout", 30*time.Second, "collector smoke timeout")
+	persist := flag.Bool("persist", false, "persist supported realtime streams to PostgreSQL")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -63,6 +66,30 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
+	var processor realtimeProcessor
+	if *persist {
+		db, err := postgres.Open(ctx, cfg.Database)
+		if err != nil {
+			log.Error("failed to open postgres", "error", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+
+		processor = realtimeapp.NewService(
+			postgres.NewPublicTradeRepository(db),
+			postgres.NewOrderbookSnapshotRepository(db),
+			postgres.NewDataQualityEventRepository(db),
+			realtimeapp.ServiceConfig{
+				QualityPolicy: realtimequality.QualityPolicy{
+					MaxStaleness: time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
+					MaxSpreadBPS: decimal.NewFromInt(int64(cfg.Risk.MaxSpreadBps)),
+				},
+			},
+			log,
+		)
+		log.Info("collector persistence enabled")
+	}
+
 	client, err := bybitws.NewClient(cfg.Exchange.PublicWSURL)
 	if err != nil {
 		log.Error("failed to create websocket client", "error", err)
@@ -91,15 +118,20 @@ func main() {
 			log.Error("failed to read websocket message", "error", err)
 			os.Exit(1)
 		}
-		logPayload(log, parser, payload, qualityPolicy, time.Now().UTC())
+		logPayload(ctx, log, parser, payload, qualityPolicy, time.Now().UTC(), processor)
 	}
 	log.Info("collector completed", "messages_read", *messages)
 }
 
-func logPayload(log interface {
+type realtimeProcessor interface {
+	ProcessTrades(context.Context, []marketdata.PublicTrade) (realtimeapp.ProcessTradesResult, error)
+	ProcessOrderbook(context.Context, marketdata.Orderbook) (realtimeapp.ProcessOrderbookResult, error)
+}
+
+func logPayload(ctx context.Context, log interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
-}, parser *bybitws.Parser, payload []byte, qualityPolicy realtimequality.QualityPolicy, observedAt time.Time) {
+}, parser *bybitws.Parser, payload []byte, qualityPolicy realtimequality.QualityPolicy, observedAt time.Time, processor realtimeProcessor) {
 	raw := string(payload)
 	switch {
 	case strings.Contains(raw, `"op":"subscribe"`), strings.Contains(raw, `"op":"ping"`):
@@ -125,6 +157,14 @@ func logPayload(log interface {
 			return
 		}
 		log.Info("trade message", "trades", len(trades))
+		if processor != nil {
+			result, err := processor.ProcessTrades(ctx, trades)
+			if err != nil {
+				log.Warn("failed to persist public trades", "error", err)
+				return
+			}
+			log.Info("public trades persisted", "received", result.Received, "inserted", result.Inserted, "duplicates", result.Duplicates)
+		}
 	case strings.Contains(raw, `"topic":"orderbook.`):
 		orderbook, err := parser.ParseOrderbook(payload)
 		if err != nil {
@@ -133,6 +173,7 @@ func logPayload(log interface {
 		}
 		log.Info("orderbook message", "symbol", orderbook.Symbol, "type", orderbook.Type, "bids", len(orderbook.Bids), "asks", len(orderbook.Asks))
 		if !strings.EqualFold(orderbook.Type, "snapshot") {
+			logOrderbookPersistence(ctx, log, processor, orderbook)
 			return
 		}
 
@@ -157,9 +198,32 @@ func logPayload(log interface {
 				"data", string(event.DataJSON),
 			)
 		}
+		logOrderbookPersistence(ctx, log, processor, orderbook)
 	default:
 		log.Info("websocket message", "raw", raw)
 	}
+}
+
+func logOrderbookPersistence(ctx context.Context, log interface {
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+}, processor realtimeProcessor, orderbook marketdata.Orderbook) {
+	if processor == nil {
+		return
+	}
+
+	result, err := processor.ProcessOrderbook(ctx, orderbook)
+	if err != nil {
+		log.Warn("failed to persist orderbook", "error", err)
+		return
+	}
+	log.Info(
+		"orderbook persisted",
+		"received", result.Received,
+		"snapshots_inserted", result.SnapshotsInserted,
+		"quality_events_inserted", result.QualityEventsInserted,
+		"ignored_deltas", result.IgnoredDeltas,
+	)
 }
 
 func splitCSV(value string) []string {

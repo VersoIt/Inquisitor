@@ -132,7 +132,7 @@ The command stores instrument constraints first, validates candle structure, ups
 
 ## Realtime Collector
 
-The collector subscribes to public Bybit WebSocket streams and reads a bounded number of messages for smoke verification. It does not write to PostgreSQL, does not use private streams, and cannot place orders.
+The collector subscribes to public Bybit WebSocket streams and reads a bounded number of messages for smoke verification. By default it does not write to PostgreSQL, does not use private streams, and cannot place orders.
 
 ```powershell
 $env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?sslmode=disable"
@@ -140,6 +140,15 @@ go run ./cmd/collector -config configs/config.example.yaml -symbols BTCUSDT -int
 ```
 
 The default public endpoint is configured with `exchange.public_ws_url`.
+
+To explicitly persist supported realtime streams, apply migrations first and pass `-persist`:
+
+```powershell
+$env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?sslmode=disable"
+go run ./cmd/collector -config configs/config.example.yaml -symbols BTCUSDT -streams trade,orderbook -messages 5 -timeout 30s -persist
+```
+
+The current persistence path stores public trades, full orderbook snapshots, and orderbook data quality events. Orderbook deltas are intentionally not stored as snapshots until local book-state reconstruction is implemented.
 
 ## Make Targets
 
