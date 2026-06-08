@@ -21,6 +21,7 @@ func TestCollectorRunnerTableDriven(t *testing.T) {
 		wantConnectCalls   int
 		wantSubscribeCalls int
 		wantCloseCalls     int
+		wantReadDeadlines  int
 		wantHandled        []string
 		wantSleeps         int
 	}{
@@ -37,6 +38,7 @@ func TestCollectorRunnerTableDriven(t *testing.T) {
 			wantRead:           2,
 			wantConnectCalls:   1,
 			wantSubscribeCalls: 1,
+			wantReadDeadlines:  2,
 			wantHandled:        []string{"one", "two"},
 		},
 		{
@@ -53,6 +55,7 @@ func TestCollectorRunnerTableDriven(t *testing.T) {
 			wantConnectCalls:   2,
 			wantSubscribeCalls: 2,
 			wantCloseCalls:     1,
+			wantReadDeadlines:  2,
 			wantHandled:        []string{"after-reconnect"},
 			wantSleeps:         1,
 		},
@@ -70,6 +73,7 @@ func TestCollectorRunnerTableDriven(t *testing.T) {
 			wantConnectCalls:   2,
 			wantSubscribeCalls: 2,
 			wantCloseCalls:     1,
+			wantReadDeadlines:  2,
 			wantSleeps:         1,
 		},
 		{
@@ -97,6 +101,7 @@ func TestCollectorRunnerTableDriven(t *testing.T) {
 			wantConnectCalls:   2,
 			wantSubscribeCalls: 2,
 			wantCloseCalls:     1,
+			wantReadDeadlines:  1,
 			wantSleeps:         1,
 		},
 	}
@@ -111,6 +116,7 @@ func TestCollectorRunnerTableDriven(t *testing.T) {
 				topics:            []string{"publicTrade.BTCUSDT"},
 				reqID:             "collector-test",
 				messages:          tt.messages,
+				readTimeout:       500 * time.Millisecond,
 				reconnectAttempts: tt.reconnectAttempts,
 				reconnectBackoff:  25 * time.Millisecond,
 				sleep: func(_ context.Context, delay time.Duration) error {
@@ -142,6 +148,9 @@ func TestCollectorRunnerTableDriven(t *testing.T) {
 			if tt.client.closeCalls != tt.wantCloseCalls {
 				t.Fatalf("close calls mismatch: got %d want %d", tt.client.closeCalls, tt.wantCloseCalls)
 			}
+			if tt.client.readDeadlineCalls != tt.wantReadDeadlines {
+				t.Fatalf("read deadline calls mismatch: got %d want %d", tt.client.readDeadlineCalls, tt.wantReadDeadlines)
+			}
 			if len(sleeps) != tt.wantSleeps {
 				t.Fatalf("sleep count mismatch: got %d want %d", len(sleeps), tt.wantSleeps)
 			}
@@ -157,23 +166,27 @@ func TestCollectorRunnerRejectsInvalidConfigTableDriven(t *testing.T) {
 	}{
 		{
 			name:   "missing client",
-			runner: collectorRunner{messages: 1, reqID: "test", reconnectBackoff: time.Millisecond},
+			runner: collectorRunner{messages: 1, reqID: "test", readTimeout: time.Millisecond, reconnectBackoff: time.Millisecond},
 		},
 		{
 			name:   "non positive messages",
-			runner: collectorRunner{client: &fakeCollectorClient{}, reqID: "test", reconnectBackoff: time.Millisecond},
+			runner: collectorRunner{client: &fakeCollectorClient{}, reqID: "test", readTimeout: time.Millisecond, reconnectBackoff: time.Millisecond},
 		},
 		{
 			name:   "missing request id",
-			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, reconnectBackoff: time.Millisecond},
+			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, readTimeout: time.Millisecond, reconnectBackoff: time.Millisecond},
+		},
+		{
+			name:   "non positive read timeout",
+			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, reqID: "test", reconnectBackoff: time.Millisecond},
 		},
 		{
 			name:   "negative reconnect attempts",
-			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, reqID: "test", reconnectAttempts: -1, reconnectBackoff: time.Millisecond},
+			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, reqID: "test", readTimeout: time.Millisecond, reconnectAttempts: -1, reconnectBackoff: time.Millisecond},
 		},
 		{
 			name:   "non positive reconnect backoff",
-			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, reqID: "test"},
+			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, reqID: "test", readTimeout: time.Millisecond},
 		},
 	}
 
@@ -199,6 +212,7 @@ func TestCollectorRunnerStopsWhenBackoffContextIsCanceled(t *testing.T) {
 		topics:            []string{"publicTrade.BTCUSDT"},
 		reqID:             "collector-test",
 		messages:          1,
+		readTimeout:       time.Millisecond,
 		reconnectAttempts: 1,
 		reconnectBackoff:  time.Millisecond,
 	}
@@ -217,6 +231,8 @@ type fakeCollectorClient struct {
 	subscribeCalls int
 	closeCalls     int
 	readCalls      int
+
+	readDeadlineCalls int
 }
 
 type fakeRead struct {
@@ -240,8 +256,11 @@ func (c *fakeCollectorClient) Subscribe(context.Context, string, []string) error
 	return nil
 }
 
-func (c *fakeCollectorClient) Read(context.Context) ([]byte, error) {
+func (c *fakeCollectorClient) Read(ctx context.Context) ([]byte, error) {
 	c.readCalls++
+	if _, ok := ctx.Deadline(); ok {
+		c.readDeadlineCalls++
+	}
 	if c.readCalls <= len(c.reads) {
 		read := c.reads[c.readCalls-1]
 		return read.payload, read.err

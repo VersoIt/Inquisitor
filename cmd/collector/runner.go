@@ -24,6 +24,7 @@ type collectorRunner struct {
 	topics            []string
 	reqID             string
 	messages          int
+	readTimeout       time.Duration
 	reconnectAttempts int
 	reconnectBackoff  time.Duration
 	sleep             func(context.Context, time.Duration) error
@@ -39,6 +40,9 @@ func (r collectorRunner) Run(ctx context.Context) (int, error) {
 	}
 	if r.reqID == "" {
 		return 0, fmt.Errorf("request id is required")
+	}
+	if r.readTimeout <= 0 {
+		return 0, fmt.Errorf("read timeout must be positive")
 	}
 	if r.reconnectAttempts < 0 {
 		return 0, fmt.Errorf("reconnect attempts must be greater than or equal to zero")
@@ -63,7 +67,9 @@ func (r collectorRunner) Run(ctx context.Context) (int, error) {
 	messagesRead := 0
 	reconnectsUsed := 0
 	for messagesRead < r.messages {
-		payload, err := r.client.Read(ctx)
+		readCtx, cancelRead := context.WithTimeout(ctx, r.readTimeout)
+		payload, err := r.client.Read(readCtx)
+		cancelRead()
 		if err == nil {
 			r.handlePayload(ctx, payload)
 			messagesRead++

@@ -113,6 +113,7 @@ func main() {
 		topics:            topics,
 		reqID:             "collector-smoke",
 		messages:          *messages,
+		readTimeout:       time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
 		reconnectAttempts: *reconnectAttempts,
 		reconnectBackoff:  time.Duration(cfg.MarketData.ReconnectBackoffMs) * time.Millisecond,
 		handlePayload: func(ctx context.Context, payload []byte) {

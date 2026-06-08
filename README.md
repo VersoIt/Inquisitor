@@ -139,7 +139,7 @@ $env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?ss
 go run ./cmd/collector -config configs/config.example.yaml -symbols BTCUSDT -intervals 1 -streams trade -messages 2 -timeout 25s
 ```
 
-The default public endpoint is configured with `exchange.public_ws_url`. Read failures are retried with bounded reconnects using `-reconnect-attempts` and `market_data.reconnect_backoff_ms`.
+The default public endpoint is configured with `exchange.public_ws_url`. Stalled reads use `market_data.max_data_staleness_ms` as a per-read timeout and are retried with bounded reconnects using `-reconnect-attempts` and `market_data.reconnect_backoff_ms`.
 
 To explicitly persist supported realtime streams, apply migrations first and pass `-persist`:
 
