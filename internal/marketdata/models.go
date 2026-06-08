@@ -83,6 +83,15 @@ type PublicTrade struct {
 	Sequence     int64
 }
 
+type PublicTradeQuery struct {
+	Exchange string
+	Category string
+	Symbol   string
+	Start    time.Time
+	End      time.Time
+	Limit    int
+}
+
 type OrderbookLevel struct {
 	Price    decimal.Decimal
 	Quantity decimal.Decimal
@@ -99,6 +108,33 @@ type Orderbook struct {
 	Sequence           int64
 	ExchangeTime       time.Time
 	MatchingEngineTime time.Time
+}
+
+type OrderbookSnapshot struct {
+	Exchange           string
+	Category           string
+	Symbol             string
+	Depth              int
+	Bids               []OrderbookLevel
+	Asks               []OrderbookLevel
+	BestBid            decimal.Decimal
+	BestAsk            decimal.Decimal
+	Spread             decimal.Decimal
+	SpreadBPS          decimal.Decimal
+	UpdateID           int64
+	Sequence           int64
+	ExchangeTime       time.Time
+	MatchingEngineTime time.Time
+	CreatedAt          time.Time
+}
+
+type OrderbookSnapshotQuery struct {
+	Exchange string
+	Category string
+	Symbol   string
+	Start    time.Time
+	End      time.Time
+	Limit    int
 }
 
 type DataQualityEvent struct {

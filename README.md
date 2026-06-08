@@ -16,6 +16,7 @@ This repository has completed the first Phase 1 market-data foundation slice and
 - PostgreSQL candle repository adapter.
 - PostgreSQL instrument repository adapter.
 - PostgreSQL data quality event repository adapter.
+- PostgreSQL public trade and orderbook snapshot repository adapters.
 - Checksum-protected SQL migration runner and CLI command.
 - Candle backfill application service and CLI command.
 - Candle validation.
@@ -26,9 +27,10 @@ This repository has completed the first Phase 1 market-data foundation slice and
 - Bybit V5 public WebSocket topic builders, client wrapper, and message parsers for klines, tickers, public trades, and orderbooks.
 - Realtime topic orchestration for safe public stream subscriptions.
 - Smoke-only realtime collector command that reads public WebSocket messages without writing to storage or trading.
-- Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, and realtime topic orchestration.
+- Realtime orderbook freshness, spread, and validity checks that emit data quality events.
+- Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 2 slice should turn validated realtime events into an application service with explicit persistence and gap/reconciliation rules.
+The next Phase 2 slice should wire validated realtime events into an application service with explicit persistence and gap/reconciliation rules.
 
 ## What This Is Not
 
@@ -91,8 +93,9 @@ Initial migrations are in `migrations/`:
 - `001_init.sql`
 - `002_market_data.sql`
 - `003_data_quality_events.sql`
+- `004_realtime_market_data.sql`
 
-They define the first market-data tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data and realtime tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 

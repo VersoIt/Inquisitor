@@ -24,6 +24,16 @@ type DataQualityEventRepository interface {
 	ListDataQualityEvents(ctx context.Context, query DataQualityEventQuery) ([]DataQualityEvent, error)
 }
 
+type PublicTradeRepository interface {
+	InsertPublicTrades(ctx context.Context, trades []PublicTrade) (WriteStats, error)
+	ListPublicTrades(ctx context.Context, query PublicTradeQuery) ([]PublicTrade, error)
+}
+
+type OrderbookSnapshotRepository interface {
+	CreateOrderbookSnapshots(ctx context.Context, snapshots []OrderbookSnapshot) (WriteStats, error)
+	ListOrderbookSnapshots(ctx context.Context, query OrderbookSnapshotQuery) ([]OrderbookSnapshot, error)
+}
+
 type WriteStats struct {
 	Inserted int
 	Updated  int
