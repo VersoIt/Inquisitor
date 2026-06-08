@@ -26,6 +26,7 @@ func main() {
 	messages := flag.Int("messages", 5, "number of websocket messages to read before exit")
 	timeout := flag.Duration("timeout", 30*time.Second, "collector smoke timeout")
 	persist := flag.Bool("persist", false, "persist supported realtime streams to PostgreSQL")
+	reconnectAttempts := flag.Int("reconnect-attempts", 3, "maximum websocket reconnect attempts after read failures")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -40,6 +41,10 @@ func main() {
 	}
 	if *messages <= 0 {
 		log.Error("messages must be positive")
+		os.Exit(1)
+	}
+	if *reconnectAttempts < 0 {
+		log.Error("reconnect attempts must be greater than or equal to zero")
 		os.Exit(1)
 	}
 
@@ -97,30 +102,29 @@ func main() {
 	}
 	defer client.Close()
 
-	if err := client.Connect(ctx); err != nil {
-		log.Error("failed to connect websocket", "error", err)
-		os.Exit(1)
-	}
-	if err := client.Subscribe(ctx, "collector-smoke", topics); err != nil {
-		log.Error("failed to subscribe websocket topics", "error", err, "topics", topics)
-		os.Exit(1)
-	}
-
 	parser := bybitws.NewParser(cfg.Exchange.Category)
 	qualityPolicy := realtimequality.QualityPolicy{
 		MaxStaleness: time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
 		MaxSpreadBPS: decimal.NewFromInt(int64(cfg.Risk.MaxSpreadBps)),
 	}
-	log.Info("collector subscribed", "topics", topics, "messages", *messages)
-	for i := 0; i < *messages; i++ {
-		payload, err := client.Read(ctx)
-		if err != nil {
-			log.Error("failed to read websocket message", "error", err)
-			os.Exit(1)
-		}
-		logPayload(ctx, log, parser, payload, qualityPolicy, time.Now().UTC(), processor)
+	runner := collectorRunner{
+		client:            client,
+		log:               log,
+		topics:            topics,
+		reqID:             "collector-smoke",
+		messages:          *messages,
+		reconnectAttempts: *reconnectAttempts,
+		reconnectBackoff:  time.Duration(cfg.MarketData.ReconnectBackoffMs) * time.Millisecond,
+		handlePayload: func(ctx context.Context, payload []byte) {
+			logPayload(ctx, log, parser, payload, qualityPolicy, time.Now().UTC(), processor)
+		},
 	}
-	log.Info("collector completed", "messages_read", *messages)
+	messagesRead, err := runner.Run(ctx)
+	if err != nil {
+		log.Error("collector failed", "error", err, "messages_read", messagesRead)
+		os.Exit(1)
+	}
+	log.Info("collector completed", "messages_read", messagesRead)
 }
 
 type realtimeProcessor interface {
