@@ -65,6 +65,7 @@ type ProcessTradesResult struct {
 type ProcessOrderbookResult struct {
 	Received              int
 	DeltasApplied         int
+	NeedsSnapshotReset    bool
 	SnapshotsInserted     int
 	SnapshotsSkipped      int
 	QualityEventsInserted int
@@ -180,9 +181,12 @@ func (s *Service) ProcessOrderbook(ctx context.Context, book marketdata.Orderboo
 		result.DeltasApplied = 1
 	}
 	if err != nil {
+		s.resetOrderbookState(book)
+		result.NeedsSnapshotReset = true
 		event, eventErr := newRealtimeQualityEvent(book, observedAt, marketdata.DataQualityEventOrderbookInvalid, marketdata.DataQualitySeverityCritical, "invalid orderbook update", map[string]string{
-			"reason": err.Error(),
-			"type":   book.Type,
+			"reason":                err.Error(),
+			"snapshot_reset_needed": "true",
+			"type":                  book.Type,
 		})
 		if eventErr != nil {
 			return ProcessOrderbookResult{}, eventErr
@@ -278,6 +282,17 @@ func (s *Service) applyOrderbookUpdate(update marketdata.Orderbook) (marketdata.
 		s.orderbooks[key] = book
 	}
 	return book.Apply(update)
+}
+
+func (s *Service) resetOrderbookState(update marketdata.Orderbook) {
+	key := orderbookStateKey(update)
+	if key == "" {
+		return
+	}
+
+	s.orderbookMu.Lock()
+	defer s.orderbookMu.Unlock()
+	delete(s.orderbooks, key)
 }
 
 func (s *Service) storeQualityEvents(ctx context.Context, events []marketdata.DataQualityEvent) (marketdata.WriteStats, error) {

@@ -123,8 +123,9 @@ func TestCollectorRunnerTableDriven(t *testing.T) {
 					sleeps = append(sleeps, delay)
 					return nil
 				},
-				handlePayload: func(_ context.Context, payload []byte) {
+				handlePayload: func(_ context.Context, payload []byte) collectorPayloadDecision {
 					handled = append(handled, string(payload))
+					return collectorPayloadDecision{}
 				},
 			}
 
@@ -203,6 +204,54 @@ func TestCollectorRunnerRejectsInvalidConfigTableDriven(t *testing.T) {
 	}
 }
 
+func TestCollectorRunnerReconnectsWhenPayloadRequestsResync(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeCollectorClient{
+		reads: []fakeRead{
+			{payload: []byte("invalid-orderbook")},
+			{payload: []byte("fresh-snapshot")},
+		},
+	}
+	var handled []string
+	var sleeps []time.Duration
+	runner := collectorRunner{
+		client:            client,
+		log:               &captureLogger{},
+		topics:            []string{"orderbook.50.BTCUSDT"},
+		reqID:             "collector-test",
+		messages:          2,
+		readTimeout:       time.Second,
+		reconnectAttempts: 1,
+		reconnectBackoff:  25 * time.Millisecond,
+		sleep: func(_ context.Context, delay time.Duration) error {
+			sleeps = append(sleeps, delay)
+			return nil
+		},
+		handlePayload: func(_ context.Context, payload []byte) collectorPayloadDecision {
+			handled = append(handled, string(payload))
+			if string(payload) == "invalid-orderbook" {
+				return collectorPayloadDecision{Reconnect: true, Reason: "orderbook snapshot reset requested"}
+			}
+			return collectorPayloadDecision{}
+		},
+	}
+
+	gotRead, err := runner.Run(ctx)
+	if err != nil {
+		t.Fatalf("run collector: %v", err)
+	}
+	if gotRead != 2 {
+		t.Fatalf("messages read mismatch: got %d want 2", gotRead)
+	}
+	if client.connectCalls != 2 || client.subscribeCalls != 2 || client.closeCalls != 1 {
+		t.Fatalf("unexpected reconnect calls: connect=%d subscribe=%d close=%d", client.connectCalls, client.subscribeCalls, client.closeCalls)
+	}
+	if len(sleeps) != 1 {
+		t.Fatalf("sleep count mismatch: got %d want 1", len(sleeps))
+	}
+	assertStrings(t, handled, []string{"invalid-orderbook", "fresh-snapshot"})
+}
+
 func TestCollectorRunnerHeartbeatPingTableDriven(t *testing.T) {
 	ctx := context.Background()
 	start := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
@@ -275,8 +324,9 @@ func TestCollectorRunnerHeartbeatPingTableDriven(t *testing.T) {
 				reconnectBackoff:  time.Millisecond,
 				now:               fakeNow(tt.nowValues...),
 				sleep:             func(context.Context, time.Duration) error { return nil },
-				handlePayload: func(_ context.Context, payload []byte) {
+				handlePayload: func(_ context.Context, payload []byte) collectorPayloadDecision {
 					handled = append(handled, string(payload))
+					return collectorPayloadDecision{}
 				},
 			}
 

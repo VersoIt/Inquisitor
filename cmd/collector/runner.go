@@ -19,6 +19,11 @@ type collectorLogger interface {
 	Warn(msg string, args ...any)
 }
 
+type collectorPayloadDecision struct {
+	Reconnect bool
+	Reason    string
+}
+
 type collectorRunner struct {
 	client            collectorWebSocket
 	log               collectorLogger
@@ -31,7 +36,7 @@ type collectorRunner struct {
 	reconnectBackoff  time.Duration
 	now               func() time.Time
 	sleep             func(context.Context, time.Duration) error
-	handlePayload     func(context.Context, []byte)
+	handlePayload     func(context.Context, []byte) collectorPayloadDecision
 }
 
 func (r collectorRunner) Run(ctx context.Context) (int, error) {
@@ -63,7 +68,9 @@ func (r collectorRunner) Run(ctx context.Context) (int, error) {
 		r.now = time.Now
 	}
 	if r.handlePayload == nil {
-		r.handlePayload = func(context.Context, []byte) {}
+		r.handlePayload = func(context.Context, []byte) collectorPayloadDecision {
+			return collectorPayloadDecision{}
+		}
 	}
 
 	if err := r.connectAndSubscribe(ctx); err != nil {
@@ -97,8 +104,21 @@ func (r collectorRunner) Run(ctx context.Context) (int, error) {
 		payload, err := r.client.Read(readCtx)
 		cancelRead()
 		if err == nil {
-			r.handlePayload(ctx, payload)
+			decision := r.handlePayload(ctx, payload)
 			messagesRead++
+			if decision.Reconnect && messagesRead < r.messages {
+				if reconnectsUsed >= r.reconnectAttempts {
+					return messagesRead, fmt.Errorf("resync websocket after %d reconnect attempts: %s", reconnectsUsed, reconnectReason(decision))
+				}
+				reconnectsUsed++
+				if r.log != nil {
+					r.log.Warn("websocket payload requested reconnect", "reason", reconnectReason(decision), "attempt", reconnectsUsed, "max_attempts", r.reconnectAttempts)
+				}
+				if err := r.reconnect(ctx, reconnectsUsed); err != nil {
+					return messagesRead, err
+				}
+				lastPing = r.now()
+			}
 			continue
 		}
 
@@ -138,6 +158,13 @@ func (r collectorRunner) connectAndSubscribe(ctx context.Context) error {
 		return fmt.Errorf("subscribe websocket topics: %w", err)
 	}
 	return nil
+}
+
+func reconnectReason(decision collectorPayloadDecision) string {
+	if decision.Reason != "" {
+		return decision.Reason
+	}
+	return "payload requested reconnect"
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {

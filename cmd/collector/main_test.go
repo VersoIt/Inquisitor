@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,41 @@ func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
 				t.Fatalf("deltas_applied log mismatch: got %#v want %d", gotLog.arg("deltas_applied"), tt.wantDeltasApplied)
 			}
 		})
+	}
+}
+
+func TestLogPayloadRequestsReconnectWhenOrderbookNeedsSnapshotReset(t *testing.T) {
+	dataTime := time.Date(2026, 6, 7, 0, 0, 0, 0, time.UTC)
+	payload := fmt.Sprintf(
+		`{"topic":"orderbook.50.BTCUSDT","type":"delta","ts":%d,"cts":%d,"data":{"s":"BTCUSDT","b":[["101","1"]],"a":[],"u":101,"seq":201}}`,
+		dataTime.UnixMilli(),
+		dataTime.UnixMilli(),
+	)
+	log := &captureLogger{}
+	processor := &captureProcessor{
+		orderbookResult: realtimeapp.ProcessOrderbookResult{
+			Received:              1,
+			NeedsSnapshotReset:    true,
+			QualityEventsInserted: 1,
+		},
+	}
+
+	got := logPayload(context.Background(), log, bybitws.NewParser("linear"), []byte(payload), realtimequality.QualityPolicy{
+		MaxStaleness: 3 * time.Second,
+		MaxSpreadBPS: decimal.NewFromInt(150),
+	}, dataTime.Add(time.Second), processor)
+
+	if !got.Reconnect {
+		t.Fatalf("expected reconnect decision, got %#v", got)
+	}
+	if !strings.Contains(got.Reason, "snapshot reset") {
+		t.Fatalf("unexpected reconnect reason: %q", got.Reason)
+	}
+	if processor.orderbookCalls != 1 {
+		t.Fatalf("orderbook calls mismatch: got %d want 1", processor.orderbookCalls)
+	}
+	if gotLog := log.find("warn", "orderbook snapshot resync requested"); gotLog == nil {
+		t.Fatalf("expected snapshot resync log, got %#v", log.entries)
 	}
 }
 

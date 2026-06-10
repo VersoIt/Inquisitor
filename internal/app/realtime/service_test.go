@@ -288,6 +288,7 @@ func TestServiceProcessOrderbookTableDriven(t *testing.T) {
 			policy: testQualityPolicy(),
 			want: apprealtime.ProcessOrderbookResult{
 				Received:              1,
+				NeedsSnapshotReset:    true,
 				QualityEventsInserted: 1,
 			},
 			wantQualityEvents: []string{marketdata.DataQualityEventOrderbookInvalid},
@@ -298,6 +299,7 @@ func TestServiceProcessOrderbookTableDriven(t *testing.T) {
 			policy: testQualityPolicy(),
 			want: apprealtime.ProcessOrderbookResult{
 				Received:              1,
+				NeedsSnapshotReset:    true,
 				QualityEventsInserted: 1,
 			},
 			wantQualityEvents: []string{marketdata.DataQualityEventOrderbookInvalid},
@@ -430,6 +432,65 @@ func TestServiceProcessOrderbookAppliesDeltaAndPersistsReconstructedSnapshot(t *
 		{Price: decimal.RequireFromString("100.25"), Quantity: decimal.RequireFromString("4")},
 		{Price: decimal.RequireFromString("100.5"), Quantity: decimal.RequireFromString("3")},
 		{Price: decimal.RequireFromString("101"), Quantity: decimal.RequireFromString("2")},
+	})
+}
+
+func TestServiceProcessOrderbookInvalidDeltaResetsLocalBook(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
+	snapshotRepo := &fakeOrderbookSnapshotRepo{}
+	qualityRepo := &fakeQualityRepo{}
+	service := apprealtime.NewService(
+		&fakeCandleRepo{},
+		&fakePublicTradeRepo{},
+		snapshotRepo,
+		qualityRepo,
+		testServiceConfig(),
+		slog.Default(),
+		apprealtime.WithClock(clock.FixedClock{Time: now}),
+	)
+
+	if _, err := service.ProcessOrderbook(ctx, testOrderbook(now.Add(-3*time.Second), "99.5", "100.5", "snapshot")); err != nil {
+		t.Fatalf("process snapshot: %v", err)
+	}
+
+	invalidDelta := testOrderbookDelta(now.Add(-2*time.Second), []marketdata.OrderbookLevel{
+		{Price: decimal.RequireFromString("101"), Quantity: decimal.RequireFromString("1")},
+	}, nil)
+	gotInvalid, err := service.ProcessOrderbook(ctx, invalidDelta)
+	if err != nil {
+		t.Fatalf("process invalid delta: %v", err)
+	}
+	wantInvalid := apprealtime.ProcessOrderbookResult{
+		Received:              1,
+		NeedsSnapshotReset:    true,
+		QualityEventsInserted: 1,
+	}
+	if gotInvalid != wantInvalid {
+		t.Fatalf("invalid delta result mismatch: got %#v want %#v", gotInvalid, wantInvalid)
+	}
+
+	validDeltaWithoutFreshSnapshot := testOrderbookDelta(now.Add(-time.Second), []marketdata.OrderbookLevel{
+		{Price: decimal.RequireFromString("99.5"), Quantity: decimal.Zero},
+	}, nil)
+	gotAfterReset, err := service.ProcessOrderbook(ctx, validDeltaWithoutFreshSnapshot)
+	if err != nil {
+		t.Fatalf("process delta after reset: %v", err)
+	}
+	wantAfterReset := apprealtime.ProcessOrderbookResult{
+		Received:              1,
+		NeedsSnapshotReset:    true,
+		QualityEventsInserted: 1,
+	}
+	if gotAfterReset != wantAfterReset {
+		t.Fatalf("delta after reset result mismatch: got %#v want %#v", gotAfterReset, wantAfterReset)
+	}
+	if len(snapshotRepo.snapshots) != 1 {
+		t.Fatalf("only the initial snapshot should be stored, got %d snapshots", len(snapshotRepo.snapshots))
+	}
+	assertQualityEventTypes(t, qualityRepo.events, []string{
+		marketdata.DataQualityEventOrderbookInvalid,
+		marketdata.DataQualityEventOrderbookInvalid,
 	})
 }
 

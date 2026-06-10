@@ -128,8 +128,8 @@ func main() {
 		pingInterval:      *pingInterval,
 		reconnectAttempts: *reconnectAttempts,
 		reconnectBackoff:  time.Duration(cfg.MarketData.ReconnectBackoffMs) * time.Millisecond,
-		handlePayload: func(ctx context.Context, payload []byte) {
-			logPayload(ctx, log, parser, payload, qualityPolicy, time.Now().UTC(), processor)
+		handlePayload: func(ctx context.Context, payload []byte) collectorPayloadDecision {
+			return logPayload(ctx, log, parser, payload, qualityPolicy, time.Now().UTC(), processor)
 		},
 	}
 	messagesRead, err := runner.Run(ctx)
@@ -149,64 +149,67 @@ type realtimeProcessor interface {
 func logPayload(ctx context.Context, log interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
-}, parser *bybitws.Parser, payload []byte, qualityPolicy realtimequality.QualityPolicy, observedAt time.Time, processor realtimeProcessor) {
+}, parser *bybitws.Parser, payload []byte, qualityPolicy realtimequality.QualityPolicy, observedAt time.Time, processor realtimeProcessor) collectorPayloadDecision {
 	raw := string(payload)
 	switch {
 	case strings.Contains(raw, `"op":"subscribe"`), strings.Contains(raw, `"op":"ping"`):
 		log.Info("websocket command response", "raw", raw)
+		return collectorPayloadDecision{}
 	case strings.Contains(raw, `"topic":"kline.`):
 		candles, err := parser.ParseKline(payload)
 		if err != nil {
 			log.Warn("failed to parse kline message", "error", err, "raw", raw)
-			return
+			return collectorPayloadDecision{}
 		}
 		log.Info("kline message", "candles", len(candles))
 		if processor != nil {
 			result, err := processor.ProcessCandles(ctx, candles)
 			if err != nil {
 				log.Warn("failed to persist realtime candles", "error", err)
-				return
+				return collectorPayloadDecision{}
 			}
 			log.Info("realtime candles persisted", "received", result.Received, "inserted", result.Inserted, "updated", result.Updated, "skipped", result.Skipped)
 		}
+		return collectorPayloadDecision{}
 	case strings.Contains(raw, `"topic":"tickers.`):
 		ticker, err := parser.ParseTicker(payload)
 		if err != nil {
 			log.Warn("failed to parse ticker message", "error", err, "raw", raw)
-			return
+			return collectorPayloadDecision{}
 		}
 		log.Info("ticker message", "symbol", ticker.Symbol, "last_price", ticker.LastPrice.String())
+		return collectorPayloadDecision{}
 	case strings.Contains(raw, `"topic":"publicTrade.`):
 		trades, err := parser.ParseTrades(payload)
 		if err != nil {
 			log.Warn("failed to parse trade message", "error", err, "raw", raw)
-			return
+			return collectorPayloadDecision{}
 		}
 		log.Info("trade message", "trades", len(trades))
 		if processor != nil {
 			result, err := processor.ProcessTrades(ctx, trades)
 			if err != nil {
 				log.Warn("failed to persist public trades", "error", err)
-				return
+				return collectorPayloadDecision{}
 			}
 			log.Info("public trades persisted", "received", result.Received, "inserted", result.Inserted, "duplicates", result.Duplicates, "skipped", result.Skipped)
 		}
+		return collectorPayloadDecision{}
 	case strings.Contains(raw, `"topic":"orderbook.`):
 		orderbook, err := parser.ParseOrderbook(payload)
 		if err != nil {
 			log.Warn("failed to parse orderbook message", "error", err, "raw", raw)
-			return
+			return collectorPayloadDecision{}
 		}
 		log.Info("orderbook message", "symbol", orderbook.Symbol, "type", orderbook.Type, "bids", len(orderbook.Bids), "asks", len(orderbook.Asks))
 		if !strings.EqualFold(orderbook.Type, "snapshot") {
-			logOrderbookPersistence(ctx, log, processor, orderbook)
-			return
+			return logOrderbookPersistence(ctx, log, processor, orderbook)
 		}
 
 		assessment, events, err := realtimequality.AssessOrderbookSnapshot(orderbook, observedAt, qualityPolicy)
 		if err != nil {
 			log.Warn("failed to assess orderbook quality", "error", err, "symbol", orderbook.Symbol)
-			return
+			return collectorPayloadDecision{}
 		}
 		log.Info(
 			"orderbook quality",
@@ -224,24 +227,25 @@ func logPayload(ctx context.Context, log interface {
 				"data", string(event.DataJSON),
 			)
 		}
-		logOrderbookPersistence(ctx, log, processor, orderbook)
+		return logOrderbookPersistence(ctx, log, processor, orderbook)
 	default:
 		log.Info("websocket message", "raw", raw)
+		return collectorPayloadDecision{}
 	}
 }
 
 func logOrderbookPersistence(ctx context.Context, log interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
-}, processor realtimeProcessor, orderbook marketdata.Orderbook) {
+}, processor realtimeProcessor, orderbook marketdata.Orderbook) collectorPayloadDecision {
 	if processor == nil {
-		return
+		return collectorPayloadDecision{}
 	}
 
 	result, err := processor.ProcessOrderbook(ctx, orderbook)
 	if err != nil {
 		log.Warn("failed to persist orderbook", "error", err)
-		return
+		return collectorPayloadDecision{}
 	}
 	log.Info(
 		"orderbook persisted",
@@ -250,7 +254,14 @@ func logOrderbookPersistence(ctx context.Context, log interface {
 		"snapshots_skipped", result.SnapshotsSkipped,
 		"quality_events_inserted", result.QualityEventsInserted,
 		"deltas_applied", result.DeltasApplied,
+		"needs_snapshot_reset", result.NeedsSnapshotReset,
 	)
+	if result.NeedsSnapshotReset {
+		reason := "orderbook snapshot reset requested"
+		log.Warn("orderbook snapshot resync requested", "symbol", orderbook.Symbol, "type", orderbook.Type, "reason", reason)
+		return collectorPayloadDecision{Reconnect: true, Reason: reason}
+	}
+	return collectorPayloadDecision{}
 }
 
 func splitCSV(value string) []string {
