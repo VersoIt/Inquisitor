@@ -34,6 +34,7 @@ func TestComputeTrendFeaturesTableDriven(t *testing.T) {
 				MA200Window:     4,
 				EMA20Window:     2,
 				EMA50Window:     3,
+				ADXWindow:       2,
 				StructureWindow: 3,
 			},
 			assertions: func(t *testing.T, got []features.TrendFeatures) {
@@ -55,8 +56,38 @@ func TestComputeTrendFeaturesTableDriven(t *testing.T) {
 				assertDecimalApprox(t, final.EMA50, decimal.RequireFromString("16"), decimal.RequireFromString("0.000000000001"))
 				assertDecimal(t, final.MA50Slope, decimal.RequireFromString("2").Div(decimal.RequireFromString("14")))
 				assertDecimal(t, final.MA200Slope, decimal.RequireFromString("2").Div(decimal.RequireFromString("13")))
+				assertDecimal(t, final.ADX, decimal.RequireFromString("100"))
 				if final.HigherHighCount != 2 || final.HigherLowCount != 2 || final.LowerHighCount != 0 || final.LowerLowCount != 0 {
 					t.Fatalf("unexpected structure counts: %#v", final)
+				}
+			},
+		},
+		{
+			name: "flat market produces zero adx after warmup",
+			candles: []marketdata.Candle{
+				testCandle(now, "100", "100", "100", "100"),
+				testCandle(now.Add(time.Minute), "100", "100", "100", "100"),
+				testCandle(now.Add(2*time.Minute), "100", "100", "100", "100"),
+				testCandle(now.Add(3*time.Minute), "100", "100", "100", "100"),
+			},
+			cfg: features.TrendFeatureConfig{
+				MA20Window:      1,
+				MA50Window:      1,
+				MA200Window:     1,
+				EMA20Window:     1,
+				EMA50Window:     1,
+				ADXWindow:       2,
+				StructureWindow: 2,
+			},
+			assertions: func(t *testing.T, got []features.TrendFeatures) {
+				t.Helper()
+				final := got[len(got)-1]
+				if !final.Complete {
+					t.Fatalf("expected final flat-market row to be complete: %#v", final)
+				}
+				assertDecimal(t, final.ADX, decimal.Zero)
+				if final.HigherHighCount != 0 || final.HigherLowCount != 0 || final.LowerHighCount != 0 || final.LowerLowCount != 0 {
+					t.Fatalf("unexpected flat-market structure counts: %#v", final)
 				}
 			},
 		},
@@ -81,6 +112,7 @@ func TestComputeTrendFeaturesTableDriven(t *testing.T) {
 					"ema50_window",
 					"ma50_slope_window",
 					"ma200_slope_window",
+					"adx_window",
 					"structure_window",
 				})
 			},
@@ -124,6 +156,7 @@ func TestComputeTrendFeaturesRejectsInvalidConfigTableDriven(t *testing.T) {
 				MA200Window:     4,
 				EMA20Window:     2,
 				EMA50Window:     3,
+				ADXWindow:       2,
 				StructureWindow: 3,
 			},
 			code: "must_be_positive",
@@ -136,9 +169,23 @@ func TestComputeTrendFeaturesRejectsInvalidConfigTableDriven(t *testing.T) {
 				MA200Window:     4,
 				EMA20Window:     2,
 				EMA50Window:     3,
+				ADXWindow:       2,
 				StructureWindow: 1,
 			},
 			code: "must_be_greater_than_one",
+		},
+		{
+			name: "rejects non positive adx window",
+			cfg: features.TrendFeatureConfig{
+				MA20Window:      2,
+				MA50Window:      3,
+				MA200Window:     4,
+				EMA20Window:     2,
+				EMA50Window:     3,
+				ADXWindow:       -1,
+				StructureWindow: 3,
+			},
+			code: "must_be_positive",
 		},
 	}
 

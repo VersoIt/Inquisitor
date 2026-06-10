@@ -14,6 +14,7 @@ type TrendFeatureConfig struct {
 	MA200Window     int
 	EMA20Window     int
 	EMA50Window     int
+	ADXWindow       int
 	StructureWindow int
 }
 
@@ -34,6 +35,7 @@ type TrendFeatures struct {
 	EMA50      decimal.Decimal
 	MA50Slope  decimal.Decimal
 	MA200Slope decimal.Decimal
+	ADX        decimal.Decimal
 
 	HigherHighCount int
 	HigherLowCount  int
@@ -51,11 +53,12 @@ func DefaultTrendFeatureConfig() TrendFeatureConfig {
 		MA200Window:     200,
 		EMA20Window:     20,
 		EMA50Window:     50,
+		ADXWindow:       14,
 		StructureWindow: 20,
 	}
 }
 
-// ComputeTrendFeatures calculates moving-average and market-structure features for closed contiguous candles.
+// ComputeTrendFeatures calculates moving-average, ADX, and market-structure features for closed contiguous candles.
 func ComputeTrendFeatures(candles []marketdata.Candle, cfg TrendFeatureConfig) ([]TrendFeatures, error) {
 	cfg, err := normalizeTrendConfig(cfg)
 	if err != nil {
@@ -70,6 +73,7 @@ func ComputeTrendFeatures(candles []marketdata.Candle, cfg TrendFeatureConfig) (
 
 	ema20, ema20OK := exponentialMovingAverageSeries(candles, cfg.EMA20Window)
 	ema50, ema50OK := exponentialMovingAverageSeries(candles, cfg.EMA50Window)
+	adx, adxOK := averageDirectionalIndexSeries(candles, cfg.ADXWindow)
 
 	rows := make([]TrendFeatures, 0, len(candles))
 	for index, candle := range candles {
@@ -118,6 +122,11 @@ func ComputeTrendFeatures(candles []marketdata.Candle, cfg TrendFeatureConfig) (
 		} else {
 			missing = append(missing, "ma200_slope_window")
 		}
+		if adxOK[index] {
+			item.ADX = adx[index]
+		} else {
+			missing = append(missing, "adx_window")
+		}
 		if counts, ok := structureCounts(candles, index, cfg.StructureWindow); ok {
 			item.HigherHighCount = counts.higherHigh
 			item.HigherLowCount = counts.higherLow
@@ -152,6 +161,9 @@ func normalizeTrendConfig(cfg TrendFeatureConfig) (TrendFeatureConfig, error) {
 	if cfg.EMA50Window == 0 {
 		cfg.EMA50Window = defaults.EMA50Window
 	}
+	if cfg.ADXWindow == 0 {
+		cfg.ADXWindow = defaults.ADXWindow
+	}
 	if cfg.StructureWindow == 0 {
 		cfg.StructureWindow = defaults.StructureWindow
 	}
@@ -179,6 +191,9 @@ func normalizeTrendConfig(cfg TrendFeatureConfig) (TrendFeatureConfig, error) {
 	}
 	if cfg.EMA50Window <= 0 {
 		add("ema50_window")
+	}
+	if cfg.ADXWindow <= 0 {
+		add("adx_window")
 	}
 	if cfg.StructureWindow <= 1 {
 		problems = append(problems, Problem{
@@ -231,6 +246,98 @@ func movingAverageSlope(candles []marketdata.Candle, endIndex, window int) (deci
 		return decimal.Zero, false
 	}
 	return current.Sub(previous).Div(previous), true
+}
+
+func averageDirectionalIndexSeries(candles []marketdata.Candle, window int) ([]decimal.Decimal, []bool) {
+	values := make([]decimal.Decimal, len(candles))
+	ready := make([]bool, len(candles))
+	if len(candles) <= window {
+		return values, ready
+	}
+
+	smoothedTR := decimal.Zero
+	smoothedPositiveDM := decimal.Zero
+	smoothedNegativeDM := decimal.Zero
+	var dxValues []decimal.Decimal
+	var previousADX decimal.Decimal
+	windowDecimal := decimal.NewFromInt(int64(window))
+
+	for index := 1; index < len(candles); index++ {
+		tr, positiveDM, negativeDM := directionalMovement(candles[index-1], candles[index])
+		switch {
+		case index <= window:
+			smoothedTR = smoothedTR.Add(tr)
+			smoothedPositiveDM = smoothedPositiveDM.Add(positiveDM)
+			smoothedNegativeDM = smoothedNegativeDM.Add(negativeDM)
+			if index < window {
+				continue
+			}
+		default:
+			smoothedTR = smoothedTR.Sub(smoothedTR.Div(windowDecimal)).Add(tr)
+			smoothedPositiveDM = smoothedPositiveDM.Sub(smoothedPositiveDM.Div(windowDecimal)).Add(positiveDM)
+			smoothedNegativeDM = smoothedNegativeDM.Sub(smoothedNegativeDM.Div(windowDecimal)).Add(negativeDM)
+		}
+
+		dx := directionalIndex(smoothedTR, smoothedPositiveDM, smoothedNegativeDM)
+		if len(dxValues) < window {
+			dxValues = append(dxValues, dx)
+			if len(dxValues) == window {
+				previousADX = averageDecimals(dxValues)
+				values[index] = previousADX
+				ready[index] = true
+			}
+			continue
+		}
+
+		previousADX = previousADX.Mul(decimal.NewFromInt(int64(window - 1))).Add(dx).Div(windowDecimal)
+		values[index] = previousADX
+		ready[index] = true
+	}
+
+	return values, ready
+}
+
+func directionalMovement(previous, current marketdata.Candle) (trueRange, positiveDM, negativeDM decimal.Decimal) {
+	highLow := current.High.Sub(current.Low)
+	highPreviousClose := absDecimal(current.High.Sub(previous.Close))
+	lowPreviousClose := absDecimal(current.Low.Sub(previous.Close))
+	trueRange = maxDecimal(highLow, maxDecimal(highPreviousClose, lowPreviousClose))
+
+	upMove := current.High.Sub(previous.High)
+	downMove := previous.Low.Sub(current.Low)
+	if upMove.GreaterThan(downMove) && upMove.GreaterThan(decimal.Zero) {
+		positiveDM = upMove
+	}
+	if downMove.GreaterThan(upMove) && downMove.GreaterThan(decimal.Zero) {
+		negativeDM = downMove
+	}
+	return trueRange, positiveDM, negativeDM
+}
+
+func directionalIndex(smoothedTR, smoothedPositiveDM, smoothedNegativeDM decimal.Decimal) decimal.Decimal {
+	if smoothedTR.Equal(decimal.Zero) {
+		return decimal.Zero
+	}
+
+	hundred := decimal.NewFromInt(100)
+	positiveDI := smoothedPositiveDM.Div(smoothedTR).Mul(hundred)
+	negativeDI := smoothedNegativeDM.Div(smoothedTR).Mul(hundred)
+	sum := positiveDI.Add(negativeDI)
+	if sum.Equal(decimal.Zero) {
+		return decimal.Zero
+	}
+	return absDecimal(positiveDI.Sub(negativeDI)).Div(sum).Mul(hundred)
+}
+
+func averageDecimals(values []decimal.Decimal) decimal.Decimal {
+	if len(values) == 0 {
+		return decimal.Zero
+	}
+	total := decimal.Zero
+	for _, value := range values {
+		total = total.Add(value)
+	}
+	return total.Div(decimal.NewFromInt(int64(len(values))))
 }
 
 type marketStructureCounts struct {

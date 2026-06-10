@@ -32,10 +32,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Local orderbook reconstruction from Bybit snapshot/delta messages, including atomic invalid-delta rejection.
 - Collector persistence mode, bounded reconnects, heartbeat pings, read staleness timeouts, and orderbook resubscribe requests after invalid local book state.
 - Initial Phase 3 price feature engine for closed contiguous candles with return, rolling range, and candle-shape features.
-- Initial Phase 3 trend feature engine with MA/EMA, moving-average slope, and higher/lower high/low structure counts.
+- Initial Phase 3 trend feature engine with MA/EMA, ADX, moving-average slope, and higher/lower high/low structure counts.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slices should add ADX, volatility, volume, and microstructure feature coverage before introducing regimes or strategy logic.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slices should add volatility, volume, and microstructure feature coverage before introducing regimes or strategy logic.
 
 ## What This Is Not
 
