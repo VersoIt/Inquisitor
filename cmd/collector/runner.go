@@ -9,6 +9,7 @@ import (
 type collectorWebSocket interface {
 	Connect(context.Context) error
 	Subscribe(context.Context, string, []string) error
+	Ping(context.Context, string) error
 	Read(context.Context) ([]byte, error)
 	Close() error
 }
@@ -25,8 +26,10 @@ type collectorRunner struct {
 	reqID             string
 	messages          int
 	readTimeout       time.Duration
+	pingInterval      time.Duration
 	reconnectAttempts int
 	reconnectBackoff  time.Duration
+	now               func() time.Time
 	sleep             func(context.Context, time.Duration) error
 	handlePayload     func(context.Context, []byte)
 }
@@ -44,6 +47,9 @@ func (r collectorRunner) Run(ctx context.Context) (int, error) {
 	if r.readTimeout <= 0 {
 		return 0, fmt.Errorf("read timeout must be positive")
 	}
+	if r.pingInterval < 0 {
+		return 0, fmt.Errorf("ping interval must be greater than or equal to zero")
+	}
 	if r.reconnectAttempts < 0 {
 		return 0, fmt.Errorf("reconnect attempts must be greater than or equal to zero")
 	}
@@ -52,6 +58,9 @@ func (r collectorRunner) Run(ctx context.Context) (int, error) {
 	}
 	if r.sleep == nil {
 		r.sleep = sleepContext
+	}
+	if r.now == nil {
+		r.now = time.Now
 	}
 	if r.handlePayload == nil {
 		r.handlePayload = func(context.Context, []byte) {}
@@ -66,7 +75,24 @@ func (r collectorRunner) Run(ctx context.Context) (int, error) {
 
 	messagesRead := 0
 	reconnectsUsed := 0
+	lastPing := r.now()
 	for messagesRead < r.messages {
+		if r.pingInterval > 0 && !r.now().Before(lastPing.Add(r.pingInterval)) {
+			if err := r.client.Ping(ctx, r.reqID+"-ping"); err != nil {
+				if reconnectsUsed >= r.reconnectAttempts {
+					return messagesRead, fmt.Errorf("ping websocket after %d reconnect attempts: %w", reconnectsUsed, err)
+				}
+				reconnectsUsed++
+				if r.log != nil {
+					r.log.Warn("websocket ping failed; reconnecting", "error", err, "attempt", reconnectsUsed, "max_attempts", r.reconnectAttempts)
+				}
+				if err := r.reconnect(ctx, reconnectsUsed); err != nil {
+					return messagesRead, err
+				}
+			}
+			lastPing = r.now()
+		}
+
 		readCtx, cancelRead := context.WithTimeout(ctx, r.readTimeout)
 		payload, err := r.client.Read(readCtx)
 		cancelRead()
@@ -83,17 +109,25 @@ func (r collectorRunner) Run(ctx context.Context) (int, error) {
 		if r.log != nil {
 			r.log.Warn("websocket read failed; reconnecting", "error", err, "attempt", reconnectsUsed, "max_attempts", r.reconnectAttempts)
 		}
-		_ = r.client.Close()
-
-		if err := r.sleep(ctx, r.reconnectBackoff); err != nil {
-			return messagesRead, fmt.Errorf("wait before websocket reconnect: %w", err)
+		if err := r.reconnect(ctx, reconnectsUsed); err != nil {
+			return messagesRead, err
 		}
-		if err := r.connectAndSubscribe(ctx); err != nil {
-			return messagesRead, fmt.Errorf("reconnect websocket attempt %d: %w", reconnectsUsed, err)
-		}
+		lastPing = r.now()
 	}
 
 	return messagesRead, nil
+}
+
+func (r collectorRunner) reconnect(ctx context.Context, attempt int) error {
+	_ = r.client.Close()
+
+	if err := r.sleep(ctx, r.reconnectBackoff); err != nil {
+		return fmt.Errorf("wait before websocket reconnect: %w", err)
+	}
+	if err := r.connectAndSubscribe(ctx); err != nil {
+		return fmt.Errorf("reconnect websocket attempt %d: %w", attempt, err)
+	}
+	return nil
 }
 
 func (r collectorRunner) connectAndSubscribe(ctx context.Context) error {

@@ -181,6 +181,10 @@ func TestCollectorRunnerRejectsInvalidConfigTableDriven(t *testing.T) {
 			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, reqID: "test", reconnectBackoff: time.Millisecond},
 		},
 		{
+			name:   "negative ping interval",
+			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, reqID: "test", readTimeout: time.Millisecond, pingInterval: -time.Millisecond, reconnectBackoff: time.Millisecond},
+		},
+		{
 			name:   "negative reconnect attempts",
 			runner: collectorRunner{client: &fakeCollectorClient{}, messages: 1, reqID: "test", readTimeout: time.Millisecond, reconnectAttempts: -1, reconnectBackoff: time.Millisecond},
 		},
@@ -195,6 +199,111 @@ func TestCollectorRunnerRejectsInvalidConfigTableDriven(t *testing.T) {
 			if _, err := tt.runner.Run(context.Background()); err == nil {
 				t.Fatal("expected validation error")
 			}
+		})
+	}
+}
+
+func TestCollectorRunnerHeartbeatPingTableDriven(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+	pingErr := errors.New("ping failed")
+
+	tests := []struct {
+		name               string
+		client             *fakeCollectorClient
+		reconnectAttempts  int
+		nowValues          []time.Time
+		wantErr            bool
+		wantPingCalls      int
+		wantConnectCalls   int
+		wantSubscribeCalls int
+		wantCloseCalls     int
+		wantHandled        []string
+	}{
+		{
+			name: "sends heartbeat ping when interval elapsed",
+			client: &fakeCollectorClient{
+				reads: []fakeRead{{payload: []byte("message")}},
+			},
+			reconnectAttempts:  1,
+			nowValues:          []time.Time{start, start.Add(20 * time.Second), start.Add(20 * time.Second)},
+			wantPingCalls:      1,
+			wantConnectCalls:   1,
+			wantSubscribeCalls: 1,
+			wantHandled:        []string{"message"},
+		},
+		{
+			name: "reconnects after heartbeat ping failure",
+			client: &fakeCollectorClient{
+				pingErrs: []error{pingErr},
+				reads:    []fakeRead{{payload: []byte("after-ping-reconnect")}},
+			},
+			reconnectAttempts:  1,
+			nowValues:          []time.Time{start, start.Add(20 * time.Second), start.Add(20 * time.Second), start.Add(20 * time.Second)},
+			wantPingCalls:      1,
+			wantConnectCalls:   2,
+			wantSubscribeCalls: 2,
+			wantCloseCalls:     1,
+			wantHandled:        []string{"after-ping-reconnect"},
+		},
+		{
+			name: "fails when heartbeat ping exhausts reconnect attempts",
+			client: &fakeCollectorClient{
+				pingErrs: []error{pingErr},
+			},
+			reconnectAttempts:  0,
+			nowValues:          []time.Time{start, start.Add(20 * time.Second)},
+			wantErr:            true,
+			wantPingCalls:      1,
+			wantConnectCalls:   1,
+			wantSubscribeCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var handled []string
+			runner := collectorRunner{
+				client:            tt.client,
+				log:               &captureLogger{},
+				topics:            []string{"publicTrade.BTCUSDT"},
+				reqID:             "collector-test",
+				messages:          1,
+				readTimeout:       time.Second,
+				pingInterval:      20 * time.Second,
+				reconnectAttempts: tt.reconnectAttempts,
+				reconnectBackoff:  time.Millisecond,
+				now:               fakeNow(tt.nowValues...),
+				sleep:             func(context.Context, time.Duration) error { return nil },
+				handlePayload: func(_ context.Context, payload []byte) {
+					handled = append(handled, string(payload))
+				},
+			}
+
+			_, err := runner.Run(ctx)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+			} else if err != nil {
+				t.Fatalf("run collector: %v", err)
+			}
+			if tt.client.pingCalls != tt.wantPingCalls {
+				t.Fatalf("ping calls mismatch: got %d want %d", tt.client.pingCalls, tt.wantPingCalls)
+			}
+			if tt.client.connectCalls != tt.wantConnectCalls {
+				t.Fatalf("connect calls mismatch: got %d want %d", tt.client.connectCalls, tt.wantConnectCalls)
+			}
+			if tt.client.subscribeCalls != tt.wantSubscribeCalls {
+				t.Fatalf("subscribe calls mismatch: got %d want %d", tt.client.subscribeCalls, tt.wantSubscribeCalls)
+			}
+			if tt.client.closeCalls != tt.wantCloseCalls {
+				t.Fatalf("close calls mismatch: got %d want %d", tt.client.closeCalls, tt.wantCloseCalls)
+			}
+			if tt.wantPingCalls > 0 && tt.client.pingReqIDs[0] != "collector-test-ping" {
+				t.Fatalf("unexpected ping req id: %#v", tt.client.pingReqIDs)
+			}
+			assertStrings(t, handled, tt.wantHandled)
 		})
 	}
 }
@@ -225,14 +334,17 @@ func TestCollectorRunnerStopsWhenBackoffContextIsCanceled(t *testing.T) {
 type fakeCollectorClient struct {
 	connectErrs   []error
 	subscribeErrs []error
+	pingErrs      []error
 	reads         []fakeRead
 
 	connectCalls   int
 	subscribeCalls int
+	pingCalls      int
 	closeCalls     int
 	readCalls      int
 
 	readDeadlineCalls int
+	pingReqIDs        []string
 }
 
 type fakeRead struct {
@@ -252,6 +364,15 @@ func (c *fakeCollectorClient) Subscribe(context.Context, string, []string) error
 	c.subscribeCalls++
 	if c.subscribeCalls <= len(c.subscribeErrs) {
 		return c.subscribeErrs[c.subscribeCalls-1]
+	}
+	return nil
+}
+
+func (c *fakeCollectorClient) Ping(_ context.Context, reqID string) error {
+	c.pingCalls++
+	c.pingReqIDs = append(c.pingReqIDs, reqID)
+	if c.pingCalls <= len(c.pingErrs) {
+		return c.pingErrs[c.pingCalls-1]
 	}
 	return nil
 }
@@ -282,5 +403,20 @@ func assertStrings(t *testing.T, got, want []string) {
 		if got[i] != want[i] {
 			t.Fatalf("string[%d] mismatch: got %q want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func fakeNow(values ...time.Time) func() time.Time {
+	index := 0
+	return func() time.Time {
+		if len(values) == 0 {
+			return time.Now()
+		}
+		if index >= len(values) {
+			return values[len(values)-1]
+		}
+		value := values[index]
+		index++
+		return value
 	}
 }

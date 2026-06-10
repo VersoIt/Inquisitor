@@ -27,6 +27,7 @@ func main() {
 	timeout := flag.Duration("timeout", 30*time.Second, "collector smoke timeout")
 	persist := flag.Bool("persist", false, "persist supported realtime streams to PostgreSQL")
 	reconnectAttempts := flag.Int("reconnect-attempts", 3, "maximum websocket reconnect attempts after read failures")
+	pingInterval := flag.Duration("ping-interval", 20*time.Second, "websocket heartbeat ping interval; use 0 to disable")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -45,6 +46,10 @@ func main() {
 	}
 	if *reconnectAttempts < 0 {
 		log.Error("reconnect attempts must be greater than or equal to zero")
+		os.Exit(1)
+	}
+	if *pingInterval < 0 {
+		log.Error("ping interval must be greater than or equal to zero")
 		os.Exit(1)
 	}
 
@@ -114,6 +119,7 @@ func main() {
 		reqID:             "collector-smoke",
 		messages:          *messages,
 		readTimeout:       time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
+		pingInterval:      *pingInterval,
 		reconnectAttempts: *reconnectAttempts,
 		reconnectBackoff:  time.Duration(cfg.MarketData.ReconnectBackoffMs) * time.Millisecond,
 		handlePayload: func(ctx context.Context, payload []byte) {
