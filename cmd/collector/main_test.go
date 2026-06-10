@@ -78,7 +78,7 @@ func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
 		wantCandleCalls   int
 		wantOrderbookCall int
 		wantLog           string
-		wantIgnoredDeltas int
+		wantDeltasApplied int
 	}{
 		{
 			name: "persists klines",
@@ -113,7 +113,7 @@ func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
 			wantLog:           "orderbook persisted",
 		},
 		{
-			name: "passes orderbook deltas to processor as ignored",
+			name: "passes orderbook deltas to processor",
 			payload: fmt.Sprintf(
 				`{"topic":"orderbook.50.BTCUSDT","type":"delta","ts":%d,"cts":%d,"data":{"s":"BTCUSDT","b":[["99.5","0"]],"a":[],"u":101,"seq":201}}`,
 				dataTime.UnixMilli(),
@@ -121,7 +121,7 @@ func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
 			),
 			wantOrderbookCall: 1,
 			wantLog:           "orderbook persisted",
-			wantIgnoredDeltas: 1,
+			wantDeltasApplied: 1,
 		},
 	}
 
@@ -131,8 +131,8 @@ func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
 			orderbookResult := realtimeapp.ProcessOrderbookResult{}
 			if tt.wantOrderbookCall > 0 {
 				orderbookResult.Received = 1
-				orderbookResult.IgnoredDeltas = tt.wantIgnoredDeltas
-				if tt.wantIgnoredDeltas == 0 {
+				orderbookResult.DeltasApplied = tt.wantDeltasApplied
+				if tt.wantDeltasApplied == 0 {
 					orderbookResult.SnapshotsInserted = 1
 					orderbookResult.Valid = true
 				}
@@ -163,8 +163,12 @@ func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
 			if processor.orderbookCalls != tt.wantOrderbookCall {
 				t.Fatalf("orderbook calls mismatch: got %d want %d", processor.orderbookCalls, tt.wantOrderbookCall)
 			}
-			if got := log.find("info", tt.wantLog); got == nil {
+			gotLog := log.find("info", tt.wantLog)
+			if gotLog == nil {
 				t.Fatalf("expected log %q, got %#v", tt.wantLog, log.entries)
+			}
+			if tt.wantDeltasApplied > 0 && gotLog.arg("deltas_applied") != tt.wantDeltasApplied {
+				t.Fatalf("deltas_applied log mismatch: got %#v want %d", gotLog.arg("deltas_applied"), tt.wantDeltasApplied)
 			}
 		})
 	}

@@ -249,7 +249,7 @@ func logOrderbookPersistence(ctx context.Context, log interface {
 		"snapshots_inserted", result.SnapshotsInserted,
 		"snapshots_skipped", result.SnapshotsSkipped,
 		"quality_events_inserted", result.QualityEventsInserted,
-		"ignored_deltas", result.IgnoredDeltas,
+		"deltas_applied", result.DeltasApplied,
 	)
 }
 

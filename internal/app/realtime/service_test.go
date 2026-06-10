@@ -293,13 +293,14 @@ func TestServiceProcessOrderbookTableDriven(t *testing.T) {
 			wantQualityEvents: []string{marketdata.DataQualityEventOrderbookInvalid},
 		},
 		{
-			name:   "delta is explicitly ignored",
+			name:   "delta before snapshot emits quality event",
 			book:   testOrderbook(now.Add(-time.Second), "99.5", "100.5", "delta"),
 			policy: testQualityPolicy(),
 			want: apprealtime.ProcessOrderbookResult{
-				Received:      1,
-				IgnoredDeltas: 1,
+				Received:              1,
+				QualityEventsInserted: 1,
 			},
+			wantQualityEvents: []string{marketdata.DataQualityEventOrderbookInvalid},
 		},
 		{
 			name:    "unknown type is rejected",
@@ -348,6 +349,88 @@ func TestServiceProcessOrderbookTableDriven(t *testing.T) {
 			assertQualityEventTypes(t, qualityRepo.events, tt.wantQualityEvents)
 		})
 	}
+}
+
+func TestServiceProcessOrderbookAppliesDeltaAndPersistsReconstructedSnapshot(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
+	snapshotRepo := &fakeOrderbookSnapshotRepo{}
+	qualityRepo := &fakeQualityRepo{}
+	service := apprealtime.NewService(
+		&fakeCandleRepo{},
+		&fakePublicTradeRepo{},
+		snapshotRepo,
+		qualityRepo,
+		testServiceConfig(),
+		slog.Default(),
+		apprealtime.WithClock(clock.FixedClock{Time: now}),
+	)
+
+	snapshot := testOrderbook(now.Add(-2*time.Second), "99.5", "100.5", "snapshot")
+	snapshot.UpdateID = 10
+	snapshot.Sequence = 100
+	gotSnapshot, err := service.ProcessOrderbook(ctx, snapshot)
+	if err != nil {
+		t.Fatalf("process snapshot: %v", err)
+	}
+	wantSnapshot := apprealtime.ProcessOrderbookResult{
+		Received:          1,
+		SnapshotsInserted: 1,
+		Valid:             true,
+	}
+	if gotSnapshot != wantSnapshot {
+		t.Fatalf("snapshot result mismatch: got %#v want %#v", gotSnapshot, wantSnapshot)
+	}
+
+	delta := testOrderbookDelta(now.Add(-time.Second),
+		[]marketdata.OrderbookLevel{
+			{Price: decimal.RequireFromString("99.5"), Quantity: decimal.Zero},
+			{Price: decimal.RequireFromString("98.5"), Quantity: decimal.RequireFromString("5")},
+		},
+		[]marketdata.OrderbookLevel{
+			{Price: decimal.RequireFromString("101"), Quantity: decimal.RequireFromString("2")},
+			{Price: decimal.RequireFromString("100.25"), Quantity: decimal.RequireFromString("4")},
+		},
+	)
+	gotDelta, err := service.ProcessOrderbook(ctx, delta)
+	if err != nil {
+		t.Fatalf("process delta: %v", err)
+	}
+	wantDelta := apprealtime.ProcessOrderbookResult{
+		Received:          1,
+		DeltasApplied:     1,
+		SnapshotsInserted: 1,
+		Valid:             true,
+	}
+	if gotDelta != wantDelta {
+		t.Fatalf("delta result mismatch: got %#v want %#v", gotDelta, wantDelta)
+	}
+	if len(qualityRepo.events) != 0 {
+		t.Fatalf("unexpected quality events: %#v", qualityRepo.events)
+	}
+	if len(snapshotRepo.snapshots) != 2 {
+		t.Fatalf("snapshot count mismatch: got %d want 2", len(snapshotRepo.snapshots))
+	}
+
+	reconstructed := snapshotRepo.snapshots[1]
+	if reconstructed.UpdateID != 11 || reconstructed.Sequence != 101 {
+		t.Fatalf("reconstructed snapshot ids mismatch: got update=%d seq=%d", reconstructed.UpdateID, reconstructed.Sequence)
+	}
+	if !reconstructed.BestBid.Equal(decimal.RequireFromString("99")) {
+		t.Fatalf("best bid mismatch: got %s want 99", reconstructed.BestBid)
+	}
+	if !reconstructed.BestAsk.Equal(decimal.RequireFromString("100.25")) {
+		t.Fatalf("best ask mismatch: got %s want 100.25", reconstructed.BestAsk)
+	}
+	assertOrderbookLevels(t, reconstructed.Bids, []marketdata.OrderbookLevel{
+		{Price: decimal.RequireFromString("99"), Quantity: decimal.RequireFromString("1")},
+		{Price: decimal.RequireFromString("98.5"), Quantity: decimal.RequireFromString("5")},
+	})
+	assertOrderbookLevels(t, reconstructed.Asks, []marketdata.OrderbookLevel{
+		{Price: decimal.RequireFromString("100.25"), Quantity: decimal.RequireFromString("4")},
+		{Price: decimal.RequireFromString("100.5"), Quantity: decimal.RequireFromString("3")},
+		{Price: decimal.RequireFromString("101"), Quantity: decimal.RequireFromString("2")},
+	})
 }
 
 func TestServiceProcessOrderbookRespectsPersistencePolicy(t *testing.T) {
@@ -514,6 +597,21 @@ func testOrderbook(exchangeTime time.Time, bestBid, bestAsk, messageType string)
 	}
 }
 
+func testOrderbookDelta(exchangeTime time.Time, bids, asks []marketdata.OrderbookLevel) marketdata.Orderbook {
+	return marketdata.Orderbook{
+		Exchange:           "bybit",
+		Category:           "linear",
+		Symbol:             "BTCUSDT",
+		Type:               "delta",
+		Bids:               bids,
+		Asks:               asks,
+		UpdateID:           11,
+		Sequence:           101,
+		ExchangeTime:       exchangeTime,
+		MatchingEngineTime: exchangeTime.Add(-10 * time.Millisecond),
+	}
+}
+
 func testQualityPolicy() mdrealtime.QualityPolicy {
 	return mdrealtime.QualityPolicy{
 		MaxStaleness: 3 * time.Second,
@@ -533,6 +631,18 @@ func testServiceConfig() apprealtime.ServiceConfig {
 	return apprealtime.ServiceConfig{
 		QualityPolicy: testQualityPolicy(),
 		Persistence:   testPersistencePolicy(),
+	}
+}
+
+func assertOrderbookLevels(t *testing.T, got, want []marketdata.OrderbookLevel) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("level count mismatch: got %#v want %#v", got, want)
+	}
+	for i := range want {
+		if !got[i].Price.Equal(want[i].Price) || !got[i].Quantity.Equal(want[i].Quantity) {
+			t.Fatalf("level[%d] mismatch: got %s/%s want %s/%s", i, got[i].Price, got[i].Quantity, want[i].Price, want[i].Quantity)
+		}
 	}
 }
 
