@@ -31,9 +31,10 @@ This repository has completed the first Phase 1 market-data foundation slice and
 - Realtime application service that persists klines, public trades, and valid orderbook snapshots while recording quality events.
 - Local orderbook reconstruction from Bybit snapshot/delta messages, including atomic invalid-delta rejection.
 - Collector persistence mode, bounded reconnects, heartbeat pings, read staleness timeouts, and orderbook resubscribe requests after invalid local book state.
+- Initial Phase 3 price feature engine for closed contiguous candles with return, rolling range, and candle-shape features.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slices should expand feature coverage before introducing regimes or strategy logic.
 
 ## What This Is Not
 
