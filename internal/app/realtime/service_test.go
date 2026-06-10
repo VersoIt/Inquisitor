@@ -15,6 +15,112 @@ import (
 	mdrealtime "github.com/VersoIt/Inquisitor/internal/marketdata/realtime"
 )
 
+func TestServiceProcessCandlesTableDriven(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		candles   []marketdata.Candle
+		repoStats marketdata.WriteStats
+		repoErr   error
+		want      apprealtime.ProcessCandlesResult
+		wantErr   bool
+		wantCalls int
+	}{
+		{
+			name:      "empty batch is no-op",
+			want:      apprealtime.ProcessCandlesResult{},
+			wantCalls: 0,
+		},
+		{
+			name:      "stores candles and reports inserts and updates",
+			candles:   []marketdata.Candle{testCandle(now), testCandle(now.Add(time.Minute))},
+			repoStats: marketdata.WriteStats{Inserted: 1, Updated: 1},
+			want: apprealtime.ProcessCandlesResult{
+				Received: 2,
+				Inserted: 1,
+				Updated:  1,
+			},
+			wantCalls: 1,
+		},
+		{
+			name:      "propagates repository error",
+			candles:   []marketdata.Candle{testCandle(now)},
+			repoErr:   errors.New("db unavailable"),
+			wantErr:   true,
+			wantCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candleRepo := &fakeCandleRepo{stats: tt.repoStats, err: tt.repoErr}
+			service := apprealtime.NewService(
+				candleRepo,
+				&fakePublicTradeRepo{},
+				&fakeOrderbookSnapshotRepo{},
+				&fakeQualityRepo{},
+				testServiceConfig(),
+				slog.Default(),
+				apprealtime.WithClock(clock.FixedClock{Time: now}),
+			)
+
+			got, err := service.ProcessCandles(ctx, tt.candles)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("process candles: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("result mismatch: got %#v want %#v", got, tt.want)
+			}
+			if candleRepo.calls != tt.wantCalls {
+				t.Fatalf("repo calls mismatch: got %d want %d", candleRepo.calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+func TestServiceProcessCandlesRespectsPersistencePolicy(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
+	candleRepo := &fakeCandleRepo{stats: marketdata.WriteStats{Inserted: 1}}
+	service := apprealtime.NewService(
+		candleRepo,
+		&fakePublicTradeRepo{},
+		&fakeOrderbookSnapshotRepo{},
+		&fakeQualityRepo{},
+		apprealtime.ServiceConfig{
+			QualityPolicy: testQualityPolicy(),
+			Persistence: apprealtime.PersistencePolicy{
+				StoreCandles: false,
+			},
+		},
+		slog.Default(),
+		apprealtime.WithClock(clock.FixedClock{Time: now}),
+	)
+
+	got, err := service.ProcessCandles(ctx, []marketdata.Candle{testCandle(now)})
+	if err != nil {
+		t.Fatalf("process candles: %v", err)
+	}
+	want := apprealtime.ProcessCandlesResult{
+		Received: 1,
+		Skipped:  1,
+	}
+	if got != want {
+		t.Fatalf("result mismatch: got %#v want %#v", got, want)
+	}
+	if candleRepo.calls != 0 {
+		t.Fatalf("candle repository must not be called when candle storage is disabled, got %d calls", candleRepo.calls)
+	}
+}
+
 func TestServiceProcessTradesTableDriven(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
@@ -60,6 +166,7 @@ func TestServiceProcessTradesTableDriven(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tradeRepo := &fakePublicTradeRepo{stats: tt.repoStats, err: tt.repoErr}
 			service := apprealtime.NewService(
+				&fakeCandleRepo{},
 				tradeRepo,
 				&fakeOrderbookSnapshotRepo{},
 				&fakeQualityRepo{},
@@ -93,6 +200,7 @@ func TestServiceProcessTradesRespectsPersistencePolicy(t *testing.T) {
 	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
 	tradeRepo := &fakePublicTradeRepo{stats: marketdata.WriteStats{Inserted: 1}}
 	service := apprealtime.NewService(
+		&fakeCandleRepo{},
 		tradeRepo,
 		&fakeOrderbookSnapshotRepo{},
 		&fakeQualityRepo{},
@@ -206,6 +314,7 @@ func TestServiceProcessOrderbookTableDriven(t *testing.T) {
 			snapshotRepo := &fakeOrderbookSnapshotRepo{}
 			qualityRepo := &fakeQualityRepo{}
 			service := apprealtime.NewService(
+				&fakeCandleRepo{},
 				&fakePublicTradeRepo{},
 				snapshotRepo,
 				qualityRepo,
@@ -247,6 +356,7 @@ func TestServiceProcessOrderbookRespectsPersistencePolicy(t *testing.T) {
 	snapshotRepo := &fakeOrderbookSnapshotRepo{}
 	qualityRepo := &fakeQualityRepo{}
 	service := apprealtime.NewService(
+		&fakeCandleRepo{},
 		&fakePublicTradeRepo{},
 		snapshotRepo,
 		qualityRepo,
@@ -285,6 +395,23 @@ func TestServiceProcessOrderbookRespectsPersistencePolicy(t *testing.T) {
 		marketdata.DataQualityEventStaleData,
 		marketdata.DataQualityEventSpreadTooWide,
 	})
+}
+
+type fakeCandleRepo struct {
+	calls   int
+	stats   marketdata.WriteStats
+	err     error
+	candles []marketdata.Candle
+}
+
+func (r *fakeCandleRepo) UpsertCandles(_ context.Context, candles []marketdata.Candle) (marketdata.WriteStats, error) {
+	r.calls++
+	r.candles = append(r.candles, candles...)
+	return r.stats, r.err
+}
+
+func (r *fakeCandleRepo) ListCandles(context.Context, marketdata.CandleQuery) ([]marketdata.Candle, error) {
+	return nil, nil
 }
 
 type fakePublicTradeRepo struct {
@@ -330,6 +457,24 @@ func (r *fakeQualityRepo) CreateDataQualityEvents(_ context.Context, events []ma
 
 func (r *fakeQualityRepo) ListDataQualityEvents(context.Context, marketdata.DataQualityEventQuery) ([]marketdata.DataQualityEvent, error) {
 	return nil, nil
+}
+
+func testCandle(openTime time.Time) marketdata.Candle {
+	return marketdata.Candle{
+		Exchange:  "bybit",
+		Category:  "linear",
+		Symbol:    "BTCUSDT",
+		Interval:  "1",
+		OpenTime:  openTime,
+		CloseTime: openTime.Add(time.Minute),
+		Open:      decimal.RequireFromString("100"),
+		High:      decimal.RequireFromString("110"),
+		Low:       decimal.RequireFromString("90"),
+		Close:     decimal.RequireFromString("105"),
+		Volume:    decimal.RequireFromString("10"),
+		Turnover:  decimal.RequireFromString("1000"),
+		IsClosed:  true,
+	}
 }
 
 func testTrade(tradeID string, tradeTime time.Time) marketdata.PublicTrade {
@@ -378,6 +523,7 @@ func testQualityPolicy() mdrealtime.QualityPolicy {
 
 func testPersistencePolicy() apprealtime.PersistencePolicy {
 	return apprealtime.PersistencePolicy{
+		StoreCandles:            true,
 		StoreTrades:             true,
 		StoreOrderbookSnapshots: true,
 	}

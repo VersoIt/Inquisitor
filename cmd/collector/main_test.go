@@ -75,10 +75,23 @@ func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
 		name              string
 		payload           string
 		wantTradeCalls    int
+		wantCandleCalls   int
 		wantOrderbookCall int
 		wantLog           string
 		wantIgnoredDeltas int
 	}{
+		{
+			name: "persists klines",
+			payload: fmt.Sprintf(
+				`{"topic":"kline.1.BTCUSDT","type":"snapshot","ts":%d,"data":[{"start":%d,"end":%d,"interval":"1","open":"100","close":"105","high":"110","low":"90","volume":"10","turnover":"1000","confirm":true,"timestamp":%d}]}`,
+				dataTime.UnixMilli(),
+				dataTime.UnixMilli(),
+				dataTime.Add(time.Minute).UnixMilli(),
+				dataTime.UnixMilli(),
+			),
+			wantCandleCalls: 1,
+			wantLog:         "realtime candles persisted",
+		},
 		{
 			name: "persists public trades",
 			payload: fmt.Sprintf(
@@ -125,6 +138,10 @@ func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
 				}
 			}
 			processor := &captureProcessor{
+				candleResult: realtimeapp.ProcessCandlesResult{
+					Received: 1,
+					Inserted: 1,
+				},
 				tradeResult: realtimeapp.ProcessTradesResult{
 					Received: 1,
 					Inserted: 1,
@@ -139,6 +156,9 @@ func TestLogPayloadPersistsSupportedRealtimeMessages(t *testing.T) {
 
 			if processor.tradeCalls != tt.wantTradeCalls {
 				t.Fatalf("trade calls mismatch: got %d want %d", processor.tradeCalls, tt.wantTradeCalls)
+			}
+			if processor.candleCalls != tt.wantCandleCalls {
+				t.Fatalf("candle calls mismatch: got %d want %d", processor.candleCalls, tt.wantCandleCalls)
 			}
 			if processor.orderbookCalls != tt.wantOrderbookCall {
 				t.Fatalf("orderbook calls mismatch: got %d want %d", processor.orderbookCalls, tt.wantOrderbookCall)
@@ -197,10 +217,17 @@ func (e captureEntry) arg(key string) any {
 }
 
 type captureProcessor struct {
+	candleCalls     int
 	tradeCalls      int
 	orderbookCalls  int
+	candleResult    realtimeapp.ProcessCandlesResult
 	tradeResult     realtimeapp.ProcessTradesResult
 	orderbookResult realtimeapp.ProcessOrderbookResult
+}
+
+func (p *captureProcessor) ProcessCandles(context.Context, []marketdata.Candle) (realtimeapp.ProcessCandlesResult, error) {
+	p.candleCalls++
+	return p.candleResult, nil
 }
 
 func (p *captureProcessor) ProcessTrades(context.Context, []marketdata.PublicTrade) (realtimeapp.ProcessTradesResult, error) {

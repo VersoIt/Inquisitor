@@ -148,7 +148,7 @@ $env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?ss
 go run ./cmd/collector -config configs/config.example.yaml -symbols BTCUSDT -streams trade,orderbook -messages 5 -timeout 30s -persist
 ```
 
-The current persistence path stores public trades, full orderbook snapshots, and orderbook data quality events. Orderbook deltas are intentionally not stored as snapshots until local book-state reconstruction is implemented.
+The current persistence path stores realtime klines, public trades, full orderbook snapshots, and orderbook data quality events. Orderbook deltas are intentionally not stored as snapshots until local book-state reconstruction is implemented.
 Trade and orderbook snapshot storage are controlled by `market_data.store_trades` and `market_data.store_orderbook_snapshots`; quality events remain safety signals.
 
 ## Make Targets

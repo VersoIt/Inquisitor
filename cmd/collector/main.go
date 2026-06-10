@@ -86,6 +86,7 @@ func main() {
 		defer db.Close()
 
 		processor = realtimeapp.NewService(
+			postgres.NewCandleRepository(db),
 			postgres.NewPublicTradeRepository(db),
 			postgres.NewOrderbookSnapshotRepository(db),
 			postgres.NewDataQualityEventRepository(db),
@@ -95,6 +96,7 @@ func main() {
 					MaxSpreadBPS: decimal.NewFromInt(int64(cfg.Risk.MaxSpreadBps)),
 				},
 				Persistence: realtimeapp.PersistencePolicy{
+					StoreCandles:            true,
 					StoreTrades:             cfg.MarketData.StoreTrades,
 					StoreOrderbookSnapshots: cfg.MarketData.StoreOrderbookSnapshots,
 				},
@@ -139,6 +141,7 @@ func main() {
 }
 
 type realtimeProcessor interface {
+	ProcessCandles(context.Context, []marketdata.Candle) (realtimeapp.ProcessCandlesResult, error)
 	ProcessTrades(context.Context, []marketdata.PublicTrade) (realtimeapp.ProcessTradesResult, error)
 	ProcessOrderbook(context.Context, marketdata.Orderbook) (realtimeapp.ProcessOrderbookResult, error)
 }
@@ -158,6 +161,14 @@ func logPayload(ctx context.Context, log interface {
 			return
 		}
 		log.Info("kline message", "candles", len(candles))
+		if processor != nil {
+			result, err := processor.ProcessCandles(ctx, candles)
+			if err != nil {
+				log.Warn("failed to persist realtime candles", "error", err)
+				return
+			}
+			log.Info("realtime candles persisted", "received", result.Received, "inserted", result.Inserted, "updated", result.Updated, "skipped", result.Skipped)
+		}
 	case strings.Contains(raw, `"topic":"tickers.`):
 		ticker, err := parser.ParseTicker(payload)
 		if err != nil {

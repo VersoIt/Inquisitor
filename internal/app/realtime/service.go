@@ -12,6 +12,7 @@ import (
 )
 
 type Service struct {
+	candleRepo   marketdata.CandleRepository
 	tradeRepo    marketdata.PublicTradeRepository
 	snapshotRepo marketdata.OrderbookSnapshotRepository
 	qualityRepo  marketdata.DataQualityEventRepository
@@ -37,8 +38,16 @@ type ServiceConfig struct {
 }
 
 type PersistencePolicy struct {
+	StoreCandles            bool
 	StoreTrades             bool
 	StoreOrderbookSnapshots bool
+}
+
+type ProcessCandlesResult struct {
+	Received int
+	Inserted int
+	Updated  int
+	Skipped  int
 }
 
 type ProcessTradesResult struct {
@@ -60,6 +69,7 @@ type ProcessOrderbookResult struct {
 }
 
 func NewService(
+	candleRepo marketdata.CandleRepository,
 	tradeRepo marketdata.PublicTradeRepository,
 	snapshotRepo marketdata.OrderbookSnapshotRepository,
 	qualityRepo marketdata.DataQualityEventRepository,
@@ -71,6 +81,7 @@ func NewService(
 		log = slog.Default()
 	}
 	service := &Service{
+		candleRepo:   candleRepo,
 		tradeRepo:    tradeRepo,
 		snapshotRepo: snapshotRepo,
 		qualityRepo:  qualityRepo,
@@ -83,6 +94,36 @@ func NewService(
 		option(service)
 	}
 	return service
+}
+
+func (s *Service) ProcessCandles(ctx context.Context, candles []marketdata.Candle) (ProcessCandlesResult, error) {
+	if len(candles) == 0 {
+		return ProcessCandlesResult{}, nil
+	}
+	if !s.persistence.StoreCandles {
+		result := ProcessCandlesResult{
+			Received: len(candles),
+			Skipped:  len(candles),
+		}
+		s.log.Info("candle persistence skipped", "received", result.Received, "skipped", result.Skipped)
+		return result, nil
+	}
+	if s.candleRepo == nil {
+		return ProcessCandlesResult{}, fmt.Errorf("candle repository is required")
+	}
+
+	stats, err := s.candleRepo.UpsertCandles(ctx, candles)
+	if err != nil {
+		return ProcessCandlesResult{}, fmt.Errorf("store realtime candles: %w", err)
+	}
+
+	result := ProcessCandlesResult{
+		Received: len(candles),
+		Inserted: stats.Inserted,
+		Updated:  stats.Updated,
+	}
+	s.log.Info("processed realtime candles", "received", result.Received, "inserted", result.Inserted, "updated", result.Updated)
+	return result, nil
 }
 
 func (s *Service) ProcessTrades(ctx context.Context, trades []marketdata.PublicTrade) (ProcessTradesResult, error) {
