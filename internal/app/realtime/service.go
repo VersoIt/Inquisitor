@@ -16,6 +16,7 @@ type Service struct {
 	snapshotRepo marketdata.OrderbookSnapshotRepository
 	qualityRepo  marketdata.DataQualityEventRepository
 	policy       mdrealtime.QualityPolicy
+	persistence  PersistencePolicy
 	clock        clock.Clock
 	log          *slog.Logger
 }
@@ -32,18 +33,26 @@ func WithClock(clk clock.Clock) ServiceOption {
 
 type ServiceConfig struct {
 	QualityPolicy mdrealtime.QualityPolicy
+	Persistence   PersistencePolicy
+}
+
+type PersistencePolicy struct {
+	StoreTrades             bool
+	StoreOrderbookSnapshots bool
 }
 
 type ProcessTradesResult struct {
 	Received   int
 	Inserted   int
 	Duplicates int
+	Skipped    int
 }
 
 type ProcessOrderbookResult struct {
 	Received              int
 	IgnoredDeltas         int
 	SnapshotsInserted     int
+	SnapshotsSkipped      int
 	QualityEventsInserted int
 	Valid                 bool
 	Stale                 bool
@@ -66,6 +75,7 @@ func NewService(
 		snapshotRepo: snapshotRepo,
 		qualityRepo:  qualityRepo,
 		policy:       cfg.QualityPolicy,
+		persistence:  cfg.Persistence,
 		clock:        clock.SystemClock{},
 		log:          log,
 	}
@@ -78,6 +88,14 @@ func NewService(
 func (s *Service) ProcessTrades(ctx context.Context, trades []marketdata.PublicTrade) (ProcessTradesResult, error) {
 	if len(trades) == 0 {
 		return ProcessTradesResult{}, nil
+	}
+	if !s.persistence.StoreTrades {
+		result := ProcessTradesResult{
+			Received: len(trades),
+			Skipped:  len(trades),
+		}
+		s.log.Info("public trade persistence skipped", "received", result.Received, "skipped", result.Skipped)
+		return result, nil
 	}
 	if s.tradeRepo == nil {
 		return ProcessTradesResult{}, fmt.Errorf("public trade repository is required")
@@ -110,11 +128,8 @@ func (s *Service) ProcessOrderbook(ctx context.Context, book marketdata.Orderboo
 	if messageType != "snapshot" {
 		return ProcessOrderbookResult{}, fmt.Errorf("unsupported orderbook message type %q", book.Type)
 	}
-	if s.snapshotRepo == nil {
+	if s.persistence.StoreOrderbookSnapshots && s.snapshotRepo == nil {
 		return ProcessOrderbookResult{}, fmt.Errorf("orderbook snapshot repository is required")
-	}
-	if s.qualityRepo == nil {
-		return ProcessOrderbookResult{}, fmt.Errorf("data quality event repository is required")
 	}
 
 	observedAt := s.clock.Now()
@@ -130,6 +145,9 @@ func (s *Service) ProcessOrderbook(ctx context.Context, book marketdata.Orderboo
 		SpreadTooWide: assessment.SpreadTooWide,
 	}
 	if len(events) > 0 {
+		if s.qualityRepo == nil {
+			return ProcessOrderbookResult{}, fmt.Errorf("data quality event repository is required")
+		}
 		stats, err := s.qualityRepo.CreateDataQualityEvents(ctx, events)
 		if err != nil {
 			return ProcessOrderbookResult{}, fmt.Errorf("store orderbook quality events: %w", err)
@@ -138,6 +156,17 @@ func (s *Service) ProcessOrderbook(ctx context.Context, book marketdata.Orderboo
 	}
 	if !assessment.Valid {
 		s.log.Warn("invalid orderbook snapshot skipped", "symbol", book.Symbol, "quality_events", result.QualityEventsInserted)
+		return result, nil
+	}
+	if !s.persistence.StoreOrderbookSnapshots {
+		result.SnapshotsSkipped = 1
+		s.log.Info(
+			"orderbook snapshot persistence skipped",
+			"symbol", resultSymbol(book),
+			"quality_events", result.QualityEventsInserted,
+			"stale", result.Stale,
+			"spread_too_wide", result.SpreadTooWide,
+		)
 		return result, nil
 	}
 

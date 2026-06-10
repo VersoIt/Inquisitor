@@ -94,6 +94,10 @@ func main() {
 					MaxStaleness: time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
 					MaxSpreadBPS: decimal.NewFromInt(int64(cfg.Risk.MaxSpreadBps)),
 				},
+				Persistence: realtimeapp.PersistencePolicy{
+					StoreTrades:             cfg.MarketData.StoreTrades,
+					StoreOrderbookSnapshots: cfg.MarketData.StoreOrderbookSnapshots,
+				},
 			},
 			log,
 		)
@@ -174,7 +178,7 @@ func logPayload(ctx context.Context, log interface {
 				log.Warn("failed to persist public trades", "error", err)
 				return
 			}
-			log.Info("public trades persisted", "received", result.Received, "inserted", result.Inserted, "duplicates", result.Duplicates)
+			log.Info("public trades persisted", "received", result.Received, "inserted", result.Inserted, "duplicates", result.Duplicates, "skipped", result.Skipped)
 		}
 	case strings.Contains(raw, `"topic":"orderbook.`):
 		orderbook, err := parser.ParseOrderbook(payload)
@@ -232,6 +236,7 @@ func logOrderbookPersistence(ctx context.Context, log interface {
 		"orderbook persisted",
 		"received", result.Received,
 		"snapshots_inserted", result.SnapshotsInserted,
+		"snapshots_skipped", result.SnapshotsSkipped,
 		"quality_events_inserted", result.QualityEventsInserted,
 		"ignored_deltas", result.IgnoredDeltas,
 	)

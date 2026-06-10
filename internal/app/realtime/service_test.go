@@ -63,7 +63,7 @@ func TestServiceProcessTradesTableDriven(t *testing.T) {
 				tradeRepo,
 				&fakeOrderbookSnapshotRepo{},
 				&fakeQualityRepo{},
-				apprealtime.ServiceConfig{QualityPolicy: testQualityPolicy()},
+				testServiceConfig(),
 				slog.Default(),
 				apprealtime.WithClock(clock.FixedClock{Time: now}),
 			)
@@ -85,6 +85,40 @@ func TestServiceProcessTradesTableDriven(t *testing.T) {
 				t.Fatalf("repo calls mismatch: got %d want %d", tradeRepo.calls, tt.wantCalls)
 			}
 		})
+	}
+}
+
+func TestServiceProcessTradesRespectsPersistencePolicy(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
+	tradeRepo := &fakePublicTradeRepo{stats: marketdata.WriteStats{Inserted: 1}}
+	service := apprealtime.NewService(
+		tradeRepo,
+		&fakeOrderbookSnapshotRepo{},
+		&fakeQualityRepo{},
+		apprealtime.ServiceConfig{
+			QualityPolicy: testQualityPolicy(),
+			Persistence: apprealtime.PersistencePolicy{
+				StoreTrades: false,
+			},
+		},
+		slog.Default(),
+		apprealtime.WithClock(clock.FixedClock{Time: now}),
+	)
+
+	got, err := service.ProcessTrades(ctx, []marketdata.PublicTrade{testTrade("trade-1", now)})
+	if err != nil {
+		t.Fatalf("process trades: %v", err)
+	}
+	want := apprealtime.ProcessTradesResult{
+		Received: 1,
+		Skipped:  1,
+	}
+	if got != want {
+		t.Fatalf("result mismatch: got %#v want %#v", got, want)
+	}
+	if tradeRepo.calls != 0 {
+		t.Fatalf("trade repository must not be called when trade storage is disabled, got %d calls", tradeRepo.calls)
 	}
 }
 
@@ -175,7 +209,10 @@ func TestServiceProcessOrderbookTableDriven(t *testing.T) {
 				&fakePublicTradeRepo{},
 				snapshotRepo,
 				qualityRepo,
-				apprealtime.ServiceConfig{QualityPolicy: tt.policy},
+				apprealtime.ServiceConfig{
+					QualityPolicy: tt.policy,
+					Persistence:   testPersistencePolicy(),
+				},
 				slog.Default(),
 				apprealtime.WithClock(clock.FixedClock{Time: now}),
 			)
@@ -202,6 +239,52 @@ func TestServiceProcessOrderbookTableDriven(t *testing.T) {
 			assertQualityEventTypes(t, qualityRepo.events, tt.wantQualityEvents)
 		})
 	}
+}
+
+func TestServiceProcessOrderbookRespectsPersistencePolicy(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
+	snapshotRepo := &fakeOrderbookSnapshotRepo{}
+	qualityRepo := &fakeQualityRepo{}
+	service := apprealtime.NewService(
+		&fakePublicTradeRepo{},
+		snapshotRepo,
+		qualityRepo,
+		apprealtime.ServiceConfig{
+			QualityPolicy: mdrealtime.QualityPolicy{
+				MaxStaleness: time.Second,
+				MaxSpreadBPS: decimal.RequireFromString("50"),
+			},
+			Persistence: apprealtime.PersistencePolicy{
+				StoreOrderbookSnapshots: false,
+			},
+		},
+		slog.Default(),
+		apprealtime.WithClock(clock.FixedClock{Time: now}),
+	)
+
+	got, err := service.ProcessOrderbook(ctx, testOrderbook(now.Add(-5*time.Second), "99.5", "100.5", "snapshot"))
+	if err != nil {
+		t.Fatalf("process orderbook: %v", err)
+	}
+	want := apprealtime.ProcessOrderbookResult{
+		Received:              1,
+		SnapshotsSkipped:      1,
+		QualityEventsInserted: 2,
+		Valid:                 true,
+		Stale:                 true,
+		SpreadTooWide:         true,
+	}
+	if got != want {
+		t.Fatalf("result mismatch: got %#v want %#v", got, want)
+	}
+	if len(snapshotRepo.snapshots) != 0 {
+		t.Fatalf("snapshot repository must not be called when snapshot storage is disabled, got %#v", snapshotRepo.snapshots)
+	}
+	assertQualityEventTypes(t, qualityRepo.events, []string{
+		marketdata.DataQualityEventStaleData,
+		marketdata.DataQualityEventSpreadTooWide,
+	})
 }
 
 type fakePublicTradeRepo struct {
@@ -290,6 +373,20 @@ func testQualityPolicy() mdrealtime.QualityPolicy {
 	return mdrealtime.QualityPolicy{
 		MaxStaleness: 3 * time.Second,
 		MaxSpreadBPS: decimal.RequireFromString("150"),
+	}
+}
+
+func testPersistencePolicy() apprealtime.PersistencePolicy {
+	return apprealtime.PersistencePolicy{
+		StoreTrades:             true,
+		StoreOrderbookSnapshots: true,
+	}
+}
+
+func testServiceConfig() apprealtime.ServiceConfig {
+	return apprealtime.ServiceConfig{
+		QualityPolicy: testQualityPolicy(),
+		Persistence:   testPersistencePolicy(),
 	}
 }
 
