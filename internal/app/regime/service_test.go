@@ -108,6 +108,83 @@ func TestServiceClassifyEmptyFeatureSetFallsBackToNoTrade(t *testing.T) {
 	assertReason(t, got.Regime.Reasons, "feature_missing:microstructure")
 }
 
+func TestServiceClassifyAndStorePersistsCalculatedRegime(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	featureAssembler := &fakeFeatureAssembler{featureSet: testFeatureSet(now)}
+	repository := &fakeRegimeRepository{stats: domainregime.WriteStats{Inserted: 1}}
+	detector, err := domainregime.NewDetector(domainregime.DefaultConfig())
+	if err != nil {
+		t.Fatalf("new detector: %v", err)
+	}
+	service := appregime.NewService(
+		featureAssembler,
+		detector,
+		appregime.WithRepository(repository),
+		appregime.WithClock(clock.FixedClock{Time: now}),
+	)
+
+	got, err := service.ClassifyAndStore(ctx, appfeatures.ComputeRequest{
+		Exchange: "bybit",
+		Category: "linear",
+		Symbol:   "BTCUSDT",
+		Interval: "1",
+		Start:    now.Add(-10 * time.Minute),
+		End:      now,
+	})
+	if err != nil {
+		t.Fatalf("classify and store regime: %v", err)
+	}
+
+	if got.Stored.Inserted != 1 || got.Stored.Updated != 0 {
+		t.Fatalf("stored stats mismatch: got %#v", got.Stored)
+	}
+	if len(repository.states) != 1 {
+		t.Fatalf("expected one stored state, got %#v", repository.states)
+	}
+	if repository.states[0].Regime != domainregime.RegimeTrendUp {
+		t.Fatalf("stored regime mismatch: got %s want %s", repository.states[0].Regime, domainregime.RegimeTrendUp)
+	}
+}
+
+func TestServiceClassifyAndStoreRequiresRepository(t *testing.T) {
+	detector, err := domainregime.NewDetector(domainregime.DefaultConfig())
+	if err != nil {
+		t.Fatalf("new detector: %v", err)
+	}
+	service := appregime.NewService(&fakeFeatureAssembler{}, detector)
+
+	_, err = service.ClassifyAndStore(context.Background(), appfeatures.ComputeRequest{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "regime repository") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestServiceClassifyAndStorePropagatesRepositoryError(t *testing.T) {
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	detector, err := domainregime.NewDetector(domainregime.DefaultConfig())
+	if err != nil {
+		t.Fatalf("new detector: %v", err)
+	}
+	service := appregime.NewService(
+		&fakeFeatureAssembler{featureSet: testFeatureSet(now)},
+		detector,
+		appregime.WithRepository(&fakeRegimeRepository{err: errors.New("db unavailable")}),
+		appregime.WithClock(clock.FixedClock{Time: now}),
+	)
+
+	_, err = service.ClassifyAndStore(context.Background(), appfeatures.ComputeRequest{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "store regime state") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 type fakeFeatureAssembler struct {
 	featureSet appfeatures.FeatureSet
 	err        error
@@ -119,6 +196,21 @@ func (f *fakeFeatureAssembler) Compute(_ context.Context, req appfeatures.Comput
 	f.calls++
 	f.lastReq = req
 	return f.featureSet, f.err
+}
+
+type fakeRegimeRepository struct {
+	stats  domainregime.WriteStats
+	err    error
+	states []domainregime.State
+}
+
+func (r *fakeRegimeRepository) UpsertStates(_ context.Context, states []domainregime.State) (domainregime.WriteStats, error) {
+	r.states = append(r.states, states...)
+	return r.stats, r.err
+}
+
+func (r *fakeRegimeRepository) ListStates(context.Context, domainregime.StateQuery) ([]domainregime.State, error) {
+	return nil, nil
 }
 
 func testFeatureSet(now time.Time) appfeatures.FeatureSet {

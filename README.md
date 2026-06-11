@@ -39,9 +39,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 3 data-quality feature engine with freshness, missing-candle count, runtime health flags, and feature completeness score.
 - Initial Phase 3 application feature assembly service that loads candles, public trades, and orderbook snapshots, computes a complete feature set, and surfaces degraded data quality without making trading decisions.
 - Initial Phase 3 deterministic regime detector and application classification service with explicit NO_TRADE fallback for low confidence, bad data, incomplete features, and volatility spikes.
+- Initial Phase 3 regime state persistence with PostgreSQL migration, domain repository boundary, idempotent upsert adapter, and table-driven SQL tests.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slice should persist regime states, still without strategy execution logic.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slice should add a CLI/research command that computes and stores feature-derived regimes over persisted market data, still without strategy execution logic.
 
 ## What This Is Not
 
@@ -105,8 +106,9 @@ Initial migrations are in `migrations/`:
 - `002_market_data.sql`
 - `003_data_quality_events.sql`
 - `004_realtime_market_data.sql`
+- `005_regime_states.sql`
 
-They define the first market-data and realtime tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, and regime-state tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 

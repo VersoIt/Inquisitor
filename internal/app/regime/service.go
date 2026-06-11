@@ -18,6 +18,7 @@ type FeatureAssembler interface {
 type Service struct {
 	featureAssembler FeatureAssembler
 	detector         domainregime.Detector
+	repository       domainregime.Repository
 	clock            clock.Clock
 }
 
@@ -26,6 +27,7 @@ type ServiceOption func(*Service)
 type ClassificationResult struct {
 	Features appfeatures.FeatureSet
 	Regime   domainregime.State
+	Stored   domainregime.WriteStats
 }
 
 func WithClock(clk clock.Clock) ServiceOption {
@@ -33,6 +35,12 @@ func WithClock(clk clock.Clock) ServiceOption {
 		if clk != nil {
 			s.clock = clk
 		}
+	}
+}
+
+func WithRepository(repository domainregime.Repository) ServiceOption {
+	return func(s *Service) {
+		s.repository = repository
 	}
 }
 
@@ -49,6 +57,28 @@ func NewService(featureAssembler FeatureAssembler, detector domainregime.Detecto
 }
 
 func (s *Service) Classify(ctx context.Context, req appfeatures.ComputeRequest) (ClassificationResult, error) {
+	return s.classify(ctx, req)
+}
+
+func (s *Service) ClassifyAndStore(ctx context.Context, req appfeatures.ComputeRequest) (ClassificationResult, error) {
+	if s.repository == nil {
+		return ClassificationResult{}, fmt.Errorf("regime repository is required")
+	}
+
+	result, err := s.classify(ctx, req)
+	if err != nil {
+		return ClassificationResult{}, err
+	}
+
+	stats, err := s.repository.UpsertStates(ctx, []domainregime.State{result.Regime})
+	if err != nil {
+		return ClassificationResult{}, fmt.Errorf("store regime state: %w", err)
+	}
+	result.Stored = stats
+	return result, nil
+}
+
+func (s *Service) classify(ctx context.Context, req appfeatures.ComputeRequest) (ClassificationResult, error) {
 	if s.featureAssembler == nil {
 		return ClassificationResult{}, fmt.Errorf("feature assembler is required")
 	}
