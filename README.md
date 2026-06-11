@@ -35,9 +35,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 3 trend feature engine with MA/EMA, ADX, moving-average slope, and higher/lower high/low structure counts.
 - Initial Phase 3 volatility feature engine with ATR, rolling log-return volatility, volatility z-score, Bollinger bands, and compression score.
 - Initial Phase 3 volume feature engine with volume moving average, volume z-score, volume change, and turnover change.
+- Initial Phase 3 microstructure feature engine with spread, top-N orderbook liquidity, orderbook imbalance, and trade aggressor imbalance.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slice should add microstructure feature coverage before introducing regimes or strategy logic.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slice should add data-quality/completeness features before introducing regimes or strategy logic.
 
 ## What This Is Not
 
