@@ -7,10 +7,12 @@ START ?=
 END ?=
 LIMIT ?= 1000
 REGIME_LOOKBACK ?= 168h
+FEATURE_LOOKBACK ?= 168h
+TARGET_LIMIT ?= 1000
 TRADE_LIMIT ?= 1000
 SNAPSHOT_LIMIT ?= 100
 
-.PHONY: tidy test vet quality migrate backfill regime docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -31,6 +33,9 @@ backfill:
 
 regime:
 	$(GO) run ./cmd/regime -config $(CONFIG) -symbols $(SYMBOLS) -intervals $(INTERVALS) -candle-limit $(LIMIT) -trade-limit $(TRADE_LIMIT) -snapshot-limit $(SNAPSHOT_LIMIT) -lookback $(REGIME_LOOKBACK) $(if $(START),-start $(START),) $(if $(END),-end $(END),)
+
+regime-backfill:
+	$(GO) run ./cmd/regime -historical -config $(CONFIG) -symbols $(SYMBOLS) -intervals $(INTERVALS) -candle-limit $(LIMIT) -trade-limit $(TRADE_LIMIT) -snapshot-limit $(SNAPSHOT_LIMIT) -target-limit $(TARGET_LIMIT) -feature-lookback $(FEATURE_LOOKBACK) -lookback $(REGIME_LOOKBACK) $(if $(START),-start $(START),) $(if $(END),-end $(END),)
 
 docker-up:
 	docker compose up -d postgres

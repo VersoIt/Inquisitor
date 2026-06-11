@@ -39,7 +39,7 @@ func TestServiceComputeAssemblesFeatureSet(t *testing.T) {
 		tradeRepo,
 		snapshotRepo,
 		testServiceConfig(),
-		appfeatures.WithClock(clock.FixedClock{Time: observedAt}),
+		appfeatures.WithClock(clock.FixedClock{Time: observedAt.Add(time.Hour)}),
 	)
 
 	req := appfeatures.ComputeRequest{
@@ -49,6 +49,7 @@ func TestServiceComputeAssemblesFeatureSet(t *testing.T) {
 		Interval:      "1",
 		Start:         start,
 		End:           start.Add(10 * time.Minute),
+		ObservedAt:    observedAt,
 		CandleLimit:   500,
 		TradeLimit:    1000,
 		SnapshotLimit: 10,

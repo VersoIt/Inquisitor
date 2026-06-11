@@ -41,9 +41,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 3 deterministic regime detector and application classification service with explicit NO_TRADE fallback for low confidence, bad data, incomplete features, and volatility spikes.
 - Initial Phase 3 regime state persistence with PostgreSQL migration, domain repository boundary, idempotent upsert adapter, and table-driven SQL tests.
 - Initial Phase 3 regime classification command that computes and stores feature-derived regimes over persisted market data without strategy execution.
+- Initial Phase 3 historical regime backfill that walks candle close times with sliding feature windows and per-candle data-quality observation time.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slice should add a dedicated historical regime backfill that walks candle close times with sliding feature windows, still without strategy execution logic.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major slice should start Phase 4 hypothesis format and import validation, still without strategy execution logic.
 
 ## What This Is Not
 
@@ -175,6 +176,13 @@ go run ./cmd/regime -config configs/config.example.yaml -symbols BTCUSDT -interv
 
 For historical research windows, `-end` acts as the data-quality observation time so old candles are not marked stale merely because the command is run later.
 
+To backfill historical regime states without lookahead, pass `-historical`. The command walks target candle close times and, for each close time, computes features using only the prior `-feature-lookback` window:
+
+```powershell
+$env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?sslmode=disable"
+go run ./cmd/regime -historical -config configs/config.example.yaml -symbols BTCUSDT -intervals 1 -start 2026-06-01T00:00:00Z -end 2026-06-02T00:00:00Z -feature-lookback 168h
+```
+
 ## Make Targets
 
 Common targets are available for environments with `make`:
@@ -184,6 +192,7 @@ make quality
 make migrate
 make backfill SYMBOLS=BTCUSDT INTERVALS=1 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z
 make regime SYMBOLS=BTCUSDT INTERVALS=1 REGIME_LOOKBACK=168h
+make regime-backfill SYMBOLS=BTCUSDT INTERVALS=1 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z FEATURE_LOOKBACK=168h
 ```
 
 ## Architecture Boundary

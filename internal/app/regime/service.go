@@ -8,6 +8,7 @@ import (
 	appfeatures "github.com/VersoIt/Inquisitor/internal/app/features"
 	"github.com/VersoIt/Inquisitor/internal/clock"
 	domainfeatures "github.com/VersoIt/Inquisitor/internal/features"
+	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	domainregime "github.com/VersoIt/Inquisitor/internal/regime"
 )
 
@@ -15,10 +16,15 @@ type FeatureAssembler interface {
 	Compute(ctx context.Context, req appfeatures.ComputeRequest) (appfeatures.FeatureSet, error)
 }
 
+type CandleLister interface {
+	ListCandles(ctx context.Context, query marketdata.CandleQuery) ([]marketdata.Candle, error)
+}
+
 type Service struct {
 	featureAssembler FeatureAssembler
 	detector         domainregime.Detector
 	repository       domainregime.Repository
+	candleLister     CandleLister
 	clock            clock.Clock
 }
 
@@ -41,6 +47,12 @@ func WithClock(clk clock.Clock) ServiceOption {
 func WithRepository(repository domainregime.Repository) ServiceOption {
 	return func(s *Service) {
 		s.repository = repository
+	}
+}
+
+func WithCandleLister(candleLister CandleLister) ServiceOption {
+	return func(s *Service) {
+		s.candleLister = candleLister
 	}
 }
 

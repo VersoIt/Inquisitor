@@ -50,6 +50,7 @@ type ComputeRequest struct {
 	Interval      string
 	Start         time.Time
 	End           time.Time
+	ObservedAt    time.Time
 	CandleLimit   int
 	TradeLimit    int
 	SnapshotLimit int
@@ -171,9 +172,13 @@ func (s *Service) Compute(ctx context.Context, req ComputeRequest) (FeatureSet, 
 		completenessFromVolume(result.Volume),
 		completenessFromMicrostructure(result.Microstructure),
 	}
+	observedAt := s.clock.Now()
+	if !req.ObservedAt.IsZero() {
+		observedAt = req.ObservedAt.UTC()
+	}
 	result.DataQuality, err = domainfeatures.ComputeDataQualityFeatures(domainfeatures.DataQualityFeatureInput{
 		Candles:            candles,
-		ObservedAt:         s.clock.Now(),
+		ObservedAt:         observedAt,
 		WebSocketConnected: req.Runtime.WebSocketConnected,
 		OrderbookValid:     orderbookValid,
 		FeatureSets:        featureSets,

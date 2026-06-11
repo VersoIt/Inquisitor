@@ -27,6 +27,9 @@ func main() {
 	candleLimit := flag.Int("candle-limit", 1000, "maximum candles loaded per symbol/interval")
 	tradeLimit := flag.Int("trade-limit", 1000, "maximum public trades loaded around the latest orderbook snapshot")
 	snapshotLimit := flag.Int("snapshot-limit", 100, "maximum orderbook snapshots loaded per symbol")
+	historical := flag.Bool("historical", false, "walk candle close times and store historical regime states")
+	featureLookback := flag.Duration("feature-lookback", 168*time.Hour, "feature window before each target close time in historical mode")
+	targetLimit := flag.Int("target-limit", 1000, "maximum target candles loaded per symbol/interval in historical mode")
 	webSocketConnected := flag.Bool("websocket-connected", true, "runtime health flag passed into data-quality features")
 	orderbookValid := flag.Bool("orderbook-valid", true, "runtime orderbook health flag passed into data-quality features")
 	flag.Parse()
@@ -102,7 +105,50 @@ func main() {
 		featureService,
 		detector,
 		appregime.WithRepository(postgres.NewRegimeStateRepository(db)),
+		appregime.WithCandleLister(postgres.NewCandleRepository(db)),
 	)
+	if *historical {
+		result, err := service.Backfill(ctx, appregime.BackfillRequest{
+			Exchange:        cfg.Exchange.Primary,
+			Category:        cfg.Exchange.Category,
+			Symbols:         symbols,
+			Intervals:       intervals,
+			Start:           start.UTC(),
+			End:             end.UTC(),
+			FeatureLookback: *featureLookback,
+			TargetLimit:     *targetLimit,
+			CandleLimit:     *candleLimit,
+			TradeLimit:      *tradeLimit,
+			SnapshotLimit:   *snapshotLimit,
+			Runtime: appfeatures.RuntimeState{
+				WebSocketConnected: *webSocketConnected,
+				OrderbookValid:     *orderbookValid,
+			},
+		})
+		if err != nil {
+			log.Error("historical regime backfill failed", "error", err, "partial_result", result)
+			os.Exit(1)
+		}
+
+		log.Info(
+			"historical regime backfill completed",
+			"symbols", result.Symbols,
+			"intervals", result.Intervals,
+			"pairs", result.Pairs,
+			"target_candles", result.TargetCandles,
+			"attempts", result.Attempts,
+			"classified", result.Classified,
+			"stored", result.Stored,
+			"inserted", result.Inserted,
+			"updated", result.Updated,
+			"no_trade", result.NoTrade,
+			"start", start.UTC().Format(time.RFC3339),
+			"end", end.UTC().Format(time.RFC3339),
+			"feature_lookback", featureLookback.String(),
+		)
+		return
+	}
+
 	result, err := service.Run(ctx, appregime.RunRequest{
 		Exchange:      cfg.Exchange.Primary,
 		Category:      cfg.Exchange.Category,
