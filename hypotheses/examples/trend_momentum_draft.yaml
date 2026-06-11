@@ -1,0 +1,49 @@
+name: trend_momentum_draft
+version: "0.1.0"
+status: DRAFT
+description: Draft research hypothesis for directional momentum with regime gating.
+thesis: Strong directional markets may persist after feature confirmation.
+market:
+  exchange: bybit
+  category: linear
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  intervals:
+    - "1"
+    - "5"
+regime:
+  allowed:
+    - TREND_UP
+    - TREND_DOWN
+  blocked:
+    - NO_TRADE
+    - CHAOS
+direction: BOTH
+signals:
+  - name: ma_alignment
+    description: Fast trend average should stay on the directional side of slow average.
+    feature: trend.ma20
+    operator: ">"
+    value: trend.ma50
+  - name: adx_filter
+    description: Trend strength must be high enough before research evaluation.
+    feature: trend.adx
+    operator: ">="
+    value: 25
+risk:
+  max_risk_per_trade_pct: 0.25
+  min_confidence: 70
+  require_stop_loss: true
+validation:
+  min_trades: 250
+  require_out_of_sample: true
+  require_walk_forward: true
+  require_regime_analysis: true
+costs:
+  include_fees: true
+  include_spread: true
+  include_slippage: true
+tags:
+  - phase4
+  - draft

@@ -42,9 +42,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 3 regime state persistence with PostgreSQL migration, domain repository boundary, idempotent upsert adapter, and table-driven SQL tests.
 - Initial Phase 3 regime classification command that computes and stores feature-derived regimes over persisted market data without strategy execution.
 - Initial Phase 3 historical regime backfill that walks candle close times with sliding feature windows and per-candle data-quality observation time.
+- Initial Phase 4 hypothesis YAML format with strict import validation, explicit research gates, regime gating, conservative risk/cost requirements, CLI validation command, and table-driven tests.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major slice should start Phase 4 hypothesis format and import validation, still without strategy execution logic.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add hypothesis persistence and research-run orchestration, still without strategy execution logic.
 
 ## What This Is Not
 
@@ -165,6 +166,24 @@ go run ./cmd/collector -config configs/config.example.yaml -symbols BTCUSDT -str
 The current persistence path stores realtime klines, public trades, full orderbook snapshots, and orderbook data quality events. Orderbook deltas are applied to the latest local orderbook snapshot and persisted as reconstructed full snapshots; deltas received before a snapshot or deltas that would make the local book invalid are recorded as quality events.
 Trade and orderbook snapshot storage are controlled by `market_data.store_trades` and `market_data.store_orderbook_snapshots`; quality events remain safety signals.
 
+## Hypothesis Validation
+
+Hypothesis drafts live as strict YAML research specs. Import validation currently accepts only `status: DRAFT`, rejects unknown YAML fields, requires explicit regime gates, blocks `NO_TRADE`, and enforces conservative research gates before any future strategy execution work can exist.
+
+Validate the example draft:
+
+```powershell
+go run ./cmd/hypothesis -file hypotheses/examples/trend_momentum_draft.yaml
+```
+
+Or use the helper target:
+
+```powershell
+make hypothesis-validate HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yaml
+```
+
+This command does not connect to PostgreSQL, does not run a strategy, and cannot place orders.
+
 ## Regime Classification
 
 The regime command reads persisted candles, public trades, and orderbook snapshots, computes the latest feature set in the requested window, classifies the market regime, and upserts one `regime_states` row per symbol/interval. It does not run strategies and cannot place orders.
@@ -193,6 +212,7 @@ make migrate
 make backfill SYMBOLS=BTCUSDT INTERVALS=1 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z
 make regime SYMBOLS=BTCUSDT INTERVALS=1 REGIME_LOOKBACK=168h
 make regime-backfill SYMBOLS=BTCUSDT INTERVALS=1 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z FEATURE_LOOKBACK=168h
+make hypothesis-validate HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yaml
 ```
 
 ## Architecture Boundary
