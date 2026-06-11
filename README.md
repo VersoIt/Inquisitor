@@ -40,9 +40,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 3 application feature assembly service that loads candles, public trades, and orderbook snapshots, computes a complete feature set, and surfaces degraded data quality without making trading decisions.
 - Initial Phase 3 deterministic regime detector and application classification service with explicit NO_TRADE fallback for low confidence, bad data, incomplete features, and volatility spikes.
 - Initial Phase 3 regime state persistence with PostgreSQL migration, domain repository boundary, idempotent upsert adapter, and table-driven SQL tests.
+- Initial Phase 3 regime classification command that computes and stores feature-derived regimes over persisted market data without strategy execution.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slice should add a CLI/research command that computes and stores feature-derived regimes over persisted market data, still without strategy execution logic.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next Phase 3 slice should add a dedicated historical regime backfill that walks candle close times with sliding feature windows, still without strategy execution logic.
 
 ## What This Is Not
 
@@ -163,6 +164,17 @@ go run ./cmd/collector -config configs/config.example.yaml -symbols BTCUSDT -str
 The current persistence path stores realtime klines, public trades, full orderbook snapshots, and orderbook data quality events. Orderbook deltas are applied to the latest local orderbook snapshot and persisted as reconstructed full snapshots; deltas received before a snapshot or deltas that would make the local book invalid are recorded as quality events.
 Trade and orderbook snapshot storage are controlled by `market_data.store_trades` and `market_data.store_orderbook_snapshots`; quality events remain safety signals.
 
+## Regime Classification
+
+The regime command reads persisted candles, public trades, and orderbook snapshots, computes the latest feature set in the requested window, classifies the market regime, and upserts one `regime_states` row per symbol/interval. It does not run strategies and cannot place orders.
+
+```powershell
+$env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?sslmode=disable"
+go run ./cmd/regime -config configs/config.example.yaml -symbols BTCUSDT -intervals 1 -lookback 168h
+```
+
+For historical research windows, `-end` acts as the data-quality observation time so old candles are not marked stale merely because the command is run later.
+
 ## Make Targets
 
 Common targets are available for environments with `make`:
@@ -171,6 +183,7 @@ Common targets are available for environments with `make`:
 make quality
 make migrate
 make backfill SYMBOLS=BTCUSDT INTERVALS=1 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z
+make regime SYMBOLS=BTCUSDT INTERVALS=1 REGIME_LOOKBACK=168h
 ```
 
 ## Architecture Boundary
