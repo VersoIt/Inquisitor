@@ -271,6 +271,21 @@ func (c Config) Validate() error {
 	if c.Risk.MaxSpreadBps < 0 {
 		problems = append(problems, "risk.max_spread_bps must be greater than or equal to zero")
 	}
+	if c.Regime.MinConfidence < 0 || c.Regime.MinConfidence > 100 {
+		problems = append(problems, "regime.min_confidence must be between 0 and 100")
+	}
+	if c.Regime.ADXTrendThreshold <= 0 {
+		problems = append(problems, "regime.adx_trend_threshold must be positive")
+	}
+	if c.Regime.ADXRangeThreshold <= 0 {
+		problems = append(problems, "regime.adx_range_threshold must be positive")
+	}
+	if c.Regime.ADXTrendThreshold <= c.Regime.ADXRangeThreshold {
+		problems = append(problems, "regime.adx_trend_threshold must be greater than regime.adx_range_threshold")
+	}
+	if c.Regime.ATRSpikeMultiplier <= 0 {
+		problems = append(problems, "regime.atr_spike_multiplier must be positive")
+	}
 
 	if len(problems) > 0 {
 		return fmt.Errorf("config validation failed: %s", strings.Join(problems, "; "))

@@ -135,6 +135,21 @@ func TestValidateTableDriven(t *testing.T) {
 			},
 			wantErrSub: "risk.max_spread_bps must be greater than or equal to zero",
 		},
+		{
+			name: "rejects regime confidence outside percent range",
+			mutate: func(cfg *config.Config) {
+				cfg.Regime.MinConfidence = 101
+			},
+			wantErrSub: "regime.min_confidence must be between 0 and 100",
+		},
+		{
+			name: "rejects inverted regime ADX thresholds",
+			mutate: func(cfg *config.Config) {
+				cfg.Regime.ADXTrendThreshold = 18
+				cfg.Regime.ADXRangeThreshold = 25
+			},
+			wantErrSub: "regime.adx_trend_threshold must be greater",
+		},
 	}
 
 	for _, tt := range tests {
@@ -201,6 +216,12 @@ func validConfig() config.Config {
 			MaxWeeklyLossPct:    3,
 			MaxTotalDrawdownPct: 8,
 			MinConfidence:       70,
+		},
+		Regime: config.RegimeConfig{
+			MinConfidence:      70,
+			ADXTrendThreshold:  25,
+			ADXRangeThreshold:  18,
+			ATRSpikeMultiplier: 2.5,
 		},
 	}
 }
