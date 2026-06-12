@@ -33,5 +33,5 @@ func ParseYAML(raw []byte) (Hypothesis, error) {
 	if err := hypothesis.Validate(); err != nil {
 		return Hypothesis{}, err
 	}
-	return hypothesis, nil
+	return canonicalize(hypothesis), nil
 }

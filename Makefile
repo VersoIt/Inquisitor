@@ -13,7 +13,7 @@ TRADE_LIMIT ?= 1000
 SNAPSHOT_LIMIT ?= 100
 HYPOTHESIS ?= hypotheses/examples/trend_momentum_draft.yaml
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -40,6 +40,9 @@ regime-backfill:
 
 hypothesis-validate:
 	$(GO) run ./cmd/hypothesis -file $(HYPOTHESIS)
+
+hypothesis-import:
+	$(GO) run ./cmd/hypothesis -config $(CONFIG) -file $(HYPOTHESIS) -store
 
 docker-up:
 	docker compose up -d postgres

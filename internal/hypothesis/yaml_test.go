@@ -25,6 +25,31 @@ func TestParseYAMLAcceptsValidDraft(t *testing.T) {
 	}
 }
 
+func TestParseYAMLReturnsCanonicalDraft(t *testing.T) {
+	raw := strings.Replace(validHypothesisYAML(), "status: DRAFT", "status: draft", 1)
+	raw = strings.Replace(raw, "direction: BOTH", "direction: both", 1)
+	raw = strings.Replace(raw, "  exchange: bybit", "  exchange: BYBIT", 1)
+	raw = strings.Replace(raw, "  category: linear", "  category: LINEAR", 1)
+	raw = strings.Replace(raw, "    - TREND_UP", "    - trend_up", 1)
+
+	got, err := hypothesis.ParseYAML([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse canonical hypothesis: %v", err)
+	}
+	if got.Status != hypothesis.StatusDraft {
+		t.Fatalf("status was not canonicalized: %q", got.Status)
+	}
+	if got.Direction != hypothesis.DirectionBoth {
+		t.Fatalf("direction was not canonicalized: %q", got.Direction)
+	}
+	if got.Market.Exchange != "bybit" || got.Market.Category != "linear" {
+		t.Fatalf("market was not canonicalized: %#v", got.Market)
+	}
+	if got.Regime.Allowed[0] != "TREND_UP" {
+		t.Fatalf("regime was not canonicalized: %#v", got.Regime.Allowed)
+	}
+}
+
 func TestParseYAMLRejectsInvalidDraftsTableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
