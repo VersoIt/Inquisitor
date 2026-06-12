@@ -113,6 +113,98 @@ func TestResearchRunRepositorySQLMockTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records result and final run status atomically",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				run := testResearchRun(t, plannedAt)
+				result := testResearchResult(t, run.RunID, plannedAt.Add(time.Hour))
+				run.Status = result.FinalStatus
+
+				mock.ExpectBegin()
+				mock.ExpectExec("UPDATE research_runs").
+					WithArgs(run.RunID, string(run.Status)).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectPrepare("INSERT INTO research_results")
+				mock.ExpectPrepare("UPDATE research_results")
+				mock.ExpectExec("INSERT INTO research_results").
+					WithArgs(researchResultSQLArgs(t, result)...).
+					WillReturnResult(sqlmock.NewResult(1, 1))
+				mock.ExpectCommit()
+
+				stats, err := postgres.NewResearchRunRepository(db).RecordResult(ctx, run, result)
+				if err != nil {
+					t.Fatalf("record research result: %v", err)
+				}
+				if stats.RunUpdated != 1 || stats.ResultInserted != 1 || stats.ResultUpdated != 0 {
+					t.Fatalf("stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "updates existing result on conflict",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				run := testResearchRun(t, plannedAt)
+				result := testResearchResult(t, run.RunID, plannedAt.Add(time.Hour))
+				run.Status = result.FinalStatus
+
+				mock.ExpectBegin()
+				mock.ExpectExec("UPDATE research_runs").
+					WithArgs(run.RunID, string(run.Status)).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectPrepare("INSERT INTO research_results")
+				mock.ExpectPrepare("UPDATE research_results")
+				mock.ExpectExec("INSERT INTO research_results").
+					WithArgs(researchResultSQLArgs(t, result)...).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectExec("UPDATE research_results").
+					WithArgs(researchResultSQLArgs(t, result)...).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectCommit()
+
+				stats, err := postgres.NewResearchRunRepository(db).RecordResult(ctx, run, result)
+				if err != nil {
+					t.Fatalf("record existing research result: %v", err)
+				}
+				if stats.RunUpdated != 1 || stats.ResultInserted != 0 || stats.ResultUpdated != 1 {
+					t.Fatalf("stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "list scans research results",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				result := testResearchResult(t, "research_sqlmock_0001", plannedAt.Add(time.Hour))
+				rows := sqlmock.NewRows([]string{
+					"run_id", "final_status", "outcome", "summary", "metrics_json", "reasons_json", "recorded_at",
+				}).AddRow(
+					result.RunID,
+					string(result.FinalStatus),
+					string(result.Outcome),
+					result.Summary,
+					mustMetricsJSON(t, result.Metrics),
+					mustStringSliceJSON(t, result.Reasons),
+					result.RecordedAt,
+				)
+				mock.ExpectQuery("SELECT run_id, final_status").
+					WithArgs(result.RunID, string(result.FinalStatus), string(result.Outcome), nil, nil, 1000).
+					WillReturnRows(rows)
+
+				got, err := postgres.NewResearchRunRepository(db).ListResults(ctx, domainresearch.ResultQuery{
+					RunID:       result.RunID,
+					FinalStatus: result.FinalStatus,
+					Outcome:     result.Outcome,
+				})
+				if err != nil {
+					t.Fatalf("list research results: %v", err)
+				}
+				if len(got) != 1 {
+					t.Fatalf("expected one result, got %d", len(got))
+				}
+				if got[0].Outcome != domainresearch.OutcomeNotExecuted || got[0].Reasons[0] != "scaffold_only" {
+					t.Fatalf("result did not round-trip: %#v", got[0])
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -148,6 +240,26 @@ func TestResearchRunRepositoryRejectsInvalidInputsBeforeSQLTableDriven(t *testin
 			run: func(db *sql.DB) error {
 				_, err := postgres.NewResearchRunRepository(db).ListRuns(ctx, domainresearch.Query{
 					Status: "NOPE",
+				})
+				return err
+			},
+		},
+		{
+			name: "record rejects invalid result before transaction",
+			run: func(db *sql.DB) error {
+				run := testResearchRun(t, plannedAt)
+				result := testResearchResult(t, run.RunID, plannedAt.Add(time.Hour))
+				result.FinalStatus = domainresearch.StatusCompleted
+				run.Status = result.FinalStatus
+				_, err := postgres.NewResearchRunRepository(db).RecordResult(ctx, run, result)
+				return err
+			},
+		},
+		{
+			name: "list results rejects invalid query before SQL",
+			run: func(db *sql.DB) error {
+				_, err := postgres.NewResearchRunRepository(db).ListResults(ctx, domainresearch.ResultQuery{
+					Outcome: "NOPE",
 				})
 				return err
 			},
@@ -203,6 +315,45 @@ func researchRunSQLArgs(t *testing.T, run domainresearch.Run) []driver.Value {
 		mustStringSliceJSON(t, run.Intervals),
 		mustStringSliceJSON(t, run.Notes),
 	}
+}
+
+func testResearchResult(t *testing.T, runID string, recordedAt time.Time) domainresearch.Result {
+	t.Helper()
+
+	result, err := domainresearch.NewResult(domainresearch.ResultInput{
+		RunID:       runID,
+		FinalStatus: domainresearch.StatusFailed,
+		Outcome:     domainresearch.OutcomeNotExecuted,
+		Summary:     "Strategy executor is intentionally not implemented yet.",
+		Reasons:     []string{"scaffold_only"},
+		RecordedAt:  recordedAt,
+	})
+	if err != nil {
+		t.Fatalf("new research result: %v", err)
+	}
+	return result
+}
+
+func researchResultSQLArgs(t *testing.T, result domainresearch.Result) []driver.Value {
+	t.Helper()
+	return []driver.Value{
+		result.RunID,
+		string(result.FinalStatus),
+		string(result.Outcome),
+		result.Summary,
+		mustMetricsJSON(t, result.Metrics),
+		mustStringSliceJSON(t, result.Reasons),
+		result.RecordedAt.UTC(),
+	}
+}
+
+func mustMetricsJSON(t *testing.T, metrics domainresearch.Metrics) string {
+	t.Helper()
+	raw, err := json.Marshal(metrics)
+	if err != nil {
+		t.Fatalf("marshal research metrics: %v", err)
+	}
+	return string(raw)
 }
 
 func mustStringSliceJSON(t *testing.T, values []string) string {

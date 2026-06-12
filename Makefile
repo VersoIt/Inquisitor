@@ -14,8 +14,10 @@ SNAPSHOT_LIMIT ?= 100
 HYPOTHESIS ?= hypotheses/examples/trend_momentum_draft.yaml
 HYPOTHESIS_NAME ?= trend_momentum_draft
 HYPOTHESIS_VERSION ?= 0.1.0
+RUN_ID ?=
+RESULT_SUMMARY ?= Strategy executor is intentionally not implemented yet.
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-record-not-executed docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -48,6 +50,9 @@ hypothesis-import:
 
 research-schedule:
 	$(GO) run ./cmd/research -config $(CONFIG) -hypothesis-name $(HYPOTHESIS_NAME) -hypothesis-version $(HYPOTHESIS_VERSION) $(if $(START),-start $(START),) $(if $(END),-end $(END),)
+
+research-record-not-executed:
+	$(GO) run ./cmd/research-result -config $(CONFIG) -run-id $(RUN_ID) -final-status FAILED -outcome NOT_EXECUTED -summary "$(RESULT_SUMMARY)" -reasons scaffold_only
 
 docker-up:
 	docker compose up -d postgres

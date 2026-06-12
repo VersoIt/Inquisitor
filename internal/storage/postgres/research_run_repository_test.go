@@ -91,6 +91,49 @@ func TestResearchRunRepositoryIntegrationTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records and lists research result",
+			run: func(t *testing.T) {
+				run := testResearchRun(t, plannedAt)
+				run.HypothesisContentSHA256 = hypothesis.ContentSHA256
+				result := testResearchResult(t, run.RunID, plannedAt.Add(time.Hour))
+				finalRun := run
+				finalRun.Status = result.FinalStatus
+
+				stats, err := repo.RecordResult(ctx, finalRun, result)
+				if err != nil {
+					t.Fatalf("record research result: %v", err)
+				}
+				if stats.RunUpdated != 1 || stats.ResultInserted != 1 || stats.ResultUpdated != 0 {
+					t.Fatalf("record result stats mismatch: %#v", stats)
+				}
+
+				results, err := repo.ListResults(ctx, domainresearch.ResultQuery{
+					RunID: result.RunID,
+					Limit: 10,
+				})
+				if err != nil {
+					t.Fatalf("list research results: %v", err)
+				}
+				if len(results) != 1 {
+					t.Fatalf("expected one research result, got %d", len(results))
+				}
+				if results[0].Outcome != domainresearch.OutcomeNotExecuted {
+					t.Fatalf("unexpected result: %#v", results[0])
+				}
+
+				runs, err := repo.ListRuns(ctx, domainresearch.Query{
+					RunID: run.RunID,
+					Limit: 10,
+				})
+				if err != nil {
+					t.Fatalf("list finalized research run: %v", err)
+				}
+				if len(runs) != 1 || runs[0].Status != domainresearch.StatusFailed {
+					t.Fatalf("expected FAILED run status, got %#v", runs)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -100,6 +143,12 @@ func TestResearchRunRepositoryIntegrationTableDriven(t *testing.T) {
 
 func cleanupResearchRuns(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM research_results
+		WHERE run_id IN ('research_sqlmock_0001')
+	`); err != nil {
+		t.Fatalf("cleanup research results: %v", err)
+	}
 	_, err := db.ExecContext(ctx, `
 		DELETE FROM research_runs
 		WHERE run_id IN ('research_sqlmock_0001')

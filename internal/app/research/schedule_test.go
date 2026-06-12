@@ -251,9 +251,10 @@ func (r *fakeHypothesisRepository) ListHypotheses(_ context.Context, query domai
 }
 
 type fakeRunRepository struct {
-	runs  []domainresearch.Run
-	stats domainresearch.WriteStats
-	err   error
+	runs    []domainresearch.Run
+	stats   domainresearch.WriteStats
+	err     error
+	queries []domainresearch.Query
 }
 
 func (r *fakeRunRepository) UpsertRuns(_ context.Context, runs []domainresearch.Run) (domainresearch.WriteStats, error) {
@@ -264,8 +265,33 @@ func (r *fakeRunRepository) UpsertRuns(_ context.Context, runs []domainresearch.
 	return r.stats, nil
 }
 
-func (r *fakeRunRepository) ListRuns(context.Context, domainresearch.Query) ([]domainresearch.Run, error) {
+func (r *fakeRunRepository) ListRuns(_ context.Context, query domainresearch.Query) ([]domainresearch.Run, error) {
+	r.queries = append(r.queries, query)
+	if r.err != nil {
+		return nil, r.err
+	}
 	return append([]domainresearch.Run(nil), r.runs...), nil
+}
+
+type fakeResultRecorder struct {
+	run     domainresearch.Run
+	result  domainresearch.Result
+	stats   domainresearch.RecordResultStats
+	err     error
+	results []domainresearch.Result
+}
+
+func (r *fakeResultRecorder) RecordResult(_ context.Context, run domainresearch.Run, result domainresearch.Result) (domainresearch.RecordResultStats, error) {
+	r.run = run
+	r.result = result
+	if r.err != nil {
+		return domainresearch.RecordResultStats{}, r.err
+	}
+	return r.stats, nil
+}
+
+func (r *fakeResultRecorder) ListResults(context.Context, domainresearch.ResultQuery) ([]domainresearch.Result, error) {
+	return append([]domainresearch.Result(nil), r.results...), nil
 }
 
 type fakeIDGenerator struct {

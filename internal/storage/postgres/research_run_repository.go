@@ -161,6 +161,157 @@ func (r *ResearchRunRepository) ListRuns(ctx context.Context, query domainresear
 	return runs, nil
 }
 
+func (r *ResearchRunRepository) RecordResult(ctx context.Context, run domainresearch.Run, result domainresearch.Result) (domainresearch.RecordResultStats, error) {
+	if err := domainresearch.ValidateRun(run); err != nil {
+		return domainresearch.RecordResultStats{}, err
+	}
+	if err := domainresearch.ValidateResult(result); err != nil {
+		return domainresearch.RecordResultStats{}, err
+	}
+	if run.RunID != result.RunID || run.Status != result.FinalStatus {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("research result must match finalized run")
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("begin research result transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	runResult, err := tx.ExecContext(ctx, `
+		UPDATE research_runs
+		SET status = $2,
+		    updated_at = NOW()
+		WHERE run_id = $1
+	`, run.RunID, string(run.Status))
+	if err != nil {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("update research run status %s: %w", run.RunID, err)
+	}
+	runUpdated, err := runResult.RowsAffected()
+	if err != nil {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("read research run status rows affected: %w", err)
+	}
+	if runUpdated == 0 {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("update research run status %s affected no rows", run.RunID)
+	}
+
+	insertStatement, err := tx.PrepareContext(ctx, `
+		INSERT INTO research_results (
+			run_id, final_status, outcome, summary, metrics_json, reasons_json, recorded_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7
+		)
+		ON CONFLICT (run_id)
+		DO NOTHING
+	`)
+	if err != nil {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("prepare research result insert: %w", err)
+	}
+	defer insertStatement.Close()
+
+	updateStatement, err := tx.PrepareContext(ctx, `
+		UPDATE research_results
+		SET final_status = $2,
+		    outcome = $3,
+		    summary = $4,
+		    metrics_json = $5,
+		    reasons_json = $6,
+		    recorded_at = $7,
+		    updated_at = NOW()
+		WHERE run_id = $1
+	`)
+	if err != nil {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("prepare research result update: %w", err)
+	}
+	defer updateStatement.Close()
+
+	args, err := researchResultSQLArgs(result)
+	if err != nil {
+		return domainresearch.RecordResultStats{}, err
+	}
+	resultWrite, err := insertStatement.ExecContext(ctx, args...)
+	if err != nil {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("insert research result %s: %w", result.RunID, err)
+	}
+	resultInserted, err := resultWrite.RowsAffected()
+	if err != nil {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("read research result insert rows affected: %w", err)
+	}
+
+	stats := domainresearch.RecordResultStats{RunUpdated: int(runUpdated)}
+	if resultInserted > 0 {
+		stats.ResultInserted = int(resultInserted)
+	} else {
+		resultWrite, err = updateStatement.ExecContext(ctx, args...)
+		if err != nil {
+			return domainresearch.RecordResultStats{}, fmt.Errorf("update research result %s: %w", result.RunID, err)
+		}
+		resultUpdated, err := resultWrite.RowsAffected()
+		if err != nil {
+			return domainresearch.RecordResultStats{}, fmt.Errorf("read research result update rows affected: %w", err)
+		}
+		if resultUpdated == 0 {
+			return domainresearch.RecordResultStats{}, fmt.Errorf("upsert research result %s affected no rows", result.RunID)
+		}
+		stats.ResultUpdated = int(resultUpdated)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return domainresearch.RecordResultStats{}, fmt.Errorf("commit research result transaction: %w", err)
+	}
+	committed = true
+
+	return stats, nil
+}
+
+func (r *ResearchRunRepository) ListResults(ctx context.Context, query domainresearch.ResultQuery) ([]domainresearch.Result, error) {
+	if err := domainresearch.ValidateResultQuery(query); err != nil {
+		return nil, err
+	}
+
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT run_id, final_status, outcome, summary, metrics_json::text, reasons_json::text, recorded_at
+		FROM research_results
+		WHERE ($1::text = '' OR run_id = $1)
+		  AND ($2::text = '' OR final_status = $2)
+		  AND ($3::text = '' OR outcome = $3)
+		  AND ($4::timestamptz IS NULL OR recorded_at >= $4)
+		  AND ($5::timestamptz IS NULL OR recorded_at < $5)
+		ORDER BY recorded_at DESC, id DESC
+		LIMIT $6
+	`, strings.TrimSpace(query.RunID), string(query.FinalStatus), string(query.Outcome), nullableTime(query.Start), nullableTime(query.End), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list research results: %w", err)
+	}
+	defer rows.Close()
+
+	var results []domainresearch.Result
+	for rows.Next() {
+		result, err := scanResearchResult(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate research results: %w", err)
+	}
+	if err := domainresearch.ValidateResults(results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 func researchRunSQLArgs(run domainresearch.Run) ([]any, error) {
 	symbolsJSON, err := stringSliceJSON(run.Symbols)
 	if err != nil {
@@ -233,6 +384,60 @@ func scanResearchRun(scanner interface {
 	return run, nil
 }
 
+func researchResultSQLArgs(result domainresearch.Result) ([]any, error) {
+	metricsJSON, err := metricsJSON(result.Metrics)
+	if err != nil {
+		return nil, fmt.Errorf("marshal research result metrics: %w", err)
+	}
+	reasonsJSON, err := stringSliceJSON(result.Reasons)
+	if err != nil {
+		return nil, fmt.Errorf("marshal research result reasons: %w", err)
+	}
+	return []any{
+		result.RunID,
+		string(result.FinalStatus),
+		string(result.Outcome),
+		result.Summary,
+		metricsJSON,
+		reasonsJSON,
+		result.RecordedAt.UTC(),
+	}, nil
+}
+
+func scanResearchResult(scanner interface {
+	Scan(dest ...any) error
+}) (domainresearch.Result, error) {
+	var result domainresearch.Result
+	var finalStatus, outcome, metricsRaw, reasonsRaw string
+	if err := scanner.Scan(
+		&result.RunID,
+		&finalStatus,
+		&outcome,
+		&result.Summary,
+		&metricsRaw,
+		&reasonsRaw,
+		&result.RecordedAt,
+	); err != nil {
+		return domainresearch.Result{}, fmt.Errorf("scan research result: %w", err)
+	}
+
+	result.FinalStatus = domainresearch.Status(finalStatus)
+	result.Outcome = domainresearch.Outcome(outcome)
+	if err := json.Unmarshal([]byte(metricsRaw), &result.Metrics); err != nil {
+		return domainresearch.Result{}, fmt.Errorf("parse research result metrics: %w", err)
+	}
+	var err error
+	result.Reasons, err = parseStringSliceJSON(reasonsRaw)
+	if err != nil {
+		return domainresearch.Result{}, fmt.Errorf("parse research result reasons: %w", err)
+	}
+	result.RecordedAt = result.RecordedAt.UTC()
+	if err := domainresearch.ValidateResult(result); err != nil {
+		return domainresearch.Result{}, err
+	}
+	return result, nil
+}
+
 func stringSliceJSON(values []string) (string, error) {
 	if values == nil {
 		values = []string{}
@@ -253,4 +458,12 @@ func parseStringSliceJSON(raw string) ([]string, error) {
 		return []string{}, nil
 	}
 	return values, nil
+}
+
+func metricsJSON(metrics domainresearch.Metrics) (string, error) {
+	raw, err := json.Marshal(metrics)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }

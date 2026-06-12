@@ -30,6 +30,7 @@ func (CryptoIDGenerator) NewID() (string, error) {
 type Service struct {
 	hypotheses  domainhypothesis.Repository
 	runs        domainresearch.Repository
+	results     domainresearch.ResultRecorder
 	clock       clock.Clock
 	idGenerator IDGenerator
 }
@@ -45,6 +46,12 @@ func WithClock(clock clock.Clock) Option {
 func WithIDGenerator(generator IDGenerator) Option {
 	return func(service *Service) {
 		service.idGenerator = generator
+	}
+}
+
+func WithResultRecorder(recorder domainresearch.ResultRecorder) Option {
+	return func(service *Service) {
+		service.results = recorder
 	}
 }
 
