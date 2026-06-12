@@ -17,7 +17,7 @@ HYPOTHESIS_VERSION ?= 0.1.0
 RUN_ID ?=
 RESULT_SUMMARY ?= Strategy executor is intentionally not implemented yet.
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-record-not-executed docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-record-not-executed docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -53,6 +53,9 @@ research-schedule:
 
 research-dry-run:
 	$(GO) run ./cmd/research-dry-run -config $(CONFIG) -run-id $(RUN_ID)
+
+research-evaluate-rules:
+	$(GO) run ./cmd/research-evaluate-rules -config $(CONFIG) -run-id $(RUN_ID) -feature-lookback $(FEATURE_LOOKBACK) -candle-limit $(LIMIT) -trade-limit $(TRADE_LIMIT) -snapshot-limit $(SNAPSHOT_LIMIT)
 
 research-record-not-executed:
 	$(GO) run ./cmd/research-result -config $(CONFIG) -run-id $(RUN_ID) -final-status FAILED -outcome NOT_EXECUTED -summary "$(RESULT_SUMMARY)" -reasons scaffold_only

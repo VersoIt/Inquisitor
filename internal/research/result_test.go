@@ -101,6 +101,32 @@ func TestValidateResultRejectsInvalidResultsTableDriven(t *testing.T) {
 			wantErrSub: "coverage",
 		},
 		{
+			name: "negative rule observations",
+			mutate: func(result *research.Result) {
+				result.Metrics.RuleObservations = -1
+			},
+			wantErrSub: "rule_observations",
+		},
+		{
+			name: "unbalanced rule observations",
+			mutate: func(result *research.Result) {
+				result.Metrics.RuleObservations = 3
+				result.Metrics.RegimeAllowedObservations = 2
+				result.Metrics.RegimeBlockedObservations = 0
+			},
+			wantErrSub: "rule observation counts must balance",
+		},
+		{
+			name: "unbalanced signal evaluations",
+			mutate: func(result *research.Result) {
+				result.Metrics.RuleEvaluations = 3
+				result.Metrics.SignalMatches = 1
+				result.Metrics.SignalFailures = 1
+				result.Metrics.SignalSkips = 0
+			},
+			wantErrSub: "signal evaluation counts must balance",
+		},
+		{
 			name: "not executed with trades",
 			mutate: func(result *research.Result) {
 				result.Metrics.Trades = 1

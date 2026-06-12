@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	appfeatures "github.com/VersoIt/Inquisitor/internal/app/features"
 	"github.com/VersoIt/Inquisitor/internal/clock"
 	domainhypothesis "github.com/VersoIt/Inquisitor/internal/hypothesis"
 	domainregime "github.com/VersoIt/Inquisitor/internal/regime"
@@ -28,13 +29,18 @@ func (CryptoIDGenerator) NewID() (string, error) {
 	return "research_" + hex.EncodeToString(raw[:]), nil
 }
 
+type FeatureAssembler interface {
+	Compute(ctx context.Context, req appfeatures.ComputeRequest) (appfeatures.FeatureSet, error)
+}
+
 type Service struct {
-	hypotheses  domainhypothesis.Repository
-	runs        domainresearch.Repository
-	results     domainresearch.ResultRecorder
-	regimes     domainregime.Repository
-	clock       clock.Clock
-	idGenerator IDGenerator
+	hypotheses       domainhypothesis.Repository
+	runs             domainresearch.Repository
+	results          domainresearch.ResultRecorder
+	regimes          domainregime.Repository
+	featureAssembler FeatureAssembler
+	clock            clock.Clock
+	idGenerator      IDGenerator
 }
 
 type Option func(*Service)
@@ -60,6 +66,12 @@ func WithResultRecorder(recorder domainresearch.ResultRecorder) Option {
 func WithRegimeRepository(repository domainregime.Repository) Option {
 	return func(service *Service) {
 		service.regimes = repository
+	}
+}
+
+func WithFeatureAssembler(assembler FeatureAssembler) Option {
+	return func(service *Service) {
+		service.featureAssembler = assembler
 	}
 }
 

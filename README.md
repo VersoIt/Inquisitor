@@ -46,9 +46,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 research-run scheduling with a domain orchestration model, PostgreSQL persistence, CLI command, and no strategy execution.
 - Initial Phase 4 research-result recording scaffold with conservative result validation, atomic run-status updates, PostgreSQL persistence, CLI command, and no strategy execution.
 - Initial Phase 4 dry-run research preflight over persisted regime states, with coverage metrics and automatic result recording, still without strategy execution.
+- Initial Phase 4 hypothesis rule evaluation over persisted regimes and recalculated feature snapshots, with signal-rule metrics and automatic result recording, still without trade execution or PnL.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add explicit rule evaluation over persisted features/regimes, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should turn rule observations into a realistic backtest engine with costs, still without live trading.
 
 ## What This Is Not
 
@@ -239,6 +240,15 @@ go run ./cmd/research-dry-run -config configs/config.example.yaml -run-id resear
 
 Dry-run preflight checks historical `regime_states` coverage for every symbol/interval in the run window and records an `INCONCLUSIVE` result when coverage is sufficient. If coverage is incomplete, it records `FAILED / NOT_EXECUTED`. It still does not execute a strategy, calculate PnL, emit signals, or place orders.
 
+To evaluate imported hypothesis signal rules against persisted regimes and feature snapshots:
+
+```powershell
+$env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?sslmode=disable"
+go run ./cmd/research-evaluate-rules -config configs/config.example.yaml -run-id research_... -feature-lookback 168h
+```
+
+Rule evaluation reloads the exact draft hypothesis by `(name, version)` and verifies its content hash against the scheduled run before doing any work. It walks persisted `regime_states`, skips blocked or low-confidence regimes, recalculates features from stored candles/trades/orderbook snapshots, evaluates YAML signal rules, and records aggregate rule metrics. It still records `trades=0`, does not calculate PnL, and cannot place orders.
+
 ## Regime Classification
 
 The regime command reads persisted candles, public trades, and orderbook snapshots, computes the latest feature set in the requested window, classifies the market regime, and upserts one `regime_states` row per symbol/interval. It does not run strategies and cannot place orders.
@@ -271,6 +281,7 @@ make hypothesis-validate HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yam
 make hypothesis-import HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yaml
 make research-schedule HYPOTHESIS_NAME=trend_momentum_draft HYPOTHESIS_VERSION=0.1.0 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z
 make research-dry-run RUN_ID=research_...
+make research-evaluate-rules RUN_ID=research_...
 make research-record-not-executed RUN_ID=research_...
 ```
 

@@ -18,17 +18,26 @@ const (
 )
 
 type Metrics struct {
-	Trades                 int     `json:"trades"`
-	RegimeStates           int     `json:"regime_states"`
-	ExpectedRegimeStates   int     `json:"expected_regime_states"`
-	MissingRegimeStates    int     `json:"missing_regime_states"`
-	RegimeCoveragePct      float64 `json:"regime_coverage_pct"`
-	FeesIncluded           bool    `json:"fees_included"`
-	SpreadIncluded         bool    `json:"spread_included"`
-	SlippageIncluded       bool    `json:"slippage_included"`
-	OutOfSample            bool    `json:"out_of_sample"`
-	WalkForward            bool    `json:"walk_forward"`
-	RegimeAnalysisIncluded bool    `json:"regime_analysis_included"`
+	Trades                    int     `json:"trades"`
+	RegimeStates              int     `json:"regime_states"`
+	ExpectedRegimeStates      int     `json:"expected_regime_states"`
+	MissingRegimeStates       int     `json:"missing_regime_states"`
+	RegimeCoveragePct         float64 `json:"regime_coverage_pct"`
+	RuleObservations          int     `json:"rule_observations"`
+	RegimeAllowedObservations int     `json:"regime_allowed_observations"`
+	RegimeBlockedObservations int     `json:"regime_blocked_observations"`
+	RuleEvaluations           int     `json:"rule_evaluations"`
+	SignalRulePasses          int     `json:"signal_rule_passes"`
+	SignalMatches             int     `json:"signal_matches"`
+	SignalFailures            int     `json:"signal_failures"`
+	SignalSkips               int     `json:"signal_skips"`
+	FeatureEvaluationFailures int     `json:"feature_evaluation_failures"`
+	FeesIncluded              bool    `json:"fees_included"`
+	SpreadIncluded            bool    `json:"spread_included"`
+	SlippageIncluded          bool    `json:"slippage_included"`
+	OutOfSample               bool    `json:"out_of_sample"`
+	WalkForward               bool    `json:"walk_forward"`
+	RegimeAnalysisIncluded    bool    `json:"regime_analysis_included"`
 }
 
 type Result struct {
@@ -205,6 +214,39 @@ func validateMetrics(finalStatus Status, outcome Outcome, metrics Metrics) []str
 	}
 	if metrics.RegimeCoveragePct < 0 || metrics.RegimeCoveragePct > 100 {
 		problems = append(problems, "metrics.regime_coverage_pct must be between 0 and 100")
+	}
+	if metrics.RuleObservations < 0 {
+		problems = append(problems, "metrics.rule_observations must be greater than or equal to zero")
+	}
+	if metrics.RegimeAllowedObservations < 0 {
+		problems = append(problems, "metrics.regime_allowed_observations must be greater than or equal to zero")
+	}
+	if metrics.RegimeBlockedObservations < 0 {
+		problems = append(problems, "metrics.regime_blocked_observations must be greater than or equal to zero")
+	}
+	if metrics.RuleObservations > 0 && metrics.RegimeAllowedObservations+metrics.RegimeBlockedObservations != metrics.RuleObservations {
+		problems = append(problems, "metrics rule observation counts must balance")
+	}
+	if metrics.RuleEvaluations < 0 {
+		problems = append(problems, "metrics.rule_evaluations must be greater than or equal to zero")
+	}
+	if metrics.SignalRulePasses < 0 {
+		problems = append(problems, "metrics.signal_rule_passes must be greater than or equal to zero")
+	}
+	if metrics.SignalMatches < 0 {
+		problems = append(problems, "metrics.signal_matches must be greater than or equal to zero")
+	}
+	if metrics.SignalFailures < 0 {
+		problems = append(problems, "metrics.signal_failures must be greater than or equal to zero")
+	}
+	if metrics.SignalSkips < 0 {
+		problems = append(problems, "metrics.signal_skips must be greater than or equal to zero")
+	}
+	if metrics.RuleEvaluations > 0 && metrics.SignalRulePasses+metrics.SignalFailures+metrics.SignalSkips != metrics.RuleEvaluations {
+		problems = append(problems, "metrics signal evaluation counts must balance")
+	}
+	if metrics.FeatureEvaluationFailures < 0 {
+		problems = append(problems, "metrics.feature_evaluation_failures must be greater than or equal to zero")
 	}
 	if outcome == OutcomeNotExecuted {
 		if finalStatus == StatusCompleted {
