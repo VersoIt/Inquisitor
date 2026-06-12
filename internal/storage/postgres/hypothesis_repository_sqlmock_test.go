@@ -84,13 +84,14 @@ func TestHypothesisRepositorySQLMockTableDriven(t *testing.T) {
 					record.ImportedAt,
 				)
 				mock.ExpectQuery("SELECT name, version, status").
-					WithArgs(record.Name, string(domainhypothesis.StatusDraft), 20).
+					WithArgs(record.Name, record.Version, string(domainhypothesis.StatusDraft), 20).
 					WillReturnRows(rows)
 
 				got, err := postgres.NewHypothesisRepository(db).ListHypotheses(ctx, domainhypothesis.Query{
-					Name:   record.Name,
-					Status: domainhypothesis.StatusDraft,
-					Limit:  20,
+					Name:    record.Name,
+					Version: record.Version,
+					Status:  domainhypothesis.StatusDraft,
+					Limit:   20,
 				})
 				if err != nil {
 					t.Fatalf("list hypotheses: %v", err)

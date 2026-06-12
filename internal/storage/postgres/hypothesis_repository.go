@@ -129,10 +129,11 @@ func (r *HypothesisRepository) ListHypotheses(ctx context.Context, query domainh
 		SELECT name, version, status, source_path, content_sha256, spec_json::text, raw_yaml, imported_at
 		FROM hypotheses
 		WHERE ($1::text = '' OR name = $1)
-		  AND ($2::text = '' OR status = $2)
+		  AND ($2::text = '' OR version = $2)
+		  AND ($3::text = '' OR status = $3)
 		ORDER BY imported_at DESC, id DESC
-		LIMIT $3
-	`, strings.TrimSpace(query.Name), status, limit)
+		LIMIT $4
+	`, strings.TrimSpace(query.Name), strings.TrimSpace(query.Version), status, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list hypotheses: %w", err)
 	}

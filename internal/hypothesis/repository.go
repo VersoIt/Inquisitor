@@ -30,9 +30,10 @@ type Record struct {
 }
 
 type Query struct {
-	Name   string
-	Status Status
-	Limit  int
+	Name    string
+	Version string
+	Status  Status
+	Limit   int
 }
 
 type Repository interface {

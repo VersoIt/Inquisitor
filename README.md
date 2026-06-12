@@ -43,9 +43,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 3 regime classification command that computes and stores feature-derived regimes over persisted market data without strategy execution.
 - Initial Phase 3 historical regime backfill that walks candle close times with sliding feature windows and per-candle data-quality observation time.
 - Initial Phase 4 hypothesis YAML format with strict import validation, explicit research gates, regime gating, conservative risk/cost requirements, CLI validation/import command, PostgreSQL persistence, and table-driven tests.
+- Initial Phase 4 research-run scheduling with a domain orchestration model, PostgreSQL persistence, CLI command, and no strategy execution.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add research-run orchestration, still without strategy execution logic.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add research-run execution scaffolding and result recording, still without live trading.
 
 ## What This Is Not
 
@@ -111,8 +112,9 @@ Initial migrations are in `migrations/`:
 - `004_realtime_market_data.sql`
 - `005_regime_states.sql`
 - `006_hypotheses.sql`
+- `007_research_runs.sql`
 
-They define the first market-data, realtime, regime-state, and hypothesis tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, and research-run tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 
@@ -198,6 +200,23 @@ make hypothesis-import HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yaml
 
 Validation-only mode does not connect to PostgreSQL. Import mode persists the draft spec and raw YAML idempotently by `(name, version)`. Neither mode runs a strategy or can place orders.
 
+## Research Run Scheduling
+
+Research runs are currently orchestration records only. Scheduling a run links an imported draft hypothesis to a historical research window, snapshots the hypothesis market scope and content hash, and stores a `PLANNED` run id. It does not execute a strategy, does not calculate PnL, and cannot place orders.
+
+Apply migrations, import a hypothesis draft, then schedule a run:
+
+```powershell
+$env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?sslmode=disable"
+go run ./cmd/research -config configs/config.example.yaml -hypothesis-name trend_momentum_draft -hypothesis-version 0.1.0 -start 2026-06-01T00:00:00Z -end 2026-06-02T00:00:00Z
+```
+
+Or use the helper target:
+
+```powershell
+make research-schedule HYPOTHESIS_NAME=trend_momentum_draft HYPOTHESIS_VERSION=0.1.0 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z
+```
+
 ## Regime Classification
 
 The regime command reads persisted candles, public trades, and orderbook snapshots, computes the latest feature set in the requested window, classifies the market regime, and upserts one `regime_states` row per symbol/interval. It does not run strategies and cannot place orders.
@@ -228,6 +247,7 @@ make regime SYMBOLS=BTCUSDT INTERVALS=1 REGIME_LOOKBACK=168h
 make regime-backfill SYMBOLS=BTCUSDT INTERVALS=1 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z FEATURE_LOOKBACK=168h
 make hypothesis-validate HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yaml
 make hypothesis-import HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yaml
+make research-schedule HYPOTHESIS_NAME=trend_momentum_draft HYPOTHESIS_VERSION=0.1.0 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z
 ```
 
 ## Architecture Boundary
