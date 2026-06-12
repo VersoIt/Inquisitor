@@ -78,6 +78,29 @@ func TestValidateResultRejectsInvalidResultsTableDriven(t *testing.T) {
 			wantErrSub: "NOT_EXECUTED",
 		},
 		{
+			name: "negative regime states",
+			mutate: func(result *research.Result) {
+				result.Metrics.RegimeStates = -1
+			},
+			wantErrSub: "regime_states",
+		},
+		{
+			name: "unbalanced regime state counts",
+			mutate: func(result *research.Result) {
+				result.Metrics.ExpectedRegimeStates = 10
+				result.Metrics.RegimeStates = 8
+				result.Metrics.MissingRegimeStates = 1
+			},
+			wantErrSub: "counts must balance",
+		},
+		{
+			name: "coverage above percent range",
+			mutate: func(result *research.Result) {
+				result.Metrics.RegimeCoveragePct = 101
+			},
+			wantErrSub: "coverage",
+		},
+		{
 			name: "not executed with trades",
 			mutate: func(result *research.Result) {
 				result.Metrics.Trades = 1
@@ -174,6 +197,8 @@ func TestFinalizeRunTransitionsToFinalStatus(t *testing.T) {
 		HypothesisName:          "trend_momentum_draft",
 		HypothesisVersion:       "0.1.0",
 		HypothesisContentSHA256: strings.Repeat("a", 64),
+		Exchange:                "bybit",
+		Category:                "linear",
 		WindowStart:             plannedAt.Add(-24 * time.Hour),
 		WindowEnd:               plannedAt.Add(-time.Hour),
 		PlannedAt:               plannedAt,

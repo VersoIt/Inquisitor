@@ -10,6 +10,7 @@ import (
 
 	"github.com/VersoIt/Inquisitor/internal/clock"
 	domainhypothesis "github.com/VersoIt/Inquisitor/internal/hypothesis"
+	domainregime "github.com/VersoIt/Inquisitor/internal/regime"
 	domainresearch "github.com/VersoIt/Inquisitor/internal/research"
 )
 
@@ -31,6 +32,7 @@ type Service struct {
 	hypotheses  domainhypothesis.Repository
 	runs        domainresearch.Repository
 	results     domainresearch.ResultRecorder
+	regimes     domainregime.Repository
 	clock       clock.Clock
 	idGenerator IDGenerator
 }
@@ -52,6 +54,12 @@ func WithIDGenerator(generator IDGenerator) Option {
 func WithResultRecorder(recorder domainresearch.ResultRecorder) Option {
 	return func(service *Service) {
 		service.results = recorder
+	}
+}
+
+func WithRegimeRepository(repository domainregime.Repository) Option {
+	return func(service *Service) {
+		service.regimes = repository
 	}
 }
 
@@ -133,6 +141,8 @@ func (s *Service) Schedule(ctx context.Context, req ScheduleRequest) (ScheduleRe
 		HypothesisName:          hypothesis.Name,
 		HypothesisVersion:       hypothesis.Version,
 		HypothesisContentSHA256: hypothesis.ContentSHA256,
+		Exchange:                hypothesis.Spec.Market.Exchange,
+		Category:                hypothesis.Spec.Market.Category,
 		WindowStart:             req.WindowStart,
 		WindowEnd:               req.WindowEnd,
 		PlannedAt:               s.clock.Now(),

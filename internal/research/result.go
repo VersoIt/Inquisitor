@@ -18,13 +18,17 @@ const (
 )
 
 type Metrics struct {
-	Trades                 int  `json:"trades"`
-	FeesIncluded           bool `json:"fees_included"`
-	SpreadIncluded         bool `json:"spread_included"`
-	SlippageIncluded       bool `json:"slippage_included"`
-	OutOfSample            bool `json:"out_of_sample"`
-	WalkForward            bool `json:"walk_forward"`
-	RegimeAnalysisIncluded bool `json:"regime_analysis_included"`
+	Trades                 int     `json:"trades"`
+	RegimeStates           int     `json:"regime_states"`
+	ExpectedRegimeStates   int     `json:"expected_regime_states"`
+	MissingRegimeStates    int     `json:"missing_regime_states"`
+	RegimeCoveragePct      float64 `json:"regime_coverage_pct"`
+	FeesIncluded           bool    `json:"fees_included"`
+	SpreadIncluded         bool    `json:"spread_included"`
+	SlippageIncluded       bool    `json:"slippage_included"`
+	OutOfSample            bool    `json:"out_of_sample"`
+	WalkForward            bool    `json:"walk_forward"`
+	RegimeAnalysisIncluded bool    `json:"regime_analysis_included"`
 }
 
 type Result struct {
@@ -186,6 +190,21 @@ func validateMetrics(finalStatus Status, outcome Outcome, metrics Metrics) []str
 	var problems []string
 	if metrics.Trades < 0 {
 		problems = append(problems, "metrics.trades must be greater than or equal to zero")
+	}
+	if metrics.RegimeStates < 0 {
+		problems = append(problems, "metrics.regime_states must be greater than or equal to zero")
+	}
+	if metrics.ExpectedRegimeStates < 0 {
+		problems = append(problems, "metrics.expected_regime_states must be greater than or equal to zero")
+	}
+	if metrics.MissingRegimeStates < 0 {
+		problems = append(problems, "metrics.missing_regime_states must be greater than or equal to zero")
+	}
+	if metrics.ExpectedRegimeStates > 0 && metrics.RegimeStates+metrics.MissingRegimeStates != metrics.ExpectedRegimeStates {
+		problems = append(problems, "metrics regime state counts must balance")
+	}
+	if metrics.RegimeCoveragePct < 0 || metrics.RegimeCoveragePct > 100 {
+		problems = append(problems, "metrics.regime_coverage_pct must be between 0 and 100")
 	}
 	if outcome == OutcomeNotExecuted {
 		if finalStatus == StatusCompleted {

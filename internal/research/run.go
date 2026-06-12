@@ -37,6 +37,8 @@ type Run struct {
 	HypothesisName          string
 	HypothesisVersion       string
 	HypothesisContentSHA256 string
+	Exchange                string
+	Category                string
 	Status                  Status
 	WindowStart             time.Time
 	WindowEnd               time.Time
@@ -51,6 +53,8 @@ type PlanInput struct {
 	HypothesisName          string
 	HypothesisVersion       string
 	HypothesisContentSHA256 string
+	Exchange                string
+	Category                string
 	WindowStart             time.Time
 	WindowEnd               time.Time
 	PlannedAt               time.Time
@@ -84,6 +88,8 @@ func NewPlannedRun(input PlanInput) (Run, error) {
 		HypothesisName:          strings.TrimSpace(input.HypothesisName),
 		HypothesisVersion:       strings.TrimSpace(input.HypothesisVersion),
 		HypothesisContentSHA256: strings.TrimSpace(input.HypothesisContentSHA256),
+		Exchange:                strings.ToLower(strings.TrimSpace(input.Exchange)),
+		Category:                strings.ToLower(strings.TrimSpace(input.Category)),
 		Status:                  StatusPlanned,
 		WindowStart:             input.WindowStart.UTC(),
 		WindowEnd:               input.WindowEnd.UTC(),
@@ -119,11 +125,19 @@ func ValidateRun(run Run) error {
 	addRequired("hypothesis_name", run.HypothesisName)
 	addRequired("hypothesis_version", run.HypothesisVersion)
 	addRequired("hypothesis_content_sha256", run.HypothesisContentSHA256)
+	addRequired("exchange", run.Exchange)
+	addRequired("category", run.Category)
 	if run.RunID != "" && !runIDPattern.MatchString(run.RunID) {
 		problems = append(problems, "run_id must be 8-128 url-safe characters")
 	}
 	if run.HypothesisContentSHA256 != "" && !sha256HexPattern.MatchString(run.HypothesisContentSHA256) {
 		problems = append(problems, "hypothesis_content_sha256 must be lowercase sha256 hex")
+	}
+	if trimmed := strings.TrimSpace(run.Exchange); trimmed != "" && trimmed != strings.ToLower(trimmed) {
+		problems = append(problems, "exchange must be lowercase")
+	}
+	if trimmed := strings.TrimSpace(run.Category); trimmed != "" && trimmed != strings.ToLower(trimmed) {
+		problems = append(problems, "category must be lowercase")
 	}
 	if !KnownStatus(run.Status) {
 		problems = append(problems, "status is unsupported")

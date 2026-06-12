@@ -46,6 +46,9 @@ func TestServiceScheduleCreatesPlannedRunFromDraftHypothesis(t *testing.T) {
 	if got.Run.HypothesisContentSHA256 != hypothesis.ContentSHA256 {
 		t.Fatalf("hypothesis hash mismatch: got %s want %s", got.Run.HypothesisContentSHA256, hypothesis.ContentSHA256)
 	}
+	if got.Run.Exchange != "bybit" || got.Run.Category != "linear" {
+		t.Fatalf("market scope mismatch: exchange=%q category=%q", got.Run.Exchange, got.Run.Category)
+	}
 	if len(got.Run.Symbols) != 2 || got.Run.Symbols[1] != "ETHUSDT" {
 		t.Fatalf("symbols were not copied from hypothesis: %#v", got.Run.Symbols)
 	}

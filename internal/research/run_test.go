@@ -16,6 +16,8 @@ func TestNewPlannedRunBuildsValidatedRun(t *testing.T) {
 		HypothesisName:          "trend_momentum_draft",
 		HypothesisVersion:       "0.1.0",
 		HypothesisContentSHA256: strings.Repeat("a", 64),
+		Exchange:                " BYBIT ",
+		Category:                " LINEAR ",
 		WindowStart:             plannedAt.Add(-24 * time.Hour),
 		WindowEnd:               plannedAt.Add(-time.Hour),
 		PlannedAt:               plannedAt,
@@ -29,6 +31,9 @@ func TestNewPlannedRunBuildsValidatedRun(t *testing.T) {
 
 	if got.Status != research.StatusPlanned {
 		t.Fatalf("status mismatch: got %s want %s", got.Status, research.StatusPlanned)
+	}
+	if got.Exchange != "bybit" || got.Category != "linear" {
+		t.Fatalf("market scope was not canonicalized: exchange=%q category=%q", got.Exchange, got.Category)
 	}
 	if got.Symbols[0] != "BTCUSDT" || got.Symbols[1] != "ETHUSDT" {
 		t.Fatalf("symbols were not canonicalized: %#v", got.Symbols)
@@ -45,6 +50,8 @@ func TestValidateRunRejectsInvalidRunsTableDriven(t *testing.T) {
 		HypothesisName:          "trend_momentum_draft",
 		HypothesisVersion:       "0.1.0",
 		HypothesisContentSHA256: strings.Repeat("a", 64),
+		Exchange:                "bybit",
+		Category:                "linear",
 		Status:                  research.StatusPlanned,
 		WindowStart:             plannedAt.Add(-24 * time.Hour),
 		WindowEnd:               plannedAt.Add(-time.Hour),
@@ -64,6 +71,20 @@ func TestValidateRunRejectsInvalidRunsTableDriven(t *testing.T) {
 				run.RunID = ""
 			},
 			wantErrSub: "run_id",
+		},
+		{
+			name: "missing exchange",
+			mutate: func(run *research.Run) {
+				run.Exchange = ""
+			},
+			wantErrSub: "exchange",
+		},
+		{
+			name: "uppercase exchange",
+			mutate: func(run *research.Run) {
+				run.Exchange = "BYBIT"
+			},
+			wantErrSub: "lowercase",
 		},
 		{
 			name: "unsupported status",

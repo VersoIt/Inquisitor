@@ -40,10 +40,12 @@ func (r *ResearchRunRepository) UpsertRuns(ctx context.Context, runs []domainres
 	insertStatement, err := tx.PrepareContext(ctx, `
 		INSERT INTO research_runs (
 			run_id, hypothesis_name, hypothesis_version, hypothesis_content_sha256,
-			status, window_start, window_end, planned_at, symbols_json, intervals_json, notes_json
+			exchange, category, status, window_start, window_end, planned_at,
+			symbols_json, intervals_json, notes_json
 		) VALUES (
 			$1, $2, $3, $4,
-			$5, $6, $7, $8, $9, $10, $11
+			$5, $6, $7, $8, $9, $10,
+			$11, $12, $13
 		)
 		ON CONFLICT (run_id)
 		DO NOTHING
@@ -58,13 +60,15 @@ func (r *ResearchRunRepository) UpsertRuns(ctx context.Context, runs []domainres
 		SET hypothesis_name = $2,
 		    hypothesis_version = $3,
 		    hypothesis_content_sha256 = $4,
-		    status = $5,
-		    window_start = $6,
-		    window_end = $7,
-		    planned_at = $8,
-		    symbols_json = $9,
-		    intervals_json = $10,
-		    notes_json = $11,
+		    exchange = $5,
+		    category = $6,
+		    status = $7,
+		    window_start = $8,
+		    window_end = $9,
+		    planned_at = $10,
+		    symbols_json = $11,
+		    intervals_json = $12,
+		    notes_json = $13,
 		    updated_at = NOW()
 		WHERE run_id = $1
 	`)
@@ -127,7 +131,7 @@ func (r *ResearchRunRepository) ListRuns(ctx context.Context, query domainresear
 
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT run_id, hypothesis_name, hypothesis_version, hypothesis_content_sha256,
-		       status, window_start, window_end, planned_at,
+		       exchange, category, status, window_start, window_end, planned_at,
 		       symbols_json::text, intervals_json::text, notes_json::text
 		FROM research_runs
 		WHERE ($1::text = '' OR run_id = $1)
@@ -330,6 +334,8 @@ func researchRunSQLArgs(run domainresearch.Run) ([]any, error) {
 		run.HypothesisName,
 		run.HypothesisVersion,
 		run.HypothesisContentSHA256,
+		run.Exchange,
+		run.Category,
 		string(run.Status),
 		run.WindowStart.UTC(),
 		run.WindowEnd.UTC(),
@@ -350,6 +356,8 @@ func scanResearchRun(scanner interface {
 		&run.HypothesisName,
 		&run.HypothesisVersion,
 		&run.HypothesisContentSHA256,
+		&run.Exchange,
+		&run.Category,
 		&statusValue,
 		&run.WindowStart,
 		&run.WindowEnd,

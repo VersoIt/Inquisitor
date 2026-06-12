@@ -202,6 +202,8 @@ func testRun(t *testing.T, plannedAt time.Time) domainresearch.Run {
 		HypothesisName:          "trend_momentum_draft",
 		HypothesisVersion:       "0.1.0",
 		HypothesisContentSHA256: strings.Repeat("a", 64),
+		Exchange:                "bybit",
+		Category:                "linear",
 		WindowStart:             plannedAt.Add(-24 * time.Hour),
 		WindowEnd:               plannedAt.Add(-time.Hour),
 		PlannedAt:               plannedAt,
