@@ -47,9 +47,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 research-result recording scaffold with conservative result validation, atomic run-status updates, PostgreSQL persistence, CLI command, and no strategy execution.
 - Initial Phase 4 dry-run research preflight over persisted regime states, with coverage metrics and automatic result recording, still without strategy execution.
 - Initial Phase 4 hypothesis rule evaluation over persisted regimes and recalculated feature snapshots, with signal-rule metrics and automatic result recording, still without trade execution or PnL.
+- Initial Phase 4 cost-aware backtest domain math for conservative round trips, maker/taker fees, spread/slippage price impact, net PnL, profit factor, expectancy, win rate, and max drawdown.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should turn rule observations into a realistic backtest engine with costs, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should wire the cost-aware backtest math into research rule observations, still without live trading.
 
 ## What This Is Not
 
@@ -248,6 +249,8 @@ go run ./cmd/research-evaluate-rules -config configs/config.example.yaml -run-id
 ```
 
 Rule evaluation reloads the exact draft hypothesis by `(name, version)` and verifies its content hash against the scheduled run before doing any work. It walks persisted `regime_states`, skips blocked or low-confidence regimes, recalculates features from stored candles/trades/orderbook snapshots, evaluates YAML signal rules, and records aggregate rule metrics. It still records `trades=0`, does not calculate PnL, and cannot place orders.
+
+The backtest domain currently contains cost-aware trade math only. It computes executable round-trip prices from mid price plus conservative half-spread and slippage impact, applies maker/taker fees on both sides, and summarizes net-PnL metrics. It is not wired to strategy execution yet and cannot place orders.
 
 ## Regime Classification
 
