@@ -1,0 +1,156 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"os"
+	"strconv"
+	"time"
+
+	"github.com/shopspring/decimal"
+
+	appfeatures "github.com/VersoIt/Inquisitor/internal/app/features"
+	appresearch "github.com/VersoIt/Inquisitor/internal/app/research"
+	domainbacktest "github.com/VersoIt/Inquisitor/internal/backtest"
+	"github.com/VersoIt/Inquisitor/internal/config"
+	domainfeatures "github.com/VersoIt/Inquisitor/internal/features"
+	"github.com/VersoIt/Inquisitor/internal/logger"
+	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
+)
+
+func main() {
+	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
+	runID := flag.String("run-id", "", "research run id")
+	featureLookback := flag.Duration("feature-lookback", 168*time.Hour, "feature window before each regime observation")
+	minRegimeCoverage := flag.Float64("min-regime-coverage-pct", 100, "minimum historical regime-state coverage percentage")
+	holdingPeriodCandles := flag.Int("holding-period-candles", 1, "explicit fixed holding horizon in candles")
+	initialEquityValue := flag.String("initial-equity", "", "initial research equity; defaults to paper.initial_balance from config")
+	quantityValue := flag.String("quantity", "1", "fixed research quantity per simulated trade")
+	spreadBPS := flag.Int("spread-bps", -1, "conservative spread assumption in bps; defaults to risk.max_spread_bps")
+	slippageBPS := flag.Int("slippage-bps", -1, "slippage assumption in bps; defaults to slippage.default_bps")
+	candleLimit := flag.Int("candle-limit", 1000, "maximum candles loaded for each rule observation")
+	tradeLimit := flag.Int("trade-limit", 1000, "maximum public trades loaded around each latest orderbook snapshot")
+	snapshotLimit := flag.Int("snapshot-limit", 100, "maximum orderbook snapshots loaded for each rule observation")
+	webSocketConnected := flag.Bool("websocket-connected", true, "runtime health flag passed into data-quality features")
+	orderbookValid := flag.Bool("orderbook-valid", true, "runtime orderbook health flag passed into data-quality features")
+	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
+	flag.Parse()
+
+	log := logger.New(*logLevel)
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
+	initialEquityRaw := *initialEquityValue
+	if initialEquityRaw == "" {
+		initialEquityRaw = strconv.FormatFloat(cfg.Paper.InitialBalance, 'f', -1, 64)
+	}
+	initialEquity, err := decimal.NewFromString(initialEquityRaw)
+	if err != nil {
+		log.Error("invalid -initial-equity value", "error", err)
+		os.Exit(1)
+	}
+	quantity, err := decimal.NewFromString(*quantityValue)
+	if err != nil {
+		log.Error("invalid -quantity value", "error", err)
+		os.Exit(1)
+	}
+	if *spreadBPS < 0 {
+		*spreadBPS = cfg.Risk.MaxSpreadBps
+	}
+	if *slippageBPS < 0 {
+		*slippageBPS = cfg.Slippage.DefaultBps
+	}
+	costs, err := domainbacktest.NewCostModel(
+		cfg.Fees.MakerBps,
+		cfg.Fees.TakerBps,
+		*spreadBPS,
+		*slippageBPS,
+		cfg.Slippage.ConservativeMultiplier,
+	)
+	if err != nil {
+		log.Error("invalid backtest cost model", "error", err)
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+	db, err := postgres.Open(ctx, cfg.Database)
+	if err != nil {
+		log.Error("failed to connect to postgres", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	candles := postgres.NewCandleRepository(db)
+	featureService := appfeatures.NewService(
+		candles,
+		postgres.NewPublicTradeRepository(db),
+		postgres.NewOrderbookSnapshotRepository(db),
+		featureServiceConfig(cfg),
+	)
+	researchRepo := postgres.NewResearchRunRepository(db)
+	result, err := appresearch.NewService(
+		postgres.NewHypothesisRepository(db),
+		researchRepo,
+		appresearch.WithResultRecorder(researchRepo),
+		appresearch.WithRegimeRepository(postgres.NewRegimeStateRepository(db)),
+		appresearch.WithFeatureAssembler(featureService),
+		appresearch.WithCandleRepository(candles),
+	).BacktestRules(ctx, appresearch.BacktestRequest{
+		RunID:                *runID,
+		FeatureLookback:      *featureLookback,
+		MinRegimeCoveragePct: *minRegimeCoverage,
+		HoldingPeriodCandles: *holdingPeriodCandles,
+		InitialEquity:        initialEquity,
+		Quantity:             quantity,
+		Costs:                costs,
+		CandleLimit:          *candleLimit,
+		TradeLimit:           *tradeLimit,
+		SnapshotLimit:        *snapshotLimit,
+		Runtime: appfeatures.RuntimeState{
+			WebSocketConnected: *webSocketConnected,
+			OrderbookValid:     *orderbookValid,
+		},
+		UseRuntimeState: true,
+	})
+	if err != nil {
+		log.Error("research backtest failed", "error", err)
+		os.Exit(1)
+	}
+
+	log.Info(
+		"research backtest completed",
+		"run_id", result.Run.RunID,
+		"final_status", result.Result.FinalStatus,
+		"outcome", result.Result.Outcome,
+		"coverage_expected", result.Coverage.Expected,
+		"coverage_observed", result.Coverage.Observed,
+		"coverage_missing", result.Coverage.Missing,
+		"coverage_pct", result.Coverage.Percent,
+		"trades", result.Summary.Trades,
+		"wins", result.Summary.Wins,
+		"losses", result.Summary.Losses,
+		"net_pnl", result.Summary.NetPnL.String(),
+		"total_fees", result.Summary.TotalFees.String(),
+		"profit_factor", result.Summary.ProfitFactor.String(),
+		"profit_factor_defined", result.Summary.ProfitFactorDefined,
+		"max_drawdown_pct", result.Result.Metrics.MaxDrawdownPct,
+		"holding_period_candles", *holdingPeriodCandles,
+		"quantity", quantity.String(),
+		"spread_bps", *spreadBPS,
+		"slippage_bps", *slippageBPS,
+		"run_updated", result.Stats.RunUpdated,
+		"result_inserted", result.Stats.ResultInserted,
+		"result_updated", result.Stats.ResultUpdated,
+	)
+}
+
+func featureServiceConfig(cfg *config.Config) appfeatures.ServiceConfig {
+	featureCfg := appfeatures.DefaultServiceConfig()
+	featureCfg.DataQuality = domainfeatures.DataQualityFeatureConfig{
+		MaxStaleness: time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
+	}
+	return featureCfg
+}

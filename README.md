@@ -48,9 +48,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 dry-run research preflight over persisted regime states, with coverage metrics and automatic result recording, still without strategy execution.
 - Initial Phase 4 hypothesis rule evaluation over persisted regimes and recalculated feature snapshots, with signal-rule metrics and automatic result recording, still without trade execution or PnL.
 - Initial Phase 4 cost-aware backtest domain math for conservative round trips, maker/taker fees, spread/slippage price impact, net PnL, profit factor, expectancy, win rate, and max drawdown.
+- Initial Phase 4 fixed-horizon research backtest over rule matches, with explicit holding-period candles, fixed research quantity, cost-aware metrics, overlap prevention, and automatic result recording; still without risk-engine sizing, paper execution, or live trading.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should wire the cost-aware backtest math into research rule observations, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add explicit in-sample/out-of-sample splits and reports, still without live trading.
 
 ## What This Is Not
 
@@ -252,6 +253,15 @@ Rule evaluation reloads the exact draft hypothesis by `(name, version)` and veri
 
 The backtest domain currently contains cost-aware trade math only. It computes executable round-trip prices from mid price plus conservative half-spread and slippage impact, applies maker/taker fees on both sides, and summarizes net-PnL metrics. It is not wired to strategy execution yet and cannot place orders.
 
+To run the first fixed-horizon research backtest over rule matches:
+
+```powershell
+$env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?sslmode=disable"
+go run ./cmd/research-backtest -config configs/config.example.yaml -run-id research_... -holding-period-candles 1 -quantity 1
+```
+
+This command only backtests rule matches after regime gating. It enters on the next candle open after a signal observation, exits after the explicit holding horizon, prevents overlapping simulated trades per symbol/interval, applies conservative fees/spread/slippage, and records an `INCONCLUSIVE` result because out-of-sample and walk-forward validation are not implemented yet. It does not perform risk-engine position sizing, paper execution, or live orders.
+
 ## Regime Classification
 
 The regime command reads persisted candles, public trades, and orderbook snapshots, computes the latest feature set in the requested window, classifies the market regime, and upserts one `regime_states` row per symbol/interval. It does not run strategies and cannot place orders.
@@ -285,6 +295,7 @@ make hypothesis-import HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yaml
 make research-schedule HYPOTHESIS_NAME=trend_momentum_draft HYPOTHESIS_VERSION=0.1.0 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z
 make research-dry-run RUN_ID=research_...
 make research-evaluate-rules RUN_ID=research_...
+make research-backtest RUN_ID=research_... HOLDING_PERIOD_CANDLES=1 QUANTITY=1
 make research-record-not-executed RUN_ID=research_...
 ```
 

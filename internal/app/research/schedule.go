@@ -11,6 +11,7 @@ import (
 	appfeatures "github.com/VersoIt/Inquisitor/internal/app/features"
 	"github.com/VersoIt/Inquisitor/internal/clock"
 	domainhypothesis "github.com/VersoIt/Inquisitor/internal/hypothesis"
+	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	domainregime "github.com/VersoIt/Inquisitor/internal/regime"
 	domainresearch "github.com/VersoIt/Inquisitor/internal/research"
 )
@@ -38,6 +39,7 @@ type Service struct {
 	runs             domainresearch.Repository
 	results          domainresearch.ResultRecorder
 	regimes          domainregime.Repository
+	candles          marketdata.CandleRepository
 	featureAssembler FeatureAssembler
 	clock            clock.Clock
 	idGenerator      IDGenerator
@@ -72,6 +74,12 @@ func WithRegimeRepository(repository domainregime.Repository) Option {
 func WithFeatureAssembler(assembler FeatureAssembler) Option {
 	return func(service *Service) {
 		service.featureAssembler = assembler
+	}
+}
+
+func WithCandleRepository(repository marketdata.CandleRepository) Option {
+	return func(service *Service) {
+		service.candles = repository
 	}
 }
 

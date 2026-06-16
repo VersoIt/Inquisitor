@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type Outcome string
@@ -32,6 +34,17 @@ type Metrics struct {
 	SignalFailures            int     `json:"signal_failures"`
 	SignalSkips               int     `json:"signal_skips"`
 	FeatureEvaluationFailures int     `json:"feature_evaluation_failures"`
+	GrossProfit               string  `json:"gross_profit,omitempty"`
+	GrossLoss                 string  `json:"gross_loss,omitempty"`
+	TotalFees                 string  `json:"total_fees,omitempty"`
+	NetPnL                    string  `json:"net_pnl,omitempty"`
+	Expectancy                string  `json:"expectancy,omitempty"`
+	ProfitFactor              string  `json:"profit_factor,omitempty"`
+	ProfitFactorDefined       bool    `json:"profit_factor_defined,omitempty"`
+	WinRatePct                float64 `json:"win_rate_pct,omitempty"`
+	MaxDrawdownPct            float64 `json:"max_drawdown_pct,omitempty"`
+	InitialEquity             string  `json:"initial_equity,omitempty"`
+	FinalEquity               string  `json:"final_equity,omitempty"`
 	FeesIncluded              bool    `json:"fees_included"`
 	SpreadIncluded            bool    `json:"spread_included"`
 	SlippageIncluded          bool    `json:"slippage_included"`
@@ -248,6 +261,20 @@ func validateMetrics(finalStatus Status, outcome Outcome, metrics Metrics) []str
 	if metrics.FeatureEvaluationFailures < 0 {
 		problems = append(problems, "metrics.feature_evaluation_failures must be greater than or equal to zero")
 	}
+	problems = append(problems, validateOptionalDecimalMetric("metrics.gross_profit", metrics.GrossProfit, true)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.gross_loss", metrics.GrossLoss, true)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.total_fees", metrics.TotalFees, true)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.net_pnl", metrics.NetPnL, false)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.expectancy", metrics.Expectancy, false)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.profit_factor", metrics.ProfitFactor, true)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.initial_equity", metrics.InitialEquity, true)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.final_equity", metrics.FinalEquity, false)...)
+	if metrics.WinRatePct < 0 || metrics.WinRatePct > 100 {
+		problems = append(problems, "metrics.win_rate_pct must be between 0 and 100")
+	}
+	if metrics.MaxDrawdownPct < 0 || metrics.MaxDrawdownPct > 100 {
+		problems = append(problems, "metrics.max_drawdown_pct must be between 0 and 100")
+	}
 	if outcome == OutcomeNotExecuted {
 		if finalStatus == StatusCompleted {
 			problems = append(problems, "NOT_EXECUTED outcome must not use COMPLETED final status")
@@ -286,6 +313,20 @@ func validateMetrics(finalStatus Status, outcome Outcome, metrics Metrics) []str
 		}
 	}
 	return problems
+}
+
+func validateOptionalDecimalMetric(field string, value string, nonNegative bool) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parsed, err := decimal.NewFromString(strings.TrimSpace(value))
+	if err != nil {
+		return []string{field + " must be a decimal string"}
+	}
+	if nonNegative && parsed.IsNegative() {
+		return []string{field + " must be greater than or equal to zero"}
+	}
+	return nil
 }
 
 func validateReasons(reasons []string) []string {

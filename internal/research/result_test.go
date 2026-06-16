@@ -127,6 +127,34 @@ func TestValidateResultRejectsInvalidResultsTableDriven(t *testing.T) {
 			wantErrSub: "signal evaluation counts must balance",
 		},
 		{
+			name: "invalid net pnl decimal",
+			mutate: func(result *research.Result) {
+				result.Metrics.NetPnL = "moon"
+			},
+			wantErrSub: "net_pnl",
+		},
+		{
+			name: "negative total fees",
+			mutate: func(result *research.Result) {
+				result.Metrics.TotalFees = "-1"
+			},
+			wantErrSub: "total_fees",
+		},
+		{
+			name: "win rate above percent range",
+			mutate: func(result *research.Result) {
+				result.Metrics.WinRatePct = 101
+			},
+			wantErrSub: "win_rate_pct",
+		},
+		{
+			name: "drawdown below percent range",
+			mutate: func(result *research.Result) {
+				result.Metrics.MaxDrawdownPct = -1
+			},
+			wantErrSub: "max_drawdown_pct",
+		},
+		{
 			name: "not executed with trades",
 			mutate: func(result *research.Result) {
 				result.Metrics.Trades = 1

@@ -16,8 +16,11 @@ HYPOTHESIS_NAME ?= trend_momentum_draft
 HYPOTHESIS_VERSION ?= 0.1.0
 RUN_ID ?=
 RESULT_SUMMARY ?= Strategy executor is intentionally not implemented yet.
+HOLDING_PERIOD_CANDLES ?= 1
+INITIAL_EQUITY ?=
+QUANTITY ?= 1
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-record-not-executed docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -56,6 +59,9 @@ research-dry-run:
 
 research-evaluate-rules:
 	$(GO) run ./cmd/research-evaluate-rules -config $(CONFIG) -run-id $(RUN_ID) -feature-lookback $(FEATURE_LOOKBACK) -candle-limit $(LIMIT) -trade-limit $(TRADE_LIMIT) -snapshot-limit $(SNAPSHOT_LIMIT)
+
+research-backtest:
+	$(GO) run ./cmd/research-backtest -config $(CONFIG) -run-id $(RUN_ID) -feature-lookback $(FEATURE_LOOKBACK) -holding-period-candles $(HOLDING_PERIOD_CANDLES) -quantity $(QUANTITY) -candle-limit $(LIMIT) -trade-limit $(TRADE_LIMIT) -snapshot-limit $(SNAPSHOT_LIMIT) $(if $(INITIAL_EQUITY),-initial-equity $(INITIAL_EQUITY),)
 
 research-record-not-executed:
 	$(GO) run ./cmd/research-result -config $(CONFIG) -run-id $(RUN_ID) -final-status FAILED -outcome NOT_EXECUTED -summary "$(RESULT_SUMMARY)" -reasons scaffold_only

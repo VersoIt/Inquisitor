@@ -23,6 +23,7 @@ type Summary struct {
 	ProfitFactorDefined bool
 	WinRate             decimal.Decimal
 	MaxDrawdown         decimal.Decimal
+	InitialEquity       decimal.Decimal
 	FinalEquity         decimal.Decimal
 }
 
@@ -32,8 +33,9 @@ func SummarizeRoundTrips(initialEquity decimal.Decimal, trades []RoundTrip) (Sum
 	}
 
 	summary := Summary{
-		Trades:      len(trades),
-		FinalEquity: initialEquity,
+		Trades:        len(trades),
+		InitialEquity: initialEquity,
+		FinalEquity:   initialEquity,
 	}
 	peak := initialEquity
 	for index, trade := range trades {

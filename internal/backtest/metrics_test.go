@@ -64,6 +64,7 @@ func TestSummarizeRoundTripsComputesConservativeMetrics(t *testing.T) {
 	assertDecimal(t, "profit factor", got.ProfitFactor.Round(6), "3.665565")
 	assertDecimal(t, "expectancy", got.Expectancy, "4.7025025")
 	assertDecimal(t, "win rate", got.WinRate.Round(6), "0.666667")
+	assertDecimal(t, "initial equity", got.InitialEquity, "1000")
 	assertDecimal(t, "final equity", got.FinalEquity, "1014.1075075")
 	assertDecimal(t, "max drawdown", got.MaxDrawdown.Round(6), "0.005242")
 	if !got.ProfitFactorDefined {
