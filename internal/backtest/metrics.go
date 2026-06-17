@@ -34,6 +34,25 @@ type SplitSummary struct {
 	OutOfSample Summary
 }
 
+type WalkForwardConfig struct {
+	WindowStart time.Time
+	WindowEnd   time.Time
+	Folds       int
+}
+
+type WalkForwardSummary struct {
+	WindowStart time.Time
+	WindowEnd   time.Time
+	Folds       []WalkForwardFold
+}
+
+type WalkForwardFold struct {
+	Index   int
+	Start   time.Time
+	End     time.Time
+	Summary Summary
+}
+
 func SummarizeRoundTrips(initialEquity decimal.Decimal, trades []RoundTrip) (Summary, error) {
 	if initialEquity.LessThanOrEqual(decimal.Zero) {
 		return Summary{}, errors.New("backtest summary validation failed: initial_equity must be positive")
@@ -123,6 +142,59 @@ func SummarizeRoundTripsBySplit(initialEquity decimal.Decimal, trades []RoundTri
 	}, nil
 }
 
+func SummarizeRoundTripsByWalkForward(initialEquity decimal.Decimal, trades []RoundTrip, cfg WalkForwardConfig) (WalkForwardSummary, error) {
+	if initialEquity.LessThanOrEqual(decimal.Zero) {
+		return WalkForwardSummary{}, errors.New("backtest walk-forward validation failed: initial_equity must be positive")
+	}
+	if cfg.WindowStart.IsZero() {
+		return WalkForwardSummary{}, errors.New("backtest walk-forward validation failed: window_start is required")
+	}
+	if cfg.WindowEnd.IsZero() {
+		return WalkForwardSummary{}, errors.New("backtest walk-forward validation failed: window_end is required")
+	}
+	windowStart := cfg.WindowStart.UTC()
+	windowEnd := cfg.WindowEnd.UTC()
+	if !windowEnd.After(windowStart) {
+		return WalkForwardSummary{}, errors.New("backtest walk-forward validation failed: window_end must be after window_start")
+	}
+	if cfg.Folds < 2 {
+		return WalkForwardSummary{}, errors.New("backtest walk-forward validation failed: folds must be at least 2")
+	}
+
+	foldTrades := make([][]RoundTrip, cfg.Folds)
+	for index, trade := range trades {
+		if err := ValidateRoundTrip(trade); err != nil {
+			return WalkForwardSummary{}, errors.New("backtest walk-forward validation failed: trade[" + decimal.NewFromInt(int64(index)).String() + "] " + err.Error())
+		}
+		entry := trade.Entry.Time.UTC()
+		if entry.Before(windowStart) || !entry.Before(windowEnd) {
+			return WalkForwardSummary{}, errors.New("backtest walk-forward validation failed: trade[" + decimal.NewFromInt(int64(index)).String() + "] entry_time must be within walk-forward window")
+		}
+		foldIndex := walkForwardFoldIndex(entry, windowStart, windowEnd, cfg.Folds)
+		foldTrades[foldIndex] = append(foldTrades[foldIndex], trade)
+	}
+
+	folds := make([]WalkForwardFold, 0, cfg.Folds)
+	for index := 0; index < cfg.Folds; index++ {
+		start, end := walkForwardFoldBounds(windowStart, windowEnd, cfg.Folds, index)
+		summary, err := SummarizeRoundTrips(initialEquity, foldTrades[index])
+		if err != nil {
+			return WalkForwardSummary{}, err
+		}
+		folds = append(folds, WalkForwardFold{
+			Index:   index + 1,
+			Start:   start,
+			End:     end,
+			Summary: summary,
+		})
+	}
+	return WalkForwardSummary{
+		WindowStart: windowStart,
+		WindowEnd:   windowEnd,
+		Folds:       folds,
+	}, nil
+}
+
 func ValidateRoundTrip(trade RoundTrip) error {
 	var problems []string
 	if !KnownDirection(trade.Direction) {
@@ -153,4 +225,27 @@ func ValidateRoundTrip(trade RoundTrip) error {
 		return errors.New("round trip validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func walkForwardFoldIndex(entry, windowStart, windowEnd time.Time, folds int) int {
+	duration := windowEnd.Sub(windowStart)
+	elapsed := entry.Sub(windowStart)
+	index := int((elapsed * time.Duration(folds)) / duration)
+	if index < 0 {
+		return 0
+	}
+	if index >= folds {
+		return folds - 1
+	}
+	return index
+}
+
+func walkForwardFoldBounds(windowStart, windowEnd time.Time, folds int, index int) (time.Time, time.Time) {
+	duration := windowEnd.Sub(windowStart)
+	start := windowStart.Add((duration * time.Duration(index)) / time.Duration(folds))
+	end := windowStart.Add((duration * time.Duration(index+1)) / time.Duration(folds))
+	if index == folds-1 {
+		end = windowEnd
+	}
+	return start, end
 }

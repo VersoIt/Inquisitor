@@ -253,6 +253,29 @@ func TestRenderReportMarkdownEscapesTableCells(t *testing.T) {
 	}
 }
 
+func TestRenderReportMarkdownIncludesWalkForwardCounters(t *testing.T) {
+	report := testReport(t)
+	report.Result.Metrics.WalkForwardFolds = 3
+	report.Result.Metrics.WalkForwardPassedFolds = 2
+	report.Result.Metrics.WalkForwardFailedFolds = 1
+	report.Result.Metrics.WalkForwardTrades = 42
+
+	got, err := research.RenderReportMarkdown(report)
+	if err != nil {
+		t.Fatalf("render markdown: %v", err)
+	}
+	for _, want := range []string{
+		"| Walk-forward folds | 3 |",
+		"| Walk-forward passed folds | 2 |",
+		"| Walk-forward failed folds | 1 |",
+		"| Walk-forward trades | 42 |",
+	} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("markdown missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func testReport(t *testing.T) research.Report {
 	t.Helper()
 

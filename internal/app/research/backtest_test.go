@@ -181,6 +181,66 @@ func TestServiceBacktestRulesRecordsResearchGateFailures(t *testing.T) {
 	}
 }
 
+func TestServiceBacktestRulesRecordsPassingWalkForwardFolds(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	hypothesis := singleMarketHypothesisRecord(t, plannedAt.Add(-time.Hour))
+	run := ruleEvaluationRun(t, plannedAt, hypothesis)
+	regimes := &fakeRegimeRepository{statesByKey: map[string][]domainregime.State{
+		"BTCUSDT|1": {
+			testRuleRegimeState(plannedAt.Add(-3*time.Minute), domainregime.RegimeTrendUp, 80),
+			testRuleRegimeState(plannedAt.Add(-2*time.Minute), domainregime.RegimeTrendUp, 80),
+			testRuleRegimeState(plannedAt.Add(-time.Minute), domainregime.RegimeTrendUp, 80),
+		},
+	}}
+	candles := &fakeCandleRepository{candles: []marketdata.Candle{
+		testBacktestCandle(plannedAt.Add(-3*time.Minute), "100", "101"),
+		testBacktestCandle(plannedAt.Add(-2*time.Minute), "100", "102"),
+		testBacktestCandle(plannedAt.Add(-time.Minute), "100", "103"),
+	}}
+	service := testBacktestService(
+		plannedAt,
+		hypothesis,
+		run,
+		&fakeResultRecorder{stats: domainresearch.RecordResultStats{RunUpdated: 1, ResultInserted: 1}},
+		regimes,
+		&fakeFeatureAssembler{featureSet: ruleFeatureSet("101", "100")},
+		candles,
+	)
+	req := validBacktestRequest(t, run.RunID)
+	req.OutOfSampleStart = plannedAt.Add(-2 * time.Minute)
+	req.WalkForwardFolds = 3
+	req.ResultGates = domainresearch.ResultGatePolicy{
+		Enabled:               true,
+		MinTrades:             1,
+		MaxDrawdownPct:        100,
+		RequireOutOfSample:    true,
+		RequireWalkForward:    true,
+		RequireRegimeAnalysis: true,
+		RequireCosts:          true,
+	}
+
+	got, err := service.BacktestRules(context.Background(), req)
+	if err != nil {
+		t.Fatalf("backtest rules with passing walk-forward folds: %v", err)
+	}
+
+	if !got.WalkForward.Included || !got.WalkForward.Passed {
+		t.Fatalf("expected passing walk-forward validation: %#v", got.WalkForward)
+	}
+	if got.Result.Metrics.WalkForwardFolds != 3 || got.Result.Metrics.WalkForwardPassedFolds != 3 || got.Result.Metrics.WalkForwardFailedFolds != 0 {
+		t.Fatalf("walk-forward metrics mismatch: %#v", got.Result.Metrics)
+	}
+	if !got.Result.Metrics.WalkForward || !got.Gates.Passed {
+		t.Fatalf("expected aggregate gates to pass after walk-forward: metrics=%#v gates=%#v", got.Result.Metrics, got.Gates)
+	}
+	if !containsReason(got.Result.Reasons, "walk_forward_folds:3") || !containsReason(got.Result.Reasons, "research_gates_passed") {
+		t.Fatalf("missing walk-forward/gate reasons: %#v", got.Result.Reasons)
+	}
+	if got.Result.Outcome != domainresearch.OutcomeInconclusive {
+		t.Fatalf("fixed-horizon backtest should not promote candidate in this slice, got %s", got.Result.Outcome)
+	}
+}
+
 func TestServiceBacktestRulesRecordsFailedResultWhenCoverageIsIncomplete(t *testing.T) {
 	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	hypothesis := singleMarketHypothesisRecord(t, plannedAt.Add(-time.Hour))
@@ -315,6 +375,15 @@ func TestServiceBacktestRulesRejectsInvalidInputsTableDriven(t *testing.T) {
 				return req
 			}(),
 			wantErrSub: "out_of_sample_start",
+		},
+		{
+			name: "invalid walk forward folds",
+			req: func() appresearch.BacktestRequest {
+				req := validBacktestRequest(t, run.RunID)
+				req.WalkForwardFolds = 1
+				return req
+			}(),
+			wantErrSub: "walk_forward_folds",
 		},
 	}
 

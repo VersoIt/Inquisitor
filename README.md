@@ -52,9 +52,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 explicit out-of-sample split metrics for fixed-horizon research backtests, including separate in-sample and out-of-sample trade counts, net PnL, profit factor, and drawdown.
 - Initial Phase 4 JSON/Markdown research report artifacts for fixed-horizon backtests, with stable run metadata, decision status, metrics, validation reasons, and safety gaps.
 - Initial Phase 4 conservative research gate evaluation for fixed-horizon backtests, using configured minimum trades, profit factor, expectancy, max drawdown, out-of-sample, walk-forward, regime-analysis, and cost-inclusion requirements.
+- Initial Phase 4 fixed chronological walk-forward fold validation for research backtests, with per-fold conservative gate checks and explicit passed/failed fold counts.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add real walk-forward folds/segments, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add candidate promotion/rejection decisions from completed validation gates, still without live trading.
 
 ## What This Is Not
 
@@ -277,7 +278,13 @@ go run ./cmd/research-backtest -config configs/config.example.yaml -run-id resea
 
 `-report-format` accepts `json`, `markdown`, or `md`. JSON is the default when `-report-path` is provided.
 
-This command only backtests rule matches after regime gating. It enters on the next candle open after a signal observation, exits after the explicit holding horizon, prevents overlapping simulated trades per symbol/interval, applies conservative fees/spread/slippage, and records an `INCONCLUSIVE` result because walk-forward validation is not implemented yet. When `-out-of-sample-start` is provided, trades with entry time before the split are reported as in-sample and trades at or after the split are reported as out-of-sample. The command evaluates configured research gates from `research.*` and records explicit gate reasons such as `gate_min_trades_failed` or `gate_walk_forward_missing`; because walk-forward folds are not implemented yet, the fixed-horizon backtest cannot become a `CANDIDATE`. Optional reports include run metadata, decision status, metrics, validation reasons, and safety gaps, but they do not promote a strategy to live trading. It does not perform risk-engine position sizing, paper execution, or live orders.
+To include fixed chronological walk-forward validation folds:
+
+```powershell
+go run ./cmd/research-backtest -config configs/config.example.yaml -run-id research_... -holding-period-candles 1 -quantity 1 -out-of-sample-start 2026-06-02T00:00:00Z -walk-forward-folds 4
+```
+
+This command only backtests rule matches after regime gating. It enters on the next candle open after a signal observation, exits after the explicit holding horizon, prevents overlapping simulated trades per symbol/interval, applies conservative fees/spread/slippage, and records an `INCONCLUSIVE` result until candidate promotion/rejection logic is explicitly implemented. When `-out-of-sample-start` is provided, trades with entry time before the split are reported as in-sample and trades at or after the split are reported as out-of-sample. When `-walk-forward-folds` is greater than zero, trades are partitioned by entry time into fixed chronological folds across the research window; every fold is checked against configured conservative gates, except recursive out-of-sample and walk-forward requirements are disabled inside each fold. The command evaluates configured research gates from `research.*` and records explicit reasons such as `gate_min_trades_failed`, `gate_walk_forward_missing`, or `walk_forward_fold:2:gate_expectancy_failed`. Optional reports include run metadata, decision status, metrics, validation reasons, and safety gaps, but they do not promote a strategy to live trading. It does not perform risk-engine position sizing, paper execution, or live orders.
 
 ## Regime Classification
 
@@ -312,7 +319,7 @@ make hypothesis-import HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yaml
 make research-schedule HYPOTHESIS_NAME=trend_momentum_draft HYPOTHESIS_VERSION=0.1.0 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z
 make research-dry-run RUN_ID=research_...
 make research-evaluate-rules RUN_ID=research_...
-make research-backtest RUN_ID=research_... HOLDING_PERIOD_CANDLES=1 QUANTITY=1 OUT_OF_SAMPLE_START=2026-06-02T00:00:00Z REPORT_PATH=reports/research_001.md REPORT_FORMAT=markdown
+make research-backtest RUN_ID=research_... HOLDING_PERIOD_CANDLES=1 QUANTITY=1 OUT_OF_SAMPLE_START=2026-06-02T00:00:00Z WALK_FORWARD_FOLDS=4 REPORT_PATH=reports/research_001.md REPORT_FORMAT=markdown
 make research-record-not-executed RUN_ID=research_...
 ```
 

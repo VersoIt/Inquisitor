@@ -139,6 +139,68 @@ func TestSummarizeRoundTripsBySplitPartitionsByEntryTime(t *testing.T) {
 	assertDecimal(t, "out-of-sample net pnl", got.OutOfSample.NetPnL, "-5")
 }
 
+func TestSummarizeRoundTripsByWalkForwardPartitionsFixedFolds(t *testing.T) {
+	entryTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
+	costs := mustCostModel(t, 0, 0, 0, 0, 1)
+	trades := []backtest.RoundTrip{
+		mustRoundTrip(t, backtest.RoundTripInput{
+			Direction:      backtest.DirectionLong,
+			EntryTime:      entryTime,
+			ExitTime:       entryTime.Add(30 * time.Minute),
+			EntryMidPrice:  decimal.RequireFromString("100"),
+			ExitMidPrice:   decimal.RequireFromString("101"),
+			Quantity:       decimal.RequireFromString("1"),
+			EntryLiquidity: backtest.LiquidityTaker,
+			ExitLiquidity:  backtest.LiquidityTaker,
+			Costs:          costs,
+		}),
+		mustRoundTrip(t, backtest.RoundTripInput{
+			Direction:      backtest.DirectionLong,
+			EntryTime:      entryTime.Add(time.Hour),
+			ExitTime:       entryTime.Add(90 * time.Minute),
+			EntryMidPrice:  decimal.RequireFromString("100"),
+			ExitMidPrice:   decimal.RequireFromString("98"),
+			Quantity:       decimal.RequireFromString("1"),
+			EntryLiquidity: backtest.LiquidityTaker,
+			ExitLiquidity:  backtest.LiquidityTaker,
+			Costs:          costs,
+		}),
+		mustRoundTrip(t, backtest.RoundTripInput{
+			Direction:      backtest.DirectionShort,
+			EntryTime:      entryTime.Add(2 * time.Hour),
+			ExitTime:       entryTime.Add(150 * time.Minute),
+			EntryMidPrice:  decimal.RequireFromString("100"),
+			ExitMidPrice:   decimal.RequireFromString("97"),
+			Quantity:       decimal.RequireFromString("1"),
+			EntryLiquidity: backtest.LiquidityTaker,
+			ExitLiquidity:  backtest.LiquidityTaker,
+			Costs:          costs,
+		}),
+	}
+
+	got, err := backtest.SummarizeRoundTripsByWalkForward(decimal.RequireFromString("1000"), trades, backtest.WalkForwardConfig{
+		WindowStart: entryTime,
+		WindowEnd:   entryTime.Add(3 * time.Hour),
+		Folds:       3,
+	})
+	if err != nil {
+		t.Fatalf("summarize walk-forward round trips: %v", err)
+	}
+
+	if len(got.Folds) != 3 {
+		t.Fatalf("fold count mismatch: %#v", got)
+	}
+	if got.Folds[0].Summary.Trades != 1 || got.Folds[1].Summary.Trades != 1 || got.Folds[2].Summary.Trades != 1 {
+		t.Fatalf("fold trade counts mismatch: %#v", got.Folds)
+	}
+	if got.Folds[1].Start != entryTime.Add(time.Hour) || got.Folds[1].End != entryTime.Add(2*time.Hour) {
+		t.Fatalf("fold bounds mismatch: %#v", got.Folds[1])
+	}
+	assertDecimal(t, "fold 1 net pnl", got.Folds[0].Summary.NetPnL, "1")
+	assertDecimal(t, "fold 2 net pnl", got.Folds[1].Summary.NetPnL, "-2")
+	assertDecimal(t, "fold 3 net pnl", got.Folds[2].Summary.NetPnL, "3")
+}
+
 func TestSummarizeRoundTripsRejectsInvalidInputsTableDriven(t *testing.T) {
 	entryTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	validTrade := mustRoundTrip(t, backtest.RoundTripInput{
@@ -207,6 +269,72 @@ func TestSummarizeRoundTripsBySplitRejectsMissingSplitTime(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "split_time") {
 		t.Fatalf("expected split_time error, got %v", err)
+	}
+}
+
+func TestSummarizeRoundTripsByWalkForwardRejectsInvalidInputsTableDriven(t *testing.T) {
+	entryTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
+	validTrade := mustRoundTrip(t, backtest.RoundTripInput{
+		Direction:      backtest.DirectionLong,
+		EntryTime:      entryTime,
+		ExitTime:       entryTime.Add(time.Hour),
+		EntryMidPrice:  decimal.RequireFromString("100"),
+		ExitMidPrice:   decimal.RequireFromString("101"),
+		Quantity:       decimal.RequireFromString("1"),
+		EntryLiquidity: backtest.LiquidityTaker,
+		ExitLiquidity:  backtest.LiquidityTaker,
+		Costs:          mustCostModel(t, 0, 0, 0, 0, 1),
+	})
+
+	tests := []struct {
+		name       string
+		equity     decimal.Decimal
+		trades     []backtest.RoundTrip
+		cfg        backtest.WalkForwardConfig
+		wantErrSub string
+	}{
+		{
+			name:       "missing initial equity",
+			equity:     decimal.Zero,
+			trades:     []backtest.RoundTrip{validTrade},
+			cfg:        backtest.WalkForwardConfig{WindowStart: entryTime, WindowEnd: entryTime.Add(time.Hour), Folds: 2},
+			wantErrSub: "initial_equity",
+		},
+		{
+			name:       "missing window start",
+			equity:     decimal.RequireFromString("1000"),
+			cfg:        backtest.WalkForwardConfig{WindowEnd: entryTime.Add(time.Hour), Folds: 2},
+			wantErrSub: "window_start",
+		},
+		{
+			name:       "invalid fold count",
+			equity:     decimal.RequireFromString("1000"),
+			cfg:        backtest.WalkForwardConfig{WindowStart: entryTime, WindowEnd: entryTime.Add(time.Hour), Folds: 1},
+			wantErrSub: "folds",
+		},
+		{
+			name:   "trade outside window",
+			equity: decimal.RequireFromString("1000"),
+			trades: []backtest.RoundTrip{func() backtest.RoundTrip {
+				trade := validTrade
+				trade.Entry.Time = entryTime.Add(2 * time.Hour)
+				return trade
+			}()},
+			cfg:        backtest.WalkForwardConfig{WindowStart: entryTime, WindowEnd: entryTime.Add(time.Hour), Folds: 2},
+			wantErrSub: "entry_time",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := backtest.SummarizeRoundTripsByWalkForward(tt.equity, tt.trades, tt.cfg)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
 	}
 }
 

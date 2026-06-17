@@ -262,6 +262,9 @@ func gateMetrics() research.Metrics {
 		SlippageIncluded:               true,
 		OutOfSample:                    true,
 		WalkForward:                    true,
+		WalkForwardFolds:               3,
+		WalkForwardPassedFolds:         3,
+		WalkForwardTrades:              3,
 		RegimeAnalysisIncluded:         true,
 	}
 }

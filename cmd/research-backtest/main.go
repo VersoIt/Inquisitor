@@ -28,6 +28,7 @@ func main() {
 	minRegimeCoverage := flag.Float64("min-regime-coverage-pct", 100, "minimum historical regime-state coverage percentage")
 	holdingPeriodCandles := flag.Int("holding-period-candles", 1, "explicit fixed holding horizon in candles")
 	outOfSampleStartValue := flag.String("out-of-sample-start", "", "optional UTC out-of-sample split start in RFC3339 format")
+	walkForwardFolds := flag.Int("walk-forward-folds", 0, "optional fixed chronological walk-forward validation fold count; zero disables walk-forward")
 	initialEquityValue := flag.String("initial-equity", "", "initial research equity; defaults to paper.initial_balance from config")
 	quantityValue := flag.String("quantity", "1", "fixed research quantity per simulated trade")
 	spreadBPS := flag.Int("spread-bps", -1, "conservative spread assumption in bps; defaults to risk.max_spread_bps")
@@ -123,6 +124,7 @@ func main() {
 		MinRegimeCoveragePct: *minRegimeCoverage,
 		HoldingPeriodCandles: *holdingPeriodCandles,
 		OutOfSampleStart:     outOfSampleStart,
+		WalkForwardFolds:     *walkForwardFolds,
 		InitialEquity:        initialEquity,
 		Quantity:             quantity,
 		Costs:                costs,
@@ -178,6 +180,9 @@ func main() {
 		"research_gates_enabled", result.Gates.Enabled,
 		"research_gates_passed", result.Gates.Passed,
 		"research_gate_reasons", result.Gates.Reasons,
+		"walk_forward_folds", result.Result.Metrics.WalkForwardFolds,
+		"walk_forward_passed_folds", result.Result.Metrics.WalkForwardPassedFolds,
+		"walk_forward_failed_folds", result.Result.Metrics.WalkForwardFailedFolds,
 		"holding_period_candles", *holdingPeriodCandles,
 		"quantity", quantity.String(),
 		"spread_bps", *spreadBPS,

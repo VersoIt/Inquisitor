@@ -23,6 +23,7 @@ type BacktestRequest struct {
 	MinRegimeCoveragePct float64
 	HoldingPeriodCandles int
 	OutOfSampleStart     time.Time
+	WalkForwardFolds     int
 	InitialEquity        decimal.Decimal
 	Quantity             decimal.Decimal
 	Costs                domainbacktest.CostModel
@@ -35,15 +36,16 @@ type BacktestRequest struct {
 }
 
 type BacktestResult struct {
-	Run      domainresearch.Run
-	Result   domainresearch.Result
-	Stats    domainresearch.RecordResultStats
-	Summary  domainbacktest.Summary
-	Trades   []domainbacktest.RoundTrip
-	Split    BacktestSplit
-	Coverage RegimeCoverage
-	Skipped  BacktestSkipped
-	Gates    domainresearch.ResultGateEvaluation
+	Run         domainresearch.Run
+	Result      domainresearch.Result
+	Stats       domainresearch.RecordResultStats
+	Summary     domainbacktest.Summary
+	Trades      []domainbacktest.RoundTrip
+	Split       BacktestSplit
+	WalkForward BacktestWalkForward
+	Coverage    RegimeCoverage
+	Skipped     BacktestSkipped
+	Gates       domainresearch.ResultGateEvaluation
 }
 
 type BacktestSplit struct {
@@ -51,6 +53,17 @@ type BacktestSplit struct {
 	SplitTime   time.Time
 	InSample    domainbacktest.Summary
 	OutOfSample domainbacktest.Summary
+}
+
+type BacktestWalkForward struct {
+	Included    bool
+	Passed      bool
+	Summary     domainbacktest.WalkForwardSummary
+	FoldGates   []domainresearch.ResultGateEvaluation
+	PassedFolds int
+	FailedFolds int
+	Trades      int
+	Reasons     []string
 }
 
 type BacktestSkipped struct {
@@ -114,7 +127,7 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		minCoverage = defaultMinRegimeCoveragePct
 	}
 	if coverage.Percent < minCoverage {
-		metrics := backtestMetrics(coverage, domainbacktest.Summary{}, BacktestSplit{}, BacktestSkipped{})
+		metrics := backtestSummaryMetrics(coverage, domainbacktest.Summary{})
 		result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusFailed, domainresearch.OutcomeNotExecuted, metrics, append(coverageReasons, "regime_coverage_below_threshold"))
 		if err != nil {
 			return BacktestResult{}, err
@@ -134,7 +147,11 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	if err != nil {
 		return BacktestResult{}, err
 	}
-	metrics := backtestMetrics(coverage, summary, split, skipped)
+	walkForward, err := summarizeBacktestWalkForward(req.InitialEquity, trades, run, coverage, req.WalkForwardFolds, req.ResultGates)
+	if err != nil {
+		return BacktestResult{}, err
+	}
+	metrics := backtestMetrics(coverage, summary, split, walkForward, skipped)
 	gates, err := domainresearch.EvaluateMetricsGates(metrics, req.ResultGates)
 	if err != nil {
 		return BacktestResult{}, err
@@ -144,7 +161,6 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		fmt.Sprintf("fixed_horizon_candles:%d", req.HoldingPeriodCandles),
 		fmt.Sprintf("trade_quantity:%s", req.Quantity.String()),
 		fmt.Sprintf("backtest_trades:%d", len(trades)),
-		"walk_forward_not_run",
 	)
 	if split.Included {
 		reasons = append(reasons,
@@ -161,6 +177,16 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	if len(trades) == 0 {
 		reasons = append(reasons, "no_rule_matches_backtested")
 	}
+	if walkForward.Included {
+		reasons = append(reasons,
+			fmt.Sprintf("walk_forward_folds:%d", len(walkForward.Summary.Folds)),
+			fmt.Sprintf("walk_forward_passed_folds:%d", walkForward.PassedFolds),
+			fmt.Sprintf("walk_forward_failed_folds:%d", walkForward.FailedFolds),
+		)
+		reasons = append(reasons, walkForward.Reasons...)
+	} else {
+		reasons = append(reasons, "walk_forward_not_run")
+	}
 	if gates.Enabled {
 		reasons = append(reasons, gates.Reasons...)
 	}
@@ -169,15 +195,16 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		return BacktestResult{}, err
 	}
 	return BacktestResult{
-		Run:      finalRun,
-		Result:   result,
-		Stats:    stats,
-		Summary:  summary,
-		Trades:   trades,
-		Split:    split,
-		Coverage: coverage,
-		Skipped:  skipped,
-		Gates:    gates,
+		Run:         finalRun,
+		Result:      result,
+		Stats:       stats,
+		Summary:     summary,
+		Trades:      trades,
+		Split:       split,
+		WalkForward: walkForward,
+		Coverage:    coverage,
+		Skipped:     skipped,
+		Gates:       gates,
 	}, nil
 }
 
@@ -197,6 +224,12 @@ func validateBacktestRequest(req BacktestRequest) error {
 	}
 	if req.HoldingPeriodCandles <= 0 {
 		return fmt.Errorf("holding_period_candles must be positive")
+	}
+	if req.WalkForwardFolds < 0 {
+		return fmt.Errorf("walk_forward_folds must be greater than or equal to zero")
+	}
+	if req.WalkForwardFolds == 1 {
+		return fmt.Errorf("walk_forward_folds must be zero or at least 2")
 	}
 	if req.InitialEquity.LessThanOrEqual(decimal.Zero) {
 		return fmt.Errorf("initial_equity must be positive")
@@ -386,6 +419,53 @@ func summarizeBacktestSplit(initialEquity decimal.Decimal, trades []domainbackte
 	}, nil
 }
 
+func summarizeBacktestWalkForward(initialEquity decimal.Decimal, trades []domainbacktest.RoundTrip, run domainresearch.Run, coverage RegimeCoverage, folds int, policy domainresearch.ResultGatePolicy) (BacktestWalkForward, error) {
+	if folds == 0 {
+		return BacktestWalkForward{}, nil
+	}
+	summary, err := domainbacktest.SummarizeRoundTripsByWalkForward(initialEquity, trades, domainbacktest.WalkForwardConfig{
+		WindowStart: run.WindowStart,
+		WindowEnd:   run.WindowEnd,
+		Folds:       folds,
+	})
+	if err != nil {
+		return BacktestWalkForward{}, err
+	}
+
+	result := BacktestWalkForward{
+		Included: true,
+		Summary:  summary,
+	}
+	if !policy.Enabled {
+		result.FailedFolds = len(summary.Folds)
+		result.Reasons = append(result.Reasons, "walk_forward_gate_policy_disabled")
+		return result, nil
+	}
+
+	foldPolicy := policy
+	foldPolicy.RequireOutOfSample = false
+	foldPolicy.RequireWalkForward = false
+	for _, fold := range summary.Folds {
+		result.Trades += fold.Summary.Trades
+		metrics := backtestSummaryMetrics(coverage, fold.Summary)
+		evaluation, err := domainresearch.EvaluateMetricsGates(metrics, foldPolicy)
+		if err != nil {
+			return BacktestWalkForward{}, err
+		}
+		result.FoldGates = append(result.FoldGates, evaluation)
+		if evaluation.Passed {
+			result.PassedFolds++
+			continue
+		}
+		result.FailedFolds++
+		for _, reason := range evaluation.Reasons {
+			result.Reasons = append(result.Reasons, fmt.Sprintf("walk_forward_fold:%d:%s", fold.Index, reason))
+		}
+	}
+	result.Passed = len(summary.Folds) > 0 && result.FailedFolds == 0
+	return result, nil
+}
+
 func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.Run, finalStatus domainresearch.Status, outcome domainresearch.Outcome, metrics domainresearch.Metrics, reasons []string) (domainresearch.Result, domainresearch.Run, domainresearch.RecordResultStats, error) {
 	text := "Fixed-horizon research backtest completed with cost-aware execution assumptions; walk-forward validation is not implemented yet."
 	if outcome == domainresearch.OutcomeNotExecuted {
@@ -414,45 +494,55 @@ func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.R
 	return result, finalRun, stats, nil
 }
 
-func backtestMetrics(coverage RegimeCoverage, summary domainbacktest.Summary, split BacktestSplit, skipped BacktestSkipped) domainresearch.Metrics {
-	metrics := domainresearch.Metrics{
-		Trades:                    summary.Trades,
-		RegimeStates:              coverage.Observed,
-		ExpectedRegimeStates:      coverage.Expected,
-		MissingRegimeStates:       coverage.Missing,
-		RegimeCoveragePct:         coverage.Percent,
-		FeatureEvaluationFailures: skipped.FeatureIncomplete,
-		FeesIncluded:              summary.Trades > 0,
-		SpreadIncluded:            summary.Trades > 0,
-		SlippageIncluded:          summary.Trades > 0,
-		RegimeAnalysisIncluded:    coverage.Missing == 0,
-		GrossProfit:               summary.GrossProfit.String(),
-		GrossLoss:                 summary.GrossLoss.String(),
-		TotalFees:                 summary.TotalFees.String(),
-		NetPnL:                    summary.NetPnL.String(),
-		Expectancy:                summary.Expectancy.String(),
-		ProfitFactor:              summary.ProfitFactor.String(),
-		ProfitFactorDefined:       summary.ProfitFactorDefined,
-		WinRatePct:                decimalPct(summary.WinRate),
-		MaxDrawdownPct:            decimalPct(summary.MaxDrawdown),
-		InitialEquity:             summary.InitialEquity.String(),
-		FinalEquity:               summary.FinalEquity.String(),
+func backtestMetrics(coverage RegimeCoverage, summary domainbacktest.Summary, split BacktestSplit, walkForward BacktestWalkForward, skipped BacktestSkipped) domainresearch.Metrics {
+	metrics := backtestSummaryMetrics(coverage, summary)
+	metrics.FeatureEvaluationFailures = skipped.FeatureIncomplete
+	if split.Included {
+		metrics.OutOfSample = true
+		metrics.InSampleTrades = split.InSample.Trades
+		metrics.InSampleNetPnL = split.InSample.NetPnL.String()
+		metrics.InSampleProfitFactor = split.InSample.ProfitFactor.String()
+		metrics.InSampleProfitFactorDefined = split.InSample.ProfitFactorDefined
+		metrics.InSampleMaxDrawdownPct = decimalPct(split.InSample.MaxDrawdown)
+		metrics.OutOfSampleTrades = split.OutOfSample.Trades
+		metrics.OutOfSampleNetPnL = split.OutOfSample.NetPnL.String()
+		metrics.OutOfSampleProfitFactor = split.OutOfSample.ProfitFactor.String()
+		metrics.OutOfSampleProfitFactorDefined = split.OutOfSample.ProfitFactorDefined
+		metrics.OutOfSampleMaxDrawdownPct = decimalPct(split.OutOfSample.MaxDrawdown)
 	}
-	if !split.Included {
-		return metrics
+	if walkForward.Included {
+		metrics.WalkForward = walkForward.Passed
+		metrics.WalkForwardFolds = len(walkForward.Summary.Folds)
+		metrics.WalkForwardPassedFolds = walkForward.PassedFolds
+		metrics.WalkForwardFailedFolds = walkForward.FailedFolds
+		metrics.WalkForwardTrades = walkForward.Trades
 	}
-	metrics.OutOfSample = true
-	metrics.InSampleTrades = split.InSample.Trades
-	metrics.InSampleNetPnL = split.InSample.NetPnL.String()
-	metrics.InSampleProfitFactor = split.InSample.ProfitFactor.String()
-	metrics.InSampleProfitFactorDefined = split.InSample.ProfitFactorDefined
-	metrics.InSampleMaxDrawdownPct = decimalPct(split.InSample.MaxDrawdown)
-	metrics.OutOfSampleTrades = split.OutOfSample.Trades
-	metrics.OutOfSampleNetPnL = split.OutOfSample.NetPnL.String()
-	metrics.OutOfSampleProfitFactor = split.OutOfSample.ProfitFactor.String()
-	metrics.OutOfSampleProfitFactorDefined = split.OutOfSample.ProfitFactorDefined
-	metrics.OutOfSampleMaxDrawdownPct = decimalPct(split.OutOfSample.MaxDrawdown)
 	return metrics
+}
+
+func backtestSummaryMetrics(coverage RegimeCoverage, summary domainbacktest.Summary) domainresearch.Metrics {
+	return domainresearch.Metrics{
+		Trades:                 summary.Trades,
+		RegimeStates:           coverage.Observed,
+		ExpectedRegimeStates:   coverage.Expected,
+		MissingRegimeStates:    coverage.Missing,
+		RegimeCoveragePct:      coverage.Percent,
+		FeesIncluded:           summary.Trades > 0,
+		SpreadIncluded:         summary.Trades > 0,
+		SlippageIncluded:       summary.Trades > 0,
+		RegimeAnalysisIncluded: coverage.Missing == 0,
+		GrossProfit:            summary.GrossProfit.String(),
+		GrossLoss:              summary.GrossLoss.String(),
+		TotalFees:              summary.TotalFees.String(),
+		NetPnL:                 summary.NetPnL.String(),
+		Expectancy:             summary.Expectancy.String(),
+		ProfitFactor:           summary.ProfitFactor.String(),
+		ProfitFactorDefined:    summary.ProfitFactorDefined,
+		WinRatePct:             decimalPct(summary.WinRate),
+		MaxDrawdownPct:         decimalPct(summary.MaxDrawdown),
+		InitialEquity:          summary.InitialEquity.String(),
+		FinalEquity:            summary.FinalEquity.String(),
+	}
 }
 
 func decimalPct(value decimal.Decimal) float64 {

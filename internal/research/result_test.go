@@ -186,6 +186,32 @@ func TestValidateResultRejectsInvalidResultsTableDriven(t *testing.T) {
 			wantErrSub: "out_of_sample_max_drawdown_pct",
 		},
 		{
+			name: "unbalanced walk forward folds",
+			mutate: func(result *research.Result) {
+				result.Metrics.WalkForwardFolds = 3
+				result.Metrics.WalkForwardPassedFolds = 1
+				result.Metrics.WalkForwardFailedFolds = 1
+			},
+			wantErrSub: "walk-forward fold counts",
+		},
+		{
+			name: "walk forward true without folds",
+			mutate: func(result *research.Result) {
+				result.Metrics.WalkForward = true
+			},
+			wantErrSub: "walk_forward=true",
+		},
+		{
+			name: "walk forward true with failed folds",
+			mutate: func(result *research.Result) {
+				result.Metrics.WalkForward = true
+				result.Metrics.WalkForwardFolds = 3
+				result.Metrics.WalkForwardPassedFolds = 2
+				result.Metrics.WalkForwardFailedFolds = 1
+			},
+			wantErrSub: "zero failed",
+		},
+		{
 			name: "not executed with trades",
 			mutate: func(result *research.Result) {
 				result.Metrics.Trades = 1
@@ -266,6 +292,8 @@ func TestValidateResultAcceptsCandidateOnlyWithConservativeGates(t *testing.T) {
 			SlippageIncluded:       true,
 			OutOfSample:            true,
 			WalkForward:            true,
+			WalkForwardFolds:       3,
+			WalkForwardPassedFolds: 3,
 			RegimeAnalysisIncluded: true,
 		},
 		RecordedAt: time.Date(2026, 6, 12, 13, 0, 0, 0, time.UTC),

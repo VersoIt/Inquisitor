@@ -212,6 +212,14 @@ func RenderReportMarkdown(report Report) ([]byte, error) {
 			markdownRow{"Out-of-sample max drawdown", formatFloat(report.Result.Metrics.OutOfSampleMaxDrawdownPct) + "%"},
 		)
 	}
+	if report.Result.Metrics.WalkForwardFolds > 0 {
+		rows = append(rows,
+			markdownRow{"Walk-forward folds", strconv.Itoa(report.Result.Metrics.WalkForwardFolds)},
+			markdownRow{"Walk-forward passed folds", strconv.Itoa(report.Result.Metrics.WalkForwardPassedFolds)},
+			markdownRow{"Walk-forward failed folds", strconv.Itoa(report.Result.Metrics.WalkForwardFailedFolds)},
+			markdownRow{"Walk-forward trades", strconv.Itoa(report.Result.Metrics.WalkForwardTrades)},
+		)
+	}
 	writeMarkdownTable(&builder, rows)
 	builder.WriteString("\n")
 

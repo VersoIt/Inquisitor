@@ -20,6 +20,7 @@ HOLDING_PERIOD_CANDLES ?= 1
 INITIAL_EQUITY ?=
 QUANTITY ?= 1
 OUT_OF_SAMPLE_START ?=
+WALK_FORWARD_FOLDS ?= 0
 REPORT_PATH ?=
 REPORT_FORMAT ?= json
 
@@ -64,7 +65,7 @@ research-evaluate-rules:
 	$(GO) run ./cmd/research-evaluate-rules -config $(CONFIG) -run-id $(RUN_ID) -feature-lookback $(FEATURE_LOOKBACK) -candle-limit $(LIMIT) -trade-limit $(TRADE_LIMIT) -snapshot-limit $(SNAPSHOT_LIMIT)
 
 research-backtest:
-	$(GO) run ./cmd/research-backtest -config $(CONFIG) -run-id $(RUN_ID) -feature-lookback $(FEATURE_LOOKBACK) -holding-period-candles $(HOLDING_PERIOD_CANDLES) -quantity $(QUANTITY) -candle-limit $(LIMIT) -trade-limit $(TRADE_LIMIT) -snapshot-limit $(SNAPSHOT_LIMIT) $(if $(INITIAL_EQUITY),-initial-equity $(INITIAL_EQUITY),) $(if $(OUT_OF_SAMPLE_START),-out-of-sample-start $(OUT_OF_SAMPLE_START),) $(if $(REPORT_PATH),-report-path $(REPORT_PATH) -report-format $(REPORT_FORMAT),)
+	$(GO) run ./cmd/research-backtest -config $(CONFIG) -run-id $(RUN_ID) -feature-lookback $(FEATURE_LOOKBACK) -holding-period-candles $(HOLDING_PERIOD_CANDLES) -quantity $(QUANTITY) -walk-forward-folds $(WALK_FORWARD_FOLDS) -candle-limit $(LIMIT) -trade-limit $(TRADE_LIMIT) -snapshot-limit $(SNAPSHOT_LIMIT) $(if $(INITIAL_EQUITY),-initial-equity $(INITIAL_EQUITY),) $(if $(OUT_OF_SAMPLE_START),-out-of-sample-start $(OUT_OF_SAMPLE_START),) $(if $(REPORT_PATH),-report-path $(REPORT_PATH) -report-format $(REPORT_FORMAT),)
 
 research-record-not-executed:
 	$(GO) run ./cmd/research-result -config $(CONFIG) -run-id $(RUN_ID) -final-status FAILED -outcome NOT_EXECUTED -summary "$(RESULT_SUMMARY)" -reasons scaffold_only

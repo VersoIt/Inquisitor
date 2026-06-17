@@ -55,6 +55,10 @@ type Metrics struct {
 	OutOfSampleProfitFactor        string  `json:"out_of_sample_profit_factor,omitempty"`
 	OutOfSampleProfitFactorDefined bool    `json:"out_of_sample_profit_factor_defined,omitempty"`
 	OutOfSampleMaxDrawdownPct      float64 `json:"out_of_sample_max_drawdown_pct,omitempty"`
+	WalkForwardFolds               int     `json:"walk_forward_folds,omitempty"`
+	WalkForwardPassedFolds         int     `json:"walk_forward_passed_folds,omitempty"`
+	WalkForwardFailedFolds         int     `json:"walk_forward_failed_folds,omitempty"`
+	WalkForwardTrades              int     `json:"walk_forward_trades,omitempty"`
 	FeesIncluded                   bool    `json:"fees_included"`
 	SpreadIncluded                 bool    `json:"spread_included"`
 	SlippageIncluded               bool    `json:"slippage_included"`
@@ -270,6 +274,27 @@ func validateMetrics(finalStatus Status, outcome Outcome, metrics Metrics) []str
 	}
 	if metrics.FeatureEvaluationFailures < 0 {
 		problems = append(problems, "metrics.feature_evaluation_failures must be greater than or equal to zero")
+	}
+	if metrics.WalkForwardFolds < 0 {
+		problems = append(problems, "metrics.walk_forward_folds must be greater than or equal to zero")
+	}
+	if metrics.WalkForwardPassedFolds < 0 {
+		problems = append(problems, "metrics.walk_forward_passed_folds must be greater than or equal to zero")
+	}
+	if metrics.WalkForwardFailedFolds < 0 {
+		problems = append(problems, "metrics.walk_forward_failed_folds must be greater than or equal to zero")
+	}
+	if metrics.WalkForwardTrades < 0 {
+		problems = append(problems, "metrics.walk_forward_trades must be greater than or equal to zero")
+	}
+	if metrics.WalkForwardFolds > 0 && metrics.WalkForwardPassedFolds+metrics.WalkForwardFailedFolds != metrics.WalkForwardFolds {
+		problems = append(problems, "metrics walk-forward fold counts must balance")
+	}
+	if metrics.WalkForward && metrics.WalkForwardFolds == 0 {
+		problems = append(problems, "metrics.walk_forward=true requires walk_forward_folds")
+	}
+	if metrics.WalkForward && metrics.WalkForwardFailedFolds > 0 {
+		problems = append(problems, "metrics.walk_forward=true requires zero failed walk-forward folds")
 	}
 	if metrics.InSampleTrades < 0 {
 		problems = append(problems, "metrics.in_sample_trades must be greater than or equal to zero")
