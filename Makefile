@@ -25,8 +25,12 @@ REPORT_PATH ?=
 REPORT_FORMAT ?= json
 PAPER_RECORD ?=
 VALIDATION_ID ?=
+PAPER_SIM_FILE ?=
+PAPER_TRADE_PREFIX ?= paper_trade
+PAPER_SYMBOL ?=
+PAPER_INTERVAL ?=
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -74,6 +78,9 @@ research-record-not-executed:
 
 paper-validate:
 	$(GO) run ./cmd/paper -config $(CONFIG) -run-id $(RUN_ID) $(if $(PAPER_RECORD),-record,) $(if $(VALIDATION_ID),-validation-id $(VALIDATION_ID),)
+
+paper-simulate:
+	$(GO) run ./cmd/paper-simulate -config $(CONFIG) -validation-id $(VALIDATION_ID) -file $(PAPER_SIM_FILE) -trade-id-prefix $(PAPER_TRADE_PREFIX) $(if $(PAPER_SYMBOL),-symbol $(PAPER_SYMBOL),) $(if $(PAPER_INTERVAL),-interval $(PAPER_INTERVAL),)
 
 docker-up:
 	docker compose up -d postgres

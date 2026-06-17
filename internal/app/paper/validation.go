@@ -24,6 +24,7 @@ type Service struct {
 	runs        RunRepository
 	results     ResultRepository
 	records     domainpaper.ValidationRecordRepository
+	trades      domainpaper.ValidationTradeRepository
 	clock       clock.Clock
 	idGenerator IDGenerator
 }
@@ -81,6 +82,12 @@ func WithClock(clock clock.Clock) Option {
 func WithValidationRecordRepository(records domainpaper.ValidationRecordRepository) Option {
 	return func(service *Service) {
 		service.records = records
+	}
+}
+
+func WithValidationTradeRepository(trades domainpaper.ValidationTradeRepository) Option {
+	return func(service *Service) {
+		service.trades = trades
 	}
 }
 
