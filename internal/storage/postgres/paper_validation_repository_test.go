@@ -47,6 +47,7 @@ func TestPaperValidationRepositoryIntegrationTableDriven(t *testing.T) {
 	}
 
 	repo := postgres.NewPaperValidationRepository(db)
+	tradeRepo := postgres.NewPaperValidationTradeRepository(db)
 	record := testPaperValidationRecord(plannedAt.Add(2 * time.Hour))
 	record.RunID = finalRun.RunID
 
@@ -99,6 +100,40 @@ func TestPaperValidationRepositoryIntegrationTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records and lists paper validation trade",
+			run: func(t *testing.T) {
+				if _, err := repo.RecordValidation(ctx, record); err != nil {
+					t.Fatalf("ensure paper validation fixture: %v", err)
+				}
+				trade := testPaperValidationTrade(t, plannedAt.Add(3*time.Hour))
+				trade.ValidationID = record.ValidationID
+
+				stats, err := tradeRepo.RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade})
+				if err != nil {
+					t.Fatalf("record paper validation trade: %v", err)
+				}
+				if stats.Inserted != 1 || stats.Updated != 0 {
+					t.Fatalf("trade stats mismatch: %#v", stats)
+				}
+
+				got, err := tradeRepo.ListValidationTrades(ctx, domainpaper.ValidationTradeQuery{
+					ValidationID: record.ValidationID,
+					Symbol:       trade.Symbol,
+					Interval:     trade.Interval,
+					Limit:        10,
+				})
+				if err != nil {
+					t.Fatalf("list paper validation trades: %v", err)
+				}
+				if len(got) != 1 {
+					t.Fatalf("expected one validation trade, got %d", len(got))
+				}
+				if got[0].TradeID != trade.TradeID || !got[0].EquityAfter.Equal(trade.EquityAfter) {
+					t.Fatalf("unexpected validation trade: %#v", got[0])
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -139,6 +174,13 @@ func candidateResearchResult(t *testing.T, runID string, recordedAt time.Time) d
 
 func cleanupPaperValidationRecords(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM paper_validation_trades
+		WHERE validation_id IN ('paper_validation_sqlmock_0001')
+		   OR trade_id IN ('paper_trade_sqlmock_0001')
+	`); err != nil {
+		t.Fatalf("cleanup paper validation trades: %v", err)
+	}
 	_, err := db.ExecContext(ctx, `
 		DELETE FROM paper_validation_records
 		WHERE validation_id IN ('paper_validation_sqlmock_0001')

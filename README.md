@@ -55,9 +55,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 fixed chronological walk-forward fold validation for research backtests, with per-fold conservative gate checks and explicit passed/failed fold counts.
 - Initial Phase 4 candidate/rejection decisions for completed fixed-horizon validation: incomplete validation remains `INCONCLUSIVE`, completed failed gates become `REJECTED`, and completed passed gates become `CANDIDATE`; still without live trading.
 - Initial Phase 4 paper-validation readiness guard and optional validation record persistence that allows paper-mode progression only for completed `CANDIDATE` research results with conservative paper simulation settings and live trading disabled.
+- Initial Phase 4 paper-validation trade journal domain and PostgreSQL persistence for simulated round trips, conservative fill prices, fees, net PnL, and equity tracking; still without order placement or live trading.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add a paper-validation execution journal with simulated fills and equity tracking behind strict candidate-only gates, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should wire the paper-validation execution journal into an app/CLI simulation flow behind strict candidate-only gates, still without live trading.
 
 ## What This Is Not
 
@@ -127,8 +128,9 @@ Initial migrations are in `migrations/`:
 - `008_research_results.sql`
 - `009_research_run_market_scope.sql`
 - `010_paper_validation_records.sql`
+- `011_paper_validation_trades.sql`
 
-They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, and paper-validation record tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation record, and paper-validation trade journal tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 
@@ -313,6 +315,8 @@ go run ./cmd/paper -config configs/config.example.yaml -run-id research_... -rec
 ```
 
 The command exits with a non-zero status when the plan is not allowed, making it safe to use as a gate before any future paper executor.
+
+The paper-validation trade journal currently exists as domain and PostgreSQL persistence for future simulation output. It records simulated round trips, fill prices, fees, net PnL, and equity before/after each trade. It is not yet wired to a CLI executor and cannot place orders.
 
 ## Regime Classification
 
