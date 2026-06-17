@@ -164,6 +164,20 @@ func TestValidateTableDriven(t *testing.T) {
 			},
 			wantErrSub: "research.max_drawdown_pct",
 		},
+		{
+			name: "rejects invalid paper initial balance",
+			mutate: func(cfg *config.Config) {
+				cfg.Paper.InitialBalance = 0
+			},
+			wantErrSub: "paper.initial_balance",
+		},
+		{
+			name: "rejects disabled paper slippage simulation",
+			mutate: func(cfg *config.Config) {
+				cfg.Paper.SimulateSlippage = false
+			},
+			wantErrSub: "paper.simulate_slippage",
+		},
 	}
 
 	for _, tt := range tests {
@@ -245,6 +259,13 @@ func validConfig() config.Config {
 			RequireOutOfSample:    true,
 			RequireWalkForward:    true,
 			RequireRegimeAnalysis: true,
+		},
+		Paper: config.PaperConfig{
+			InitialBalance:   1000,
+			MinimumDays:      30,
+			SimulateFees:     true,
+			SimulateSlippage: true,
+			SimulateSpread:   true,
 		},
 	}
 }

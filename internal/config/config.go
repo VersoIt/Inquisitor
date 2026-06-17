@@ -307,6 +307,21 @@ func (c Config) Validate() error {
 	if !c.Research.RequireRegimeAnalysis {
 		problems = append(problems, "research.require_regime_analysis must be true")
 	}
+	if c.Paper.InitialBalance <= 0 {
+		problems = append(problems, "paper.initial_balance must be positive")
+	}
+	if c.Paper.MinimumDays <= 0 {
+		problems = append(problems, "paper.minimum_days must be positive")
+	}
+	if !c.Paper.SimulateFees {
+		problems = append(problems, "paper.simulate_fees must be true")
+	}
+	if !c.Paper.SimulateSlippage {
+		problems = append(problems, "paper.simulate_slippage must be true")
+	}
+	if !c.Paper.SimulateSpread {
+		problems = append(problems, "paper.simulate_spread must be true")
+	}
 
 	if len(problems) > 0 {
 		return fmt.Errorf("config validation failed: %s", strings.Join(problems, "; "))

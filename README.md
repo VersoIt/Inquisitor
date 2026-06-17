@@ -54,9 +54,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 conservative research gate evaluation for fixed-horizon backtests, using configured minimum trades, profit factor, expectancy, max drawdown, out-of-sample, walk-forward, regime-analysis, and cost-inclusion requirements.
 - Initial Phase 4 fixed chronological walk-forward fold validation for research backtests, with per-fold conservative gate checks and explicit passed/failed fold counts.
 - Initial Phase 4 candidate/rejection decisions for completed fixed-horizon validation: incomplete validation remains `INCONCLUSIVE`, completed failed gates become `REJECTED`, and completed passed gates become `CANDIDATE`; still without live trading.
+- Initial Phase 4 paper-validation readiness guard that allows paper-mode progression only for completed `CANDIDATE` research results with conservative paper simulation settings and live trading disabled.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add paper-trading execution scaffolding behind strict candidate-only gates, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add paper-validation execution records behind strict candidate-only gates, still without live trading.
 
 ## What This Is Not
 
@@ -287,6 +288,19 @@ go run ./cmd/research-backtest -config configs/config.example.yaml -run-id resea
 
 This command only backtests rule matches after regime gating. It enters on the next candle open after a signal observation, exits after the explicit holding horizon, prevents overlapping simulated trades per symbol/interval, and applies conservative fees/spread/slippage. When `-out-of-sample-start` is provided, trades with entry time before the split are reported as in-sample and trades at or after the split are reported as out-of-sample. When `-walk-forward-folds` is greater than zero, trades are partitioned by entry time into fixed chronological folds across the research window; every fold is checked against configured conservative gates, except recursive out-of-sample and walk-forward requirements are disabled inside each fold. The command evaluates configured research gates from `research.*` and records explicit reasons such as `gate_min_trades_failed`, `gate_walk_forward_missing`, or `walk_forward_fold:2:gate_expectancy_failed`. Incomplete required validation stays `INCONCLUSIVE`; completed validation that fails gates becomes `REJECTED`; completed validation that passes gates becomes `CANDIDATE`. Optional reports include run metadata, decision status, metrics, validation reasons, and safety gaps, but they do not enable live trading. It does not perform risk-engine position sizing, paper execution, or live orders.
 
+## Paper Validation Readiness
+
+The paper command is a guard only. It loads a completed research run and result, verifies the result is `CANDIDATE`, checks that paper simulation includes fees, slippage, and spread, and refuses to proceed if live trading or withdrawal permissions are enabled. It does not place orders, does not simulate fills, and does not write paper trades.
+
+By default, `configs/config.example.yaml` has `trading.enabled: false`, so the readiness check will return `paper_trading_disabled` until paper validation is explicitly enabled in a local config while keeping `trading.mode: paper` and `trading.allow_live: false`.
+
+```powershell
+$env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?sslmode=disable"
+go run ./cmd/paper -config configs/config.example.yaml -run-id research_...
+```
+
+The command exits with a non-zero status when the plan is not allowed, making it safe to use as a gate before any future paper executor.
+
 ## Regime Classification
 
 The regime command reads persisted candles, public trades, and orderbook snapshots, computes the latest feature set in the requested window, classifies the market regime, and upserts one `regime_states` row per symbol/interval. It does not run strategies and cannot place orders.
@@ -322,6 +336,7 @@ make research-dry-run RUN_ID=research_...
 make research-evaluate-rules RUN_ID=research_...
 make research-backtest RUN_ID=research_... HOLDING_PERIOD_CANDLES=1 QUANTITY=1 OUT_OF_SAMPLE_START=2026-06-02T00:00:00Z WALK_FORWARD_FOLDS=4 REPORT_PATH=reports/research_001.md REPORT_FORMAT=markdown
 make research-record-not-executed RUN_ID=research_...
+make paper-validate RUN_ID=research_...
 ```
 
 ## Architecture Boundary
