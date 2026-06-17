@@ -99,6 +99,46 @@ func TestSummarizeRoundTripsHandlesNoLossProfitFactor(t *testing.T) {
 	assertDecimal(t, "max drawdown", got.MaxDrawdown, "0")
 }
 
+func TestSummarizeRoundTripsBySplitPartitionsByEntryTime(t *testing.T) {
+	entryTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
+	costs := mustCostModel(t, 0, 0, 0, 0, 1)
+	trades := []backtest.RoundTrip{
+		mustRoundTrip(t, backtest.RoundTripInput{
+			Direction:      backtest.DirectionLong,
+			EntryTime:      entryTime,
+			ExitTime:       entryTime.Add(time.Hour),
+			EntryMidPrice:  decimal.RequireFromString("100"),
+			ExitMidPrice:   decimal.RequireFromString("110"),
+			Quantity:       decimal.RequireFromString("1"),
+			EntryLiquidity: backtest.LiquidityTaker,
+			ExitLiquidity:  backtest.LiquidityTaker,
+			Costs:          costs,
+		}),
+		mustRoundTrip(t, backtest.RoundTripInput{
+			Direction:      backtest.DirectionLong,
+			EntryTime:      entryTime.Add(2 * time.Hour),
+			ExitTime:       entryTime.Add(3 * time.Hour),
+			EntryMidPrice:  decimal.RequireFromString("100"),
+			ExitMidPrice:   decimal.RequireFromString("95"),
+			Quantity:       decimal.RequireFromString("1"),
+			EntryLiquidity: backtest.LiquidityTaker,
+			ExitLiquidity:  backtest.LiquidityTaker,
+			Costs:          costs,
+		}),
+	}
+
+	got, err := backtest.SummarizeRoundTripsBySplit(decimal.RequireFromString("1000"), trades, entryTime.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("summarize split round trips: %v", err)
+	}
+
+	if got.InSample.Trades != 1 || got.OutOfSample.Trades != 1 {
+		t.Fatalf("split counts mismatch: %#v", got)
+	}
+	assertDecimal(t, "in-sample net pnl", got.InSample.NetPnL, "10")
+	assertDecimal(t, "out-of-sample net pnl", got.OutOfSample.NetPnL, "-5")
+}
+
 func TestSummarizeRoundTripsRejectsInvalidInputsTableDriven(t *testing.T) {
 	entryTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	validTrade := mustRoundTrip(t, backtest.RoundTripInput{
@@ -157,6 +197,16 @@ func TestSummarizeRoundTripsRejectsInvalidInputsTableDriven(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
 			}
 		})
+	}
+}
+
+func TestSummarizeRoundTripsBySplitRejectsMissingSplitTime(t *testing.T) {
+	_, err := backtest.SummarizeRoundTripsBySplit(decimal.RequireFromString("1000"), nil, time.Time{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "split_time") {
+		t.Fatalf("expected split_time error, got %v", err)
 	}
 }
 

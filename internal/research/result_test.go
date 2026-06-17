@@ -155,6 +155,37 @@ func TestValidateResultRejectsInvalidResultsTableDriven(t *testing.T) {
 			wantErrSub: "max_drawdown_pct",
 		},
 		{
+			name: "unbalanced out of sample split trades",
+			mutate: func(result *research.Result) {
+				result.Outcome = research.OutcomeRejected
+				result.Metrics = research.Metrics{
+					Trades:                 3,
+					InSampleTrades:         1,
+					OutOfSampleTrades:      1,
+					OutOfSample:            true,
+					FeesIncluded:           true,
+					SpreadIncluded:         true,
+					SlippageIncluded:       true,
+					RegimeAnalysisIncluded: true,
+				}
+			},
+			wantErrSub: "split trade counts",
+		},
+		{
+			name: "invalid out of sample net pnl decimal",
+			mutate: func(result *research.Result) {
+				result.Metrics.OutOfSampleNetPnL = "bad"
+			},
+			wantErrSub: "out_of_sample_net_pnl",
+		},
+		{
+			name: "out of sample drawdown above percent range",
+			mutate: func(result *research.Result) {
+				result.Metrics.OutOfSampleMaxDrawdownPct = 101
+			},
+			wantErrSub: "out_of_sample_max_drawdown_pct",
+		},
+		{
 			name: "not executed with trades",
 			mutate: func(result *research.Result) {
 				result.Metrics.Trades = 1

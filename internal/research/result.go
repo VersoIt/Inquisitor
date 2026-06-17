@@ -20,37 +20,47 @@ const (
 )
 
 type Metrics struct {
-	Trades                    int     `json:"trades"`
-	RegimeStates              int     `json:"regime_states"`
-	ExpectedRegimeStates      int     `json:"expected_regime_states"`
-	MissingRegimeStates       int     `json:"missing_regime_states"`
-	RegimeCoveragePct         float64 `json:"regime_coverage_pct"`
-	RuleObservations          int     `json:"rule_observations"`
-	RegimeAllowedObservations int     `json:"regime_allowed_observations"`
-	RegimeBlockedObservations int     `json:"regime_blocked_observations"`
-	RuleEvaluations           int     `json:"rule_evaluations"`
-	SignalRulePasses          int     `json:"signal_rule_passes"`
-	SignalMatches             int     `json:"signal_matches"`
-	SignalFailures            int     `json:"signal_failures"`
-	SignalSkips               int     `json:"signal_skips"`
-	FeatureEvaluationFailures int     `json:"feature_evaluation_failures"`
-	GrossProfit               string  `json:"gross_profit,omitempty"`
-	GrossLoss                 string  `json:"gross_loss,omitempty"`
-	TotalFees                 string  `json:"total_fees,omitempty"`
-	NetPnL                    string  `json:"net_pnl,omitempty"`
-	Expectancy                string  `json:"expectancy,omitempty"`
-	ProfitFactor              string  `json:"profit_factor,omitempty"`
-	ProfitFactorDefined       bool    `json:"profit_factor_defined,omitempty"`
-	WinRatePct                float64 `json:"win_rate_pct,omitempty"`
-	MaxDrawdownPct            float64 `json:"max_drawdown_pct,omitempty"`
-	InitialEquity             string  `json:"initial_equity,omitempty"`
-	FinalEquity               string  `json:"final_equity,omitempty"`
-	FeesIncluded              bool    `json:"fees_included"`
-	SpreadIncluded            bool    `json:"spread_included"`
-	SlippageIncluded          bool    `json:"slippage_included"`
-	OutOfSample               bool    `json:"out_of_sample"`
-	WalkForward               bool    `json:"walk_forward"`
-	RegimeAnalysisIncluded    bool    `json:"regime_analysis_included"`
+	Trades                         int     `json:"trades"`
+	RegimeStates                   int     `json:"regime_states"`
+	ExpectedRegimeStates           int     `json:"expected_regime_states"`
+	MissingRegimeStates            int     `json:"missing_regime_states"`
+	RegimeCoveragePct              float64 `json:"regime_coverage_pct"`
+	RuleObservations               int     `json:"rule_observations"`
+	RegimeAllowedObservations      int     `json:"regime_allowed_observations"`
+	RegimeBlockedObservations      int     `json:"regime_blocked_observations"`
+	RuleEvaluations                int     `json:"rule_evaluations"`
+	SignalRulePasses               int     `json:"signal_rule_passes"`
+	SignalMatches                  int     `json:"signal_matches"`
+	SignalFailures                 int     `json:"signal_failures"`
+	SignalSkips                    int     `json:"signal_skips"`
+	FeatureEvaluationFailures      int     `json:"feature_evaluation_failures"`
+	InSampleTrades                 int     `json:"in_sample_trades,omitempty"`
+	OutOfSampleTrades              int     `json:"out_of_sample_trades,omitempty"`
+	GrossProfit                    string  `json:"gross_profit,omitempty"`
+	GrossLoss                      string  `json:"gross_loss,omitempty"`
+	TotalFees                      string  `json:"total_fees,omitempty"`
+	NetPnL                         string  `json:"net_pnl,omitempty"`
+	Expectancy                     string  `json:"expectancy,omitempty"`
+	ProfitFactor                   string  `json:"profit_factor,omitempty"`
+	ProfitFactorDefined            bool    `json:"profit_factor_defined,omitempty"`
+	WinRatePct                     float64 `json:"win_rate_pct,omitempty"`
+	MaxDrawdownPct                 float64 `json:"max_drawdown_pct,omitempty"`
+	InitialEquity                  string  `json:"initial_equity,omitempty"`
+	FinalEquity                    string  `json:"final_equity,omitempty"`
+	InSampleNetPnL                 string  `json:"in_sample_net_pnl,omitempty"`
+	InSampleProfitFactor           string  `json:"in_sample_profit_factor,omitempty"`
+	InSampleProfitFactorDefined    bool    `json:"in_sample_profit_factor_defined,omitempty"`
+	InSampleMaxDrawdownPct         float64 `json:"in_sample_max_drawdown_pct,omitempty"`
+	OutOfSampleNetPnL              string  `json:"out_of_sample_net_pnl,omitempty"`
+	OutOfSampleProfitFactor        string  `json:"out_of_sample_profit_factor,omitempty"`
+	OutOfSampleProfitFactorDefined bool    `json:"out_of_sample_profit_factor_defined,omitempty"`
+	OutOfSampleMaxDrawdownPct      float64 `json:"out_of_sample_max_drawdown_pct,omitempty"`
+	FeesIncluded                   bool    `json:"fees_included"`
+	SpreadIncluded                 bool    `json:"spread_included"`
+	SlippageIncluded               bool    `json:"slippage_included"`
+	OutOfSample                    bool    `json:"out_of_sample"`
+	WalkForward                    bool    `json:"walk_forward"`
+	RegimeAnalysisIncluded         bool    `json:"regime_analysis_included"`
 }
 
 type Result struct {
@@ -261,6 +271,16 @@ func validateMetrics(finalStatus Status, outcome Outcome, metrics Metrics) []str
 	if metrics.FeatureEvaluationFailures < 0 {
 		problems = append(problems, "metrics.feature_evaluation_failures must be greater than or equal to zero")
 	}
+	if metrics.InSampleTrades < 0 {
+		problems = append(problems, "metrics.in_sample_trades must be greater than or equal to zero")
+	}
+	if metrics.OutOfSampleTrades < 0 {
+		problems = append(problems, "metrics.out_of_sample_trades must be greater than or equal to zero")
+	}
+	splitTrades := metrics.InSampleTrades + metrics.OutOfSampleTrades
+	if splitTrades > 0 && splitTrades != metrics.Trades {
+		problems = append(problems, "metrics split trade counts must balance")
+	}
 	problems = append(problems, validateOptionalDecimalMetric("metrics.gross_profit", metrics.GrossProfit, true)...)
 	problems = append(problems, validateOptionalDecimalMetric("metrics.gross_loss", metrics.GrossLoss, true)...)
 	problems = append(problems, validateOptionalDecimalMetric("metrics.total_fees", metrics.TotalFees, true)...)
@@ -269,11 +289,21 @@ func validateMetrics(finalStatus Status, outcome Outcome, metrics Metrics) []str
 	problems = append(problems, validateOptionalDecimalMetric("metrics.profit_factor", metrics.ProfitFactor, true)...)
 	problems = append(problems, validateOptionalDecimalMetric("metrics.initial_equity", metrics.InitialEquity, true)...)
 	problems = append(problems, validateOptionalDecimalMetric("metrics.final_equity", metrics.FinalEquity, false)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.in_sample_net_pnl", metrics.InSampleNetPnL, false)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.in_sample_profit_factor", metrics.InSampleProfitFactor, true)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.out_of_sample_net_pnl", metrics.OutOfSampleNetPnL, false)...)
+	problems = append(problems, validateOptionalDecimalMetric("metrics.out_of_sample_profit_factor", metrics.OutOfSampleProfitFactor, true)...)
 	if metrics.WinRatePct < 0 || metrics.WinRatePct > 100 {
 		problems = append(problems, "metrics.win_rate_pct must be between 0 and 100")
 	}
 	if metrics.MaxDrawdownPct < 0 || metrics.MaxDrawdownPct > 100 {
 		problems = append(problems, "metrics.max_drawdown_pct must be between 0 and 100")
+	}
+	if metrics.InSampleMaxDrawdownPct < 0 || metrics.InSampleMaxDrawdownPct > 100 {
+		problems = append(problems, "metrics.in_sample_max_drawdown_pct must be between 0 and 100")
+	}
+	if metrics.OutOfSampleMaxDrawdownPct < 0 || metrics.OutOfSampleMaxDrawdownPct > 100 {
+		problems = append(problems, "metrics.out_of_sample_max_drawdown_pct must be between 0 and 100")
 	}
 	if outcome == OutcomeNotExecuted {
 		if finalStatus == StatusCompleted {

@@ -22,6 +22,7 @@ type BacktestRequest struct {
 	FeatureLookback      time.Duration
 	MinRegimeCoveragePct float64
 	HoldingPeriodCandles int
+	OutOfSampleStart     time.Time
 	InitialEquity        decimal.Decimal
 	Quantity             decimal.Decimal
 	Costs                domainbacktest.CostModel
@@ -38,8 +39,16 @@ type BacktestResult struct {
 	Stats    domainresearch.RecordResultStats
 	Summary  domainbacktest.Summary
 	Trades   []domainbacktest.RoundTrip
+	Split    BacktestSplit
 	Coverage RegimeCoverage
 	Skipped  BacktestSkipped
+}
+
+type BacktestSplit struct {
+	Included    bool
+	SplitTime   time.Time
+	InSample    domainbacktest.Summary
+	OutOfSample domainbacktest.Summary
 }
 
 type BacktestSkipped struct {
@@ -83,6 +92,9 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	if err != nil {
 		return BacktestResult{}, err
 	}
+	if err := validateOutOfSampleStart(req.OutOfSampleStart, run); err != nil {
+		return BacktestResult{}, err
+	}
 	hypothesis, err := s.loadRunHypothesis(ctx, run)
 	if err != nil {
 		return BacktestResult{}, err
@@ -100,7 +112,7 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		minCoverage = defaultMinRegimeCoveragePct
 	}
 	if coverage.Percent < minCoverage {
-		result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusFailed, domainresearch.OutcomeNotExecuted, coverage, domainbacktest.Summary{}, BacktestSkipped{}, append(coverageReasons, "regime_coverage_below_threshold"))
+		result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusFailed, domainresearch.OutcomeNotExecuted, coverage, domainbacktest.Summary{}, BacktestSplit{}, BacktestSkipped{}, append(coverageReasons, "regime_coverage_below_threshold"))
 		if err != nil {
 			return BacktestResult{}, err
 		}
@@ -115,18 +127,33 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	if err != nil {
 		return BacktestResult{}, err
 	}
+	split, err := summarizeBacktestSplit(req.InitialEquity, trades, req.OutOfSampleStart)
+	if err != nil {
+		return BacktestResult{}, err
+	}
 
 	reasons := append(coverageReasons,
 		fmt.Sprintf("fixed_horizon_candles:%d", req.HoldingPeriodCandles),
 		fmt.Sprintf("trade_quantity:%s", req.Quantity.String()),
 		fmt.Sprintf("backtest_trades:%d", len(trades)),
-		"out_of_sample_not_run",
 		"walk_forward_not_run",
 	)
+	if split.Included {
+		reasons = append(reasons,
+			"out_of_sample_start:"+split.SplitTime.Format(time.RFC3339),
+			fmt.Sprintf("in_sample_trades:%d", split.InSample.Trades),
+			fmt.Sprintf("out_of_sample_trades:%d", split.OutOfSample.Trades),
+		)
+		if split.OutOfSample.Trades == 0 {
+			reasons = append(reasons, "out_of_sample_no_trades")
+		}
+	} else {
+		reasons = append(reasons, "out_of_sample_not_run")
+	}
 	if len(trades) == 0 {
 		reasons = append(reasons, "no_rule_matches_backtested")
 	}
-	result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusCompleted, domainresearch.OutcomeInconclusive, coverage, summary, skipped, reasons)
+	result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusCompleted, domainresearch.OutcomeInconclusive, coverage, summary, split, skipped, reasons)
 	if err != nil {
 		return BacktestResult{}, err
 	}
@@ -136,6 +163,7 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		Stats:    stats,
 		Summary:  summary,
 		Trades:   trades,
+		Split:    split,
 		Coverage: coverage,
 		Skipped:  skipped,
 	}, nil
@@ -169,6 +197,17 @@ func validateBacktestRequest(req BacktestRequest) error {
 	}
 	if err := domainbacktest.ValidateCostModel(req.Costs); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateOutOfSampleStart(split time.Time, run domainresearch.Run) error {
+	if split.IsZero() {
+		return nil
+	}
+	split = split.UTC()
+	if !split.After(run.WindowStart.UTC()) || !split.Before(run.WindowEnd.UTC()) {
+		return fmt.Errorf("out_of_sample_start must be after window_start and before window_end")
 	}
 	return nil
 }
@@ -316,7 +355,23 @@ func backtestDirection(direction domainhypothesis.Direction, regime domainregime
 	return "", false
 }
 
-func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.Run, finalStatus domainresearch.Status, outcome domainresearch.Outcome, coverage RegimeCoverage, summary domainbacktest.Summary, skipped BacktestSkipped, reasons []string) (domainresearch.Result, domainresearch.Run, domainresearch.RecordResultStats, error) {
+func summarizeBacktestSplit(initialEquity decimal.Decimal, trades []domainbacktest.RoundTrip, splitTime time.Time) (BacktestSplit, error) {
+	if splitTime.IsZero() {
+		return BacktestSplit{}, nil
+	}
+	summary, err := domainbacktest.SummarizeRoundTripsBySplit(initialEquity, trades, splitTime)
+	if err != nil {
+		return BacktestSplit{}, err
+	}
+	return BacktestSplit{
+		Included:    true,
+		SplitTime:   summary.SplitTime,
+		InSample:    summary.InSample,
+		OutOfSample: summary.OutOfSample,
+	}, nil
+}
+
+func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.Run, finalStatus domainresearch.Status, outcome domainresearch.Outcome, coverage RegimeCoverage, summary domainbacktest.Summary, split BacktestSplit, skipped BacktestSkipped, reasons []string) (domainresearch.Result, domainresearch.Run, domainresearch.RecordResultStats, error) {
 	text := "Fixed-horizon research backtest completed with cost-aware execution assumptions; out-of-sample and walk-forward validation are not implemented yet."
 	if outcome == domainresearch.OutcomeNotExecuted {
 		text = "Fixed-horizon research backtest failed: historical regime coverage is insufficient; trades were not evaluated."
@@ -326,7 +381,7 @@ func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.R
 		FinalStatus: finalStatus,
 		Outcome:     outcome,
 		Summary:     text,
-		Metrics:     backtestMetrics(coverage, summary, skipped),
+		Metrics:     backtestMetrics(coverage, summary, split, skipped),
 		Reasons:     reasons,
 		RecordedAt:  s.clock.Now(),
 	})
@@ -344,8 +399,8 @@ func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.R
 	return result, finalRun, stats, nil
 }
 
-func backtestMetrics(coverage RegimeCoverage, summary domainbacktest.Summary, skipped BacktestSkipped) domainresearch.Metrics {
-	return domainresearch.Metrics{
+func backtestMetrics(coverage RegimeCoverage, summary domainbacktest.Summary, split BacktestSplit, skipped BacktestSkipped) domainresearch.Metrics {
+	metrics := domainresearch.Metrics{
 		Trades:                    summary.Trades,
 		RegimeStates:              coverage.Observed,
 		ExpectedRegimeStates:      coverage.Expected,
@@ -368,6 +423,21 @@ func backtestMetrics(coverage RegimeCoverage, summary domainbacktest.Summary, sk
 		InitialEquity:             summary.InitialEquity.String(),
 		FinalEquity:               summary.FinalEquity.String(),
 	}
+	if !split.Included {
+		return metrics
+	}
+	metrics.OutOfSample = true
+	metrics.InSampleTrades = split.InSample.Trades
+	metrics.InSampleNetPnL = split.InSample.NetPnL.String()
+	metrics.InSampleProfitFactor = split.InSample.ProfitFactor.String()
+	metrics.InSampleProfitFactorDefined = split.InSample.ProfitFactorDefined
+	metrics.InSampleMaxDrawdownPct = decimalPct(split.InSample.MaxDrawdown)
+	metrics.OutOfSampleTrades = split.OutOfSample.Trades
+	metrics.OutOfSampleNetPnL = split.OutOfSample.NetPnL.String()
+	metrics.OutOfSampleProfitFactor = split.OutOfSample.ProfitFactor.String()
+	metrics.OutOfSampleProfitFactorDefined = split.OutOfSample.ProfitFactorDefined
+	metrics.OutOfSampleMaxDrawdownPct = decimalPct(split.OutOfSample.MaxDrawdown)
+	return metrics
 }
 
 func decimalPct(value decimal.Decimal) float64 {

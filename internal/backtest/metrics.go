@@ -3,6 +3,7 @@ package backtest
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -25,6 +26,12 @@ type Summary struct {
 	MaxDrawdown         decimal.Decimal
 	InitialEquity       decimal.Decimal
 	FinalEquity         decimal.Decimal
+}
+
+type SplitSummary struct {
+	SplitTime   time.Time
+	InSample    Summary
+	OutOfSample Summary
 }
 
 func SummarizeRoundTrips(initialEquity decimal.Decimal, trades []RoundTrip) (Summary, error) {
@@ -78,6 +85,42 @@ func SummarizeRoundTrips(initialEquity decimal.Decimal, trades []RoundTrip) (Sum
 		summary.ProfitFactorDefined = true
 	}
 	return summary, nil
+}
+
+func SummarizeRoundTripsBySplit(initialEquity decimal.Decimal, trades []RoundTrip, splitTime time.Time) (SplitSummary, error) {
+	if splitTime.IsZero() {
+		return SplitSummary{}, errors.New("backtest split summary validation failed: split_time is required")
+	}
+	if initialEquity.LessThanOrEqual(decimal.Zero) {
+		return SplitSummary{}, errors.New("backtest split summary validation failed: initial_equity must be positive")
+	}
+
+	var inSample []RoundTrip
+	var outOfSample []RoundTrip
+	for index, trade := range trades {
+		if err := ValidateRoundTrip(trade); err != nil {
+			return SplitSummary{}, errors.New("backtest split summary validation failed: trade[" + decimal.NewFromInt(int64(index)).String() + "] " + err.Error())
+		}
+		if trade.Entry.Time.Before(splitTime.UTC()) {
+			inSample = append(inSample, trade)
+			continue
+		}
+		outOfSample = append(outOfSample, trade)
+	}
+
+	inSampleSummary, err := SummarizeRoundTrips(initialEquity, inSample)
+	if err != nil {
+		return SplitSummary{}, err
+	}
+	outOfSampleSummary, err := SummarizeRoundTrips(initialEquity, outOfSample)
+	if err != nil {
+		return SplitSummary{}, err
+	}
+	return SplitSummary{
+		SplitTime:   splitTime.UTC(),
+		InSample:    inSampleSummary,
+		OutOfSample: outOfSampleSummary,
+	}, nil
 }
 
 func ValidateRoundTrip(trade RoundTrip) error {

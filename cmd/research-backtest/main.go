@@ -24,6 +24,7 @@ func main() {
 	featureLookback := flag.Duration("feature-lookback", 168*time.Hour, "feature window before each regime observation")
 	minRegimeCoverage := flag.Float64("min-regime-coverage-pct", 100, "minimum historical regime-state coverage percentage")
 	holdingPeriodCandles := flag.Int("holding-period-candles", 1, "explicit fixed holding horizon in candles")
+	outOfSampleStartValue := flag.String("out-of-sample-start", "", "optional UTC out-of-sample split start in RFC3339 format")
 	initialEquityValue := flag.String("initial-equity", "", "initial research equity; defaults to paper.initial_balance from config")
 	quantityValue := flag.String("quantity", "1", "fixed research quantity per simulated trade")
 	spreadBPS := flag.Int("spread-bps", -1, "conservative spread assumption in bps; defaults to risk.max_spread_bps")
@@ -56,6 +57,14 @@ func main() {
 	if err != nil {
 		log.Error("invalid -quantity value", "error", err)
 		os.Exit(1)
+	}
+	var outOfSampleStart time.Time
+	if *outOfSampleStartValue != "" {
+		outOfSampleStart, err = time.Parse(time.RFC3339, *outOfSampleStartValue)
+		if err != nil {
+			log.Error("invalid -out-of-sample-start value", "error", err)
+			os.Exit(1)
+		}
 	}
 	if *spreadBPS < 0 {
 		*spreadBPS = cfg.Risk.MaxSpreadBps
@@ -103,6 +112,7 @@ func main() {
 		FeatureLookback:      *featureLookback,
 		MinRegimeCoveragePct: *minRegimeCoverage,
 		HoldingPeriodCandles: *holdingPeriodCandles,
+		OutOfSampleStart:     outOfSampleStart,
 		InitialEquity:        initialEquity,
 		Quantity:             quantity,
 		Costs:                costs,
@@ -136,6 +146,10 @@ func main() {
 		"total_fees", result.Summary.TotalFees.String(),
 		"profit_factor", result.Summary.ProfitFactor.String(),
 		"profit_factor_defined", result.Summary.ProfitFactorDefined,
+		"out_of_sample", result.Split.Included,
+		"in_sample_trades", result.Split.InSample.Trades,
+		"out_of_sample_trades", result.Split.OutOfSample.Trades,
+		"out_of_sample_net_pnl", result.Split.OutOfSample.NetPnL.String(),
 		"max_drawdown_pct", result.Result.Metrics.MaxDrawdownPct,
 		"holding_period_candles", *holdingPeriodCandles,
 		"quantity", quantity.String(),

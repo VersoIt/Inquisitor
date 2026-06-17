@@ -68,6 +68,62 @@ func TestServiceBacktestRulesRecordsCostAwareInconclusiveResult(t *testing.T) {
 	}
 }
 
+func TestServiceBacktestRulesRecordsOutOfSampleSplitMetrics(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	hypothesis := singleMarketHypothesisRecord(t, plannedAt.Add(-time.Hour))
+	run := ruleEvaluationRun(t, plannedAt, hypothesis)
+	regimes := &fakeRegimeRepository{statesByKey: map[string][]domainregime.State{
+		"BTCUSDT|1": {
+			testRuleRegimeState(plannedAt.Add(-3*time.Minute), domainregime.RegimeTrendUp, 80),
+			testRuleRegimeState(plannedAt.Add(-2*time.Minute), domainregime.RegimeTrendUp, 80),
+			testRuleRegimeState(plannedAt.Add(-time.Minute), domainregime.RegimeTrendUp, 80),
+		},
+	}}
+	candles := &fakeCandleRepository{candles: []marketdata.Candle{
+		testBacktestCandle(plannedAt.Add(-3*time.Minute), "100", "101"),
+		testBacktestCandle(plannedAt.Add(-2*time.Minute), "100", "99"),
+		testBacktestCandle(plannedAt.Add(-time.Minute), "100", "102"),
+	}}
+	service := testBacktestService(
+		plannedAt,
+		hypothesis,
+		run,
+		&fakeResultRecorder{stats: domainresearch.RecordResultStats{RunUpdated: 1, ResultInserted: 1}},
+		regimes,
+		&fakeFeatureAssembler{featureSet: ruleFeatureSet("101", "100")},
+		candles,
+	)
+	req := validBacktestRequest(t, run.RunID)
+	req.OutOfSampleStart = plannedAt.Add(-2 * time.Minute)
+
+	got, err := service.BacktestRules(context.Background(), req)
+	if err != nil {
+		t.Fatalf("backtest rules with oos split: %v", err)
+	}
+
+	if !got.Split.Included {
+		t.Fatal("expected out-of-sample split to be included")
+	}
+	if got.Split.InSample.Trades != 1 || got.Split.OutOfSample.Trades != 2 {
+		t.Fatalf("split trade counts mismatch: %#v", got.Split)
+	}
+	if !got.Result.Metrics.OutOfSample {
+		t.Fatalf("expected result metrics to include OOS: %#v", got.Result.Metrics)
+	}
+	if got.Result.Metrics.InSampleTrades != 1 || got.Result.Metrics.OutOfSampleTrades != 2 {
+		t.Fatalf("metrics split counts mismatch: %#v", got.Result.Metrics)
+	}
+	if got.Result.Metrics.InSampleNetPnL != "1" || got.Result.Metrics.OutOfSampleNetPnL != "1" {
+		t.Fatalf("metrics split net pnl mismatch: %#v", got.Result.Metrics)
+	}
+	if containsReason(got.Result.Reasons, "out_of_sample_not_run") {
+		t.Fatalf("unexpected missing-OOS reason: %#v", got.Result.Reasons)
+	}
+	if !containsReason(got.Result.Reasons, "out_of_sample_trades:2") {
+		t.Fatalf("missing OOS trade reason: %#v", got.Result.Reasons)
+	}
+}
+
 func TestServiceBacktestRulesRecordsFailedResultWhenCoverageIsIncomplete(t *testing.T) {
 	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	hypothesis := singleMarketHypothesisRecord(t, plannedAt.Add(-time.Hour))
@@ -193,6 +249,15 @@ func TestServiceBacktestRulesRejectsInvalidInputsTableDriven(t *testing.T) {
 				return req
 			}(),
 			wantErrSub: "taker_fee_bps",
+		},
+		{
+			name: "out of sample split outside research window",
+			req: func() appresearch.BacktestRequest {
+				req := validBacktestRequest(t, run.RunID)
+				req.OutOfSampleStart = run.WindowEnd
+				return req
+			}(),
+			wantErrSub: "out_of_sample_start",
 		},
 	}
 

@@ -49,9 +49,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 hypothesis rule evaluation over persisted regimes and recalculated feature snapshots, with signal-rule metrics and automatic result recording, still without trade execution or PnL.
 - Initial Phase 4 cost-aware backtest domain math for conservative round trips, maker/taker fees, spread/slippage price impact, net PnL, profit factor, expectancy, win rate, and max drawdown.
 - Initial Phase 4 fixed-horizon research backtest over rule matches, with explicit holding-period candles, fixed research quantity, cost-aware metrics, overlap prevention, and automatic result recording; still without risk-engine sizing, paper execution, or live trading.
+- Initial Phase 4 explicit out-of-sample split metrics for fixed-horizon research backtests, including separate in-sample and out-of-sample trade counts, net PnL, profit factor, and drawdown.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add explicit in-sample/out-of-sample splits and reports, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should generate explicit JSON/Markdown research reports, still without live trading.
 
 ## What This Is Not
 
@@ -260,7 +261,13 @@ $env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?ss
 go run ./cmd/research-backtest -config configs/config.example.yaml -run-id research_... -holding-period-candles 1 -quantity 1
 ```
 
-This command only backtests rule matches after regime gating. It enters on the next candle open after a signal observation, exits after the explicit holding horizon, prevents overlapping simulated trades per symbol/interval, applies conservative fees/spread/slippage, and records an `INCONCLUSIVE` result because out-of-sample and walk-forward validation are not implemented yet. It does not perform risk-engine position sizing, paper execution, or live orders.
+To include an explicit out-of-sample split:
+
+```powershell
+go run ./cmd/research-backtest -config configs/config.example.yaml -run-id research_... -holding-period-candles 1 -quantity 1 -out-of-sample-start 2026-06-02T00:00:00Z
+```
+
+This command only backtests rule matches after regime gating. It enters on the next candle open after a signal observation, exits after the explicit holding horizon, prevents overlapping simulated trades per symbol/interval, applies conservative fees/spread/slippage, and records an `INCONCLUSIVE` result because walk-forward validation is not implemented yet. When `-out-of-sample-start` is provided, trades with entry time before the split are reported as in-sample and trades at or after the split are reported as out-of-sample. It does not perform risk-engine position sizing, paper execution, or live orders.
 
 ## Regime Classification
 
@@ -295,7 +302,7 @@ make hypothesis-import HYPOTHESIS=hypotheses/examples/trend_momentum_draft.yaml
 make research-schedule HYPOTHESIS_NAME=trend_momentum_draft HYPOTHESIS_VERSION=0.1.0 START=2026-06-01T00:00:00Z END=2026-06-02T00:00:00Z
 make research-dry-run RUN_ID=research_...
 make research-evaluate-rules RUN_ID=research_...
-make research-backtest RUN_ID=research_... HOLDING_PERIOD_CANDLES=1 QUANTITY=1
+make research-backtest RUN_ID=research_... HOLDING_PERIOD_CANDLES=1 QUANTITY=1 OUT_OF_SAMPLE_START=2026-06-02T00:00:00Z
 make research-record-not-executed RUN_ID=research_...
 ```
 
