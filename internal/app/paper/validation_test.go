@@ -408,6 +408,197 @@ func TestServiceRecordSimulationAllowsNoTradeJournal(t *testing.T) {
 	}
 }
 
+func TestServiceGenerateSimulationRecordsGeneratedCandidateTrades(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	run, result := testRunResult(t, plannedAt, domainresearch.OutcomeCandidate)
+	roundTrip := mustRoundTrip(t, plannedAt.Add(time.Hour), domainbacktest.DirectionLong, "100", "110")
+	generator := &fakeSimulationTradeGenerator{
+		result: apppaper.SimulationTradeGenerationResult{
+			Symbol:             "BTCUSDT",
+			Interval:           "1",
+			RoundTrips:         []domainbacktest.RoundTrip{roundTrip},
+			CoverageExpected:   10,
+			CoverageObserved:   10,
+			CoveragePct:        100,
+			CoverageSufficient: true,
+		},
+	}
+	trades := &fakeValidationTradeRepository{stats: domainpaper.ValidationTradeStats{Inserted: 1}}
+	service := apppaper.NewService(
+		&fakeRunRepository{runs: []domainresearch.Run{run}},
+		&fakeResultRepository{results: []domainresearch.Result{result}},
+		apppaper.WithClock(clock.FixedClock{Time: plannedAt.Add(4 * time.Hour)}),
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{
+			records: []domainpaper.ValidationRecord{testValidationRecord(t, run.RunID, plannedAt.Add(2*time.Hour), domainpaper.ValidationStatusPlanned)},
+		}),
+		apppaper.WithValidationTradeRepository(trades),
+		apppaper.WithSimulationTradeGenerator(generator),
+	)
+	costs, err := domainbacktest.NewCostModel(1, 6, 2, 3, 1.5)
+	if err != nil {
+		t.Fatalf("new cost model: %v", err)
+	}
+
+	got, err := service.GenerateSimulation(context.Background(), apppaper.GenerateSimulationRequest{
+		ValidationID:         "paper_validation_app_0001",
+		TradeIDPrefix:        "generated_trade",
+		FeatureLookback:      168 * time.Hour,
+		MinRegimeCoveragePct: 100,
+		HoldingPeriodCandles: 2,
+		Quantity:             decimal.RequireFromString("0.25"),
+		Costs:                costs,
+		CandleLimit:          500,
+		TradeLimit:           300,
+		SnapshotLimit:        20,
+		UseRuntimeState:      true,
+	})
+	if err != nil {
+		t.Fatalf("generate paper simulation: %v", err)
+	}
+
+	if generator.calls != 1 || generator.req.Run.RunID != run.RunID {
+		t.Fatalf("generator call mismatch: calls=%d request=%#v", generator.calls, generator.req)
+	}
+	if generator.req.Symbol != "BTCUSDT" || generator.req.Interval != "1" || generator.req.HoldingPeriodCandles != 2 {
+		t.Fatalf("generator scope/options mismatch: %#v", generator.req)
+	}
+	if !generator.req.Quantity.Equal(decimal.RequireFromString("0.25")) || !generator.req.Costs.SpreadBPS.Equal(decimal.RequireFromString("2")) {
+		t.Fatalf("generator quantity/costs mismatch: %#v", generator.req)
+	}
+	if got.Generation.CoveragePct != 100 || got.Summary.Trades != 1 || got.Stats.Inserted != 1 {
+		t.Fatalf("generated result mismatch: %#v", got)
+	}
+	if len(got.Trades) != 1 || got.Trades[0].TradeID != "generated_trade_000001" || trades.calls != 1 {
+		t.Fatalf("generated journal mismatch: result=%#v repository_calls=%d", got.Trades, trades.calls)
+	}
+}
+
+func TestServiceGenerateSimulationRejectsUnsafeGenerationTableDriven(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	run, result := testRunResult(t, plannedAt, domainresearch.OutcomeCandidate)
+	record := testValidationRecord(t, run.RunID, plannedAt.Add(2*time.Hour), domainpaper.ValidationStatusPlanned)
+	generatorErr := errors.New("feature store unavailable")
+
+	newService := func(generator apppaper.SimulationTradeGenerator, trades *fakeValidationTradeRepository) *apppaper.Service {
+		options := []apppaper.Option{
+			apppaper.WithClock(clock.FixedClock{Time: plannedAt.Add(4 * time.Hour)}),
+			apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+			apppaper.WithValidationTradeRepository(trades),
+		}
+		if generator != nil {
+			options = append(options, apppaper.WithSimulationTradeGenerator(generator))
+		}
+		return apppaper.NewService(
+			&fakeRunRepository{runs: []domainresearch.Run{run}},
+			&fakeResultRepository{results: []domainresearch.Result{result}},
+			options...,
+		)
+	}
+
+	tests := []struct {
+		name       string
+		generator  apppaper.SimulationTradeGenerator
+		wantErrSub string
+	}{
+		{
+			name:       "missing generator",
+			wantErrSub: "trade generator",
+		},
+		{
+			name: "generator error",
+			generator: &fakeSimulationTradeGenerator{
+				err: generatorErr,
+			},
+			wantErrSub: generatorErr.Error(),
+		},
+		{
+			name: "insufficient regime coverage",
+			generator: &fakeSimulationTradeGenerator{
+				result: apppaper.SimulationTradeGenerationResult{
+					Symbol:           "BTCUSDT",
+					Interval:         "1",
+					CoverageExpected: 10,
+					CoverageObserved: 8,
+					CoverageMissing:  2,
+					CoveragePct:      80,
+				},
+			},
+			wantErrSub: "coverage",
+		},
+		{
+			name: "mismatched generated scope",
+			generator: &fakeSimulationTradeGenerator{
+				result: apppaper.SimulationTradeGenerationResult{
+					Symbol:             "ETHUSDT",
+					Interval:           "1",
+					CoverageSufficient: true,
+				},
+			},
+			wantErrSub: "mismatched market scope",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trades := &fakeValidationTradeRepository{}
+			_, err := newService(tt.generator, trades).GenerateSimulation(context.Background(), apppaper.GenerateSimulationRequest{
+				ValidationID: "paper_validation_app_0001",
+			})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+			if trades.calls != 0 || len(trades.records) != 0 {
+				t.Fatalf("unsafe generation must not write trades: calls=%d records=%d", trades.calls, len(trades.records))
+			}
+		})
+	}
+}
+
+func TestServiceRecordSimulationAllowsExactRerunAndRejectsConflictingTradeSet(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	run, result := testRunResult(t, plannedAt, domainresearch.OutcomeCandidate)
+	trades := &fakeValidationTradeRepository{stats: domainpaper.ValidationTradeStats{Updated: 1}}
+	service := apppaper.NewService(
+		&fakeRunRepository{runs: []domainresearch.Run{run}},
+		&fakeResultRepository{results: []domainresearch.Result{result}},
+		apppaper.WithClock(clock.FixedClock{Time: plannedAt.Add(4 * time.Hour)}),
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{
+			records: []domainpaper.ValidationRecord{testValidationRecord(t, run.RunID, plannedAt.Add(2*time.Hour), domainpaper.ValidationStatusPlanned)},
+		}),
+		apppaper.WithValidationTradeRepository(trades),
+	)
+	roundTrip := mustRoundTrip(t, plannedAt.Add(time.Hour), domainbacktest.DirectionLong, "100", "110")
+	request := apppaper.RecordSimulationRequest{
+		ValidationID:  "paper_validation_app_0001",
+		TradeIDPrefix: "stable_trade",
+		RoundTrips:    []domainbacktest.RoundTrip{roundTrip},
+	}
+
+	if _, err := service.RecordSimulation(context.Background(), request); err != nil {
+		t.Fatalf("record initial simulation: %v", err)
+	}
+	trades.records = append([]domainpaper.ValidationTrade(nil), trades.records[:1]...)
+	if _, err := service.RecordSimulation(context.Background(), request); err != nil {
+		t.Fatalf("exact rerun should be accepted: %v", err)
+	}
+	callsAfterRerun := trades.calls
+
+	request.TradeIDPrefix = "different_trade"
+	_, err := service.RecordSimulation(context.Background(), request)
+	if err == nil {
+		t.Fatal("expected conflicting journal error")
+	}
+	if !strings.Contains(err.Error(), "different trade set") {
+		t.Fatalf("expected conflicting trade-set error, got %v", err)
+	}
+	if trades.calls != callsAfterRerun {
+		t.Fatalf("conflicting journal must not be written: before=%d after=%d", callsAfterRerun, trades.calls)
+	}
+}
+
 func TestServiceRecordSimulationRejectsUnsafeInputsTableDriven(t *testing.T) {
 	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	run, candidateResult := testRunResult(t, plannedAt, domainresearch.OutcomeCandidate)
@@ -615,6 +806,25 @@ func (r *fakeValidationTradeRepository) ListValidationTrades(_ context.Context, 
 		return nil, r.err
 	}
 	return append([]domainpaper.ValidationTrade(nil), r.records...), nil
+}
+
+type fakeSimulationTradeGenerator struct {
+	req    apppaper.SimulationTradeGenerationRequest
+	result apppaper.SimulationTradeGenerationResult
+	calls  int
+	err    error
+}
+
+func (g *fakeSimulationTradeGenerator) GenerateSimulationTrades(
+	_ context.Context,
+	req apppaper.SimulationTradeGenerationRequest,
+) (apppaper.SimulationTradeGenerationResult, error) {
+	g.calls++
+	g.req = req
+	if g.err != nil {
+		return apppaper.SimulationTradeGenerationResult{}, g.err
+	}
+	return g.result, nil
 }
 
 type fakeIDGenerator struct {

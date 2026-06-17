@@ -110,24 +110,24 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	if err := validateOutOfSampleStart(req.OutOfSampleStart, run); err != nil {
 		return BacktestResult{}, err
 	}
-	hypothesis, err := s.loadRunHypothesis(ctx, run)
+	generation, err := s.GenerateRuleTrades(ctx, TradeGenerationRequest{
+		Run:                  run,
+		FeatureLookback:      req.FeatureLookback,
+		MinRegimeCoveragePct: req.MinRegimeCoveragePct,
+		HoldingPeriodCandles: req.HoldingPeriodCandles,
+		Quantity:             req.Quantity,
+		Costs:                req.Costs,
+		CandleLimit:          req.CandleLimit,
+		TradeLimit:           req.TradeLimit,
+		SnapshotLimit:        req.SnapshotLimit,
+		Runtime:              req.Runtime,
+		UseRuntimeState:      req.UseRuntimeState,
+	})
 	if err != nil {
 		return BacktestResult{}, err
 	}
-	if err := validateRunMatchesHypothesis(run, hypothesis); err != nil {
-		return BacktestResult{}, err
-	}
-
-	series, coverage, coverageReasons, err := s.loadRegimeSeries(ctx, run)
-	if err != nil {
-		return BacktestResult{}, err
-	}
-	minCoverage := req.MinRegimeCoveragePct
-	if minCoverage == 0 {
-		minCoverage = defaultMinRegimeCoveragePct
-	}
-	if coverage.Percent < minCoverage {
-		metrics := backtestSummaryMetrics(coverage, domainbacktest.Summary{})
+	if !generation.CoverageSufficient {
+		metrics := backtestSummaryMetrics(generation.Coverage, domainbacktest.Summary{})
 		result, finalRun, stats, err := s.recordBacktestResult(
 			ctx,
 			run,
@@ -135,18 +135,16 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 			domainresearch.OutcomeNotExecuted,
 			"Fixed-horizon research backtest failed: historical regime coverage is insufficient; trades were not evaluated.",
 			metrics,
-			append(coverageReasons, "regime_coverage_below_threshold"),
+			append(generation.CoverageReasons, "regime_coverage_below_threshold"),
 		)
 		if err != nil {
 			return BacktestResult{}, err
 		}
-		return BacktestResult{Run: finalRun, Result: result, Stats: stats, Coverage: coverage}, nil
+		return BacktestResult{Run: finalRun, Result: result, Stats: stats, Coverage: generation.Coverage}, nil
 	}
 
-	trades, skipped, err := s.backtestRuleSeries(ctx, run, hypothesis.Spec, series, req)
-	if err != nil {
-		return BacktestResult{}, err
-	}
+	trades := generation.Trades
+	skipped := generation.Skipped
 	summary, err := domainbacktest.SummarizeRoundTrips(req.InitialEquity, trades)
 	if err != nil {
 		return BacktestResult{}, err
@@ -155,11 +153,11 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	if err != nil {
 		return BacktestResult{}, err
 	}
-	walkForward, err := summarizeBacktestWalkForward(req.InitialEquity, trades, run, coverage, req.WalkForwardFolds, req.ResultGates)
+	walkForward, err := summarizeBacktestWalkForward(req.InitialEquity, trades, run, generation.Coverage, req.WalkForwardFolds, req.ResultGates)
 	if err != nil {
 		return BacktestResult{}, err
 	}
-	metrics := backtestMetrics(coverage, summary, split, walkForward, skipped)
+	metrics := backtestMetrics(generation.Coverage, summary, split, walkForward, skipped)
 	gates, err := domainresearch.EvaluateMetricsGates(metrics, req.ResultGates)
 	if err != nil {
 		return BacktestResult{}, err
@@ -169,7 +167,7 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		return BacktestResult{}, err
 	}
 
-	reasons := append(coverageReasons,
+	reasons := append(generation.CoverageReasons,
 		fmt.Sprintf("fixed_horizon_candles:%d", req.HoldingPeriodCandles),
 		fmt.Sprintf("trade_quantity:%s", req.Quantity.String()),
 		fmt.Sprintf("backtest_trades:%d", len(trades)),
@@ -215,7 +213,7 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		Trades:      trades,
 		Split:       split,
 		WalkForward: walkForward,
-		Coverage:    coverage,
+		Coverage:    generation.Coverage,
 		Skipped:     skipped,
 		Gates:       gates,
 	}, nil

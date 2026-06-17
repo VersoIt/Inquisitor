@@ -80,7 +80,7 @@ paper-validate:
 	$(GO) run ./cmd/paper -config $(CONFIG) -run-id $(RUN_ID) $(if $(PAPER_RECORD),-record,) $(if $(VALIDATION_ID),-validation-id $(VALIDATION_ID),)
 
 paper-simulate:
-	$(GO) run ./cmd/paper-simulate -config $(CONFIG) -validation-id $(VALIDATION_ID) -file $(PAPER_SIM_FILE) -trade-id-prefix $(PAPER_TRADE_PREFIX) $(if $(PAPER_SYMBOL),-symbol $(PAPER_SYMBOL),) $(if $(PAPER_INTERVAL),-interval $(PAPER_INTERVAL),)
+	$(GO) run ./cmd/paper-simulate -config $(CONFIG) -validation-id $(VALIDATION_ID) -trade-id-prefix $(PAPER_TRADE_PREFIX) $(if $(PAPER_SIM_FILE),-file $(PAPER_SIM_FILE),-feature-lookback $(FEATURE_LOOKBACK) -holding-period-candles $(HOLDING_PERIOD_CANDLES) -quantity $(QUANTITY) -candle-limit $(LIMIT) -trade-limit $(TRADE_LIMIT) -snapshot-limit $(SNAPSHOT_LIMIT)) $(if $(PAPER_SYMBOL),-symbol $(PAPER_SYMBOL),) $(if $(PAPER_INTERVAL),-interval $(PAPER_INTERVAL),)
 
 docker-up:
 	docker compose up -d postgres

@@ -56,10 +56,11 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 candidate/rejection decisions for completed fixed-horizon validation: incomplete validation remains `INCONCLUSIVE`, completed failed gates become `REJECTED`, and completed passed gates become `CANDIDATE`; still without live trading.
 - Initial Phase 4 paper-validation readiness guard and optional validation record persistence that allows paper-mode progression only for completed `CANDIDATE` research results with conservative paper simulation settings and live trading disabled.
 - Initial Phase 4 paper-validation trade journal domain and PostgreSQL persistence for simulated round trips, conservative fill prices, fees, net PnL, and equity tracking; still without order placement or live trading.
-- Initial Phase 4 paper simulation journal command that imports strict JSON round-trip scenarios, applies conservative configured fees/spread/slippage, and writes paper-validation trade journal rows behind a persisted candidate-only validation record.
+- Initial Phase 4 paper simulation journal command that generates fixed-horizon round trips from persisted hypotheses, regime states, feature inputs, and candles, then writes them behind a persisted candidate-only validation record.
+- Optional strict JSON paper-simulation input for deterministic manual scenarios, with the same conservative costs, candidate guard, and journal-conflict protection as generated simulations.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should generate paper simulation round trips from persisted hypothesis/regime/feature data instead of importing them from JSON, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add paper-validation lifecycle transitions and daily performance/risk aggregation, still without live trading.
 
 ## What This Is Not
 
@@ -317,9 +318,17 @@ go run ./cmd/paper -config configs/config.example.yaml -run-id research_... -rec
 
 The command exits with a non-zero status when the plan is not allowed, making it safe to use as a gate before any future paper executor.
 
-The paper simulation command records strict offline simulation scenarios into the paper-validation trade journal. It requires an existing allowed validation record from `cmd/paper -record`, rechecks that the linked research result is still a completed `CANDIDATE`, applies configured conservative fees/spread/slippage, and writes simulated round trips with equity before/after each trade. It cannot place orders.
+The paper simulation command generates offline round trips from the exact persisted hypothesis, historical regime states, feature inputs, and candles linked to a research run. It requires an existing allowed validation record from `cmd/paper -record`, rechecks that the linked result is still a completed `CANDIDATE`, requires sufficient regime coverage, applies configured conservative fees/spread/slippage, and writes equity before/after each trade. It cannot place orders.
 
-Example input:
+Generate and record the journal:
+
+```powershell
+go run ./cmd/paper-simulate -config configs/config.example.yaml -validation-id paper_validation_001 -trade-id-prefix paper_trade_001 -symbol BTCUSDT -interval 1 -feature-lookback 168h -holding-period-candles 1 -quantity 1
+```
+
+Exact reruns must use the same trade prefix and economic inputs. The command rejects a different trade set when that validation already has journal rows.
+
+For deterministic manual scenarios, pass a strict JSON file instead. Example input:
 
 ```json
 {
@@ -336,7 +345,7 @@ Example input:
 }
 ```
 
-Record the journal:
+Record the manual scenario:
 
 ```powershell
 go run ./cmd/paper-simulate -config configs/config.example.yaml -validation-id paper_validation_001 -file reports/paper_simulation.json -trade-id-prefix paper_trade_001 -symbol BTCUSDT -interval 1
@@ -379,6 +388,7 @@ make research-backtest RUN_ID=research_... HOLDING_PERIOD_CANDLES=1 QUANTITY=1 O
 make research-record-not-executed RUN_ID=research_...
 make paper-validate RUN_ID=research_...
 make paper-validate RUN_ID=research_... PAPER_RECORD=1 VALIDATION_ID=paper_validation_001
+make paper-simulate VALIDATION_ID=paper_validation_001 PAPER_TRADE_PREFIX=paper_trade_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-simulate VALIDATION_ID=paper_validation_001 PAPER_SIM_FILE=reports/paper_simulation.json PAPER_TRADE_PREFIX=paper_trade_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 ```
 

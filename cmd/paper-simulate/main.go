@@ -14,9 +14,12 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	appfeatures "github.com/VersoIt/Inquisitor/internal/app/features"
 	apppaper "github.com/VersoIt/Inquisitor/internal/app/paper"
+	appresearch "github.com/VersoIt/Inquisitor/internal/app/research"
 	domainbacktest "github.com/VersoIt/Inquisitor/internal/backtest"
 	"github.com/VersoIt/Inquisitor/internal/config"
+	domainfeatures "github.com/VersoIt/Inquisitor/internal/features"
 	"github.com/VersoIt/Inquisitor/internal/logger"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
@@ -25,13 +28,21 @@ import (
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
 	validationID := flag.String("validation-id", "", "paper validation record id")
-	inputPath := flag.String("file", "", "path to paper simulation JSON input")
+	inputPath := flag.String("file", "", "optional path to paper simulation JSON input; omit to generate from persisted research data")
 	tradeIDPrefix := flag.String("trade-id-prefix", "", "stable paper trade id prefix for idempotent reruns")
 	symbol := flag.String("symbol", "", "optional symbol; required when research run has multiple symbols")
 	interval := flag.String("interval", "", "optional interval; required when research run has multiple intervals")
 	quantityValue := flag.String("quantity", "1", "default simulated quantity when omitted by an input round trip")
+	featureLookback := flag.Duration("feature-lookback", 168*time.Hour, "feature window before each persisted regime observation")
+	minRegimeCoverage := flag.Float64("min-regime-coverage-pct", 100, "minimum historical regime-state coverage percentage")
+	holdingPeriodCandles := flag.Int("holding-period-candles", 1, "fixed generated holding horizon in candles")
 	spreadBPS := flag.Int("spread-bps", -1, "conservative spread assumption in bps; defaults to risk.max_spread_bps")
 	slippageBPS := flag.Int("slippage-bps", -1, "slippage assumption in bps; defaults to slippage.default_bps")
+	candleLimit := flag.Int("candle-limit", 1000, "maximum candles loaded for each generated rule observation")
+	tradeLimit := flag.Int("trade-limit", 1000, "maximum public trades loaded around each latest orderbook snapshot")
+	snapshotLimit := flag.Int("snapshot-limit", 100, "maximum orderbook snapshots loaded for each generated rule observation")
+	webSocketConnected := flag.Bool("websocket-connected", true, "runtime health flag passed into generated data-quality features")
+	orderbookValid := flag.Bool("orderbook-valid", true, "runtime orderbook health flag passed into generated data-quality features")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
 
@@ -67,11 +78,6 @@ func main() {
 		log.Error("invalid paper simulation cost model", "error", err)
 		os.Exit(1)
 	}
-	roundTrips, err := readSimulationRoundTrips(*inputPath, quantity, costs)
-	if err != nil {
-		log.Error("failed to read paper simulation input", "error", err)
-		os.Exit(1)
-	}
 
 	ctx := context.Background()
 	db, err := postgres.Open(ctx, cfg.Database)
@@ -81,19 +87,68 @@ func main() {
 	}
 	defer db.Close()
 
+	candles := postgres.NewCandleRepository(db)
+	featureService := appfeatures.NewService(
+		candles,
+		postgres.NewPublicTradeRepository(db),
+		postgres.NewOrderbookSnapshotRepository(db),
+		featureServiceConfig(cfg),
+	)
 	researchRepo := postgres.NewResearchRunRepository(db)
-	result, err := apppaper.NewService(
+	researchGenerator := appresearch.NewService(
+		postgres.NewHypothesisRepository(db),
+		nil,
+		appresearch.WithRegimeRepository(postgres.NewRegimeStateRepository(db)),
+		appresearch.WithFeatureAssembler(featureService),
+		appresearch.WithCandleRepository(candles),
+	)
+	service := apppaper.NewService(
 		researchRepo,
 		researchRepo,
 		apppaper.WithValidationRecordRepository(postgres.NewPaperValidationRepository(db)),
 		apppaper.WithValidationTradeRepository(postgres.NewPaperValidationTradeRepository(db)),
-	).RecordSimulation(ctx, apppaper.RecordSimulationRequest{
-		ValidationID:  *validationID,
-		TradeIDPrefix: *tradeIDPrefix,
-		Symbol:        *symbol,
-		Interval:      *interval,
-		RoundTrips:    roundTrips,
-	})
+		apppaper.WithSimulationTradeGenerator(researchSimulationTradeGenerator{service: researchGenerator}),
+	)
+
+	source := "persisted_data"
+	var result apppaper.RecordSimulationResult
+	var generation apppaper.SimulationTradeGenerationResult
+	if strings.TrimSpace(*inputPath) != "" {
+		source = "json"
+		roundTrips, readErr := readSimulationRoundTrips(*inputPath, quantity, costs)
+		if readErr != nil {
+			log.Error("failed to read paper simulation input", "error", readErr)
+			os.Exit(1)
+		}
+		result, err = service.RecordSimulation(ctx, apppaper.RecordSimulationRequest{
+			ValidationID:  *validationID,
+			TradeIDPrefix: *tradeIDPrefix,
+			Symbol:        *symbol,
+			Interval:      *interval,
+			RoundTrips:    roundTrips,
+		})
+	} else {
+		generated, generateErr := service.GenerateSimulation(ctx, apppaper.GenerateSimulationRequest{
+			ValidationID:         *validationID,
+			TradeIDPrefix:        *tradeIDPrefix,
+			Symbol:               *symbol,
+			Interval:             *interval,
+			FeatureLookback:      *featureLookback,
+			MinRegimeCoveragePct: *minRegimeCoverage,
+			HoldingPeriodCandles: *holdingPeriodCandles,
+			Quantity:             quantity,
+			Costs:                costs,
+			CandleLimit:          *candleLimit,
+			TradeLimit:           *tradeLimit,
+			SnapshotLimit:        *snapshotLimit,
+			WebSocketConnected:   *webSocketConnected,
+			OrderbookValid:       *orderbookValid,
+			UseRuntimeState:      true,
+		})
+		err = generateErr
+		result = generated.RecordSimulationResult
+		generation = generated.Generation
+	}
 	if err != nil {
 		log.Error("paper simulation journal failed", "error", err)
 		os.Exit(1)
@@ -101,6 +156,7 @@ func main() {
 
 	log.Info(
 		"paper simulation journal recorded",
+		"source", source,
 		"validation_id", result.Record.ValidationID,
 		"run_id", result.Record.RunID,
 		"symbol", strings.ToUpper(strings.TrimSpace(*symbol)),
@@ -112,7 +168,55 @@ func main() {
 		"updated", result.Stats.Updated,
 		"spread_bps", *spreadBPS,
 		"slippage_bps", *slippageBPS,
+		"coverage_expected", generation.CoverageExpected,
+		"coverage_observed", generation.CoverageObserved,
+		"coverage_missing", generation.CoverageMissing,
+		"coverage_pct", generation.CoveragePct,
 	)
+}
+
+type researchSimulationTradeGenerator struct {
+	service *appresearch.Service
+}
+
+func (g researchSimulationTradeGenerator) GenerateSimulationTrades(
+	ctx context.Context,
+	req apppaper.SimulationTradeGenerationRequest,
+) (apppaper.SimulationTradeGenerationResult, error) {
+	if g.service == nil {
+		return apppaper.SimulationTradeGenerationResult{}, fmt.Errorf("research trade generator service is required")
+	}
+	result, err := g.service.GenerateRuleTrades(ctx, appresearch.TradeGenerationRequest{
+		Run:                  req.Run,
+		Symbol:               req.Symbol,
+		Interval:             req.Interval,
+		FeatureLookback:      req.FeatureLookback,
+		MinRegimeCoveragePct: req.MinRegimeCoveragePct,
+		HoldingPeriodCandles: req.HoldingPeriodCandles,
+		Quantity:             req.Quantity,
+		Costs:                req.Costs,
+		CandleLimit:          req.CandleLimit,
+		TradeLimit:           req.TradeLimit,
+		SnapshotLimit:        req.SnapshotLimit,
+		Runtime: appfeatures.RuntimeState{
+			WebSocketConnected: req.WebSocketConnected,
+			OrderbookValid:     req.OrderbookValid,
+		},
+		UseRuntimeState: req.UseRuntimeState,
+	})
+	if err != nil {
+		return apppaper.SimulationTradeGenerationResult{}, err
+	}
+	return apppaper.SimulationTradeGenerationResult{
+		Symbol:             result.Symbol,
+		Interval:           result.Interval,
+		RoundTrips:         result.Trades,
+		CoverageExpected:   result.Coverage.Expected,
+		CoverageObserved:   result.Coverage.Observed,
+		CoverageMissing:    result.Coverage.Missing,
+		CoveragePct:        result.Coverage.Percent,
+		CoverageSufficient: result.CoverageSufficient,
+	}, nil
 }
 
 type simulationInputFile struct {
@@ -276,4 +380,12 @@ func paperSimulationSafetyPolicy(cfg *config.Config) (domainpaper.SafetyPolicy, 
 		return domainpaper.SafetyPolicy{}, fmt.Errorf("paper simulation must include fees, slippage, and spread")
 	}
 	return policy, nil
+}
+
+func featureServiceConfig(cfg *config.Config) appfeatures.ServiceConfig {
+	featureCfg := appfeatures.DefaultServiceConfig()
+	featureCfg.DataQuality = domainfeatures.DataQualityFeatureConfig{
+		MaxStaleness: time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
+	}
+	return featureCfg
 }
