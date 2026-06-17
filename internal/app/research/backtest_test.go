@@ -176,6 +176,9 @@ func TestServiceBacktestRulesRecordsResearchGateFailures(t *testing.T) {
 	if !containsReason(got.Result.Reasons, "gate_walk_forward_missing") {
 		t.Fatalf("missing walk-forward gate reason: %#v", got.Result.Reasons)
 	}
+	if !containsReason(got.Result.Reasons, "validation_incomplete:walk_forward") {
+		t.Fatalf("missing incomplete-validation decision reason: %#v", got.Result.Reasons)
+	}
 	if got.Result.Outcome != domainresearch.OutcomeInconclusive {
 		t.Fatalf("fixed-horizon backtest must remain inconclusive before walk-forward, got %s", got.Result.Outcome)
 	}
@@ -236,8 +239,68 @@ func TestServiceBacktestRulesRecordsPassingWalkForwardFolds(t *testing.T) {
 	if !containsReason(got.Result.Reasons, "walk_forward_folds:3") || !containsReason(got.Result.Reasons, "research_gates_passed") {
 		t.Fatalf("missing walk-forward/gate reasons: %#v", got.Result.Reasons)
 	}
-	if got.Result.Outcome != domainresearch.OutcomeInconclusive {
-		t.Fatalf("fixed-horizon backtest should not promote candidate in this slice, got %s", got.Result.Outcome)
+	if got.Result.Outcome != domainresearch.OutcomeCandidate {
+		t.Fatalf("completed passing validation should promote to candidate, got %s", got.Result.Outcome)
+	}
+	if !containsReason(got.Result.Reasons, "research_decision_candidate") {
+		t.Fatalf("missing candidate decision reason: %#v", got.Result.Reasons)
+	}
+}
+
+func TestServiceBacktestRulesRejectsCompletedFailedResearchGates(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	hypothesis := singleMarketHypothesisRecord(t, plannedAt.Add(-time.Hour))
+	run := ruleEvaluationRun(t, plannedAt, hypothesis)
+	regimes := &fakeRegimeRepository{statesByKey: map[string][]domainregime.State{
+		"BTCUSDT|1": {
+			testRuleRegimeState(plannedAt.Add(-3*time.Minute), domainregime.RegimeTrendUp, 80),
+			testRuleRegimeState(plannedAt.Add(-2*time.Minute), domainregime.RegimeTrendUp, 80),
+			testRuleRegimeState(plannedAt.Add(-time.Minute), domainregime.RegimeTrendUp, 80),
+		},
+	}}
+	candles := &fakeCandleRepository{candles: []marketdata.Candle{
+		testBacktestCandle(plannedAt.Add(-3*time.Minute), "100", "101"),
+		testBacktestCandle(plannedAt.Add(-2*time.Minute), "100", "102"),
+		testBacktestCandle(plannedAt.Add(-time.Minute), "100", "103"),
+	}}
+	service := testBacktestService(
+		plannedAt,
+		hypothesis,
+		run,
+		&fakeResultRecorder{stats: domainresearch.RecordResultStats{RunUpdated: 1, ResultInserted: 1}},
+		regimes,
+		&fakeFeatureAssembler{featureSet: ruleFeatureSet("101", "100")},
+		candles,
+	)
+	req := validBacktestRequest(t, run.RunID)
+	req.OutOfSampleStart = plannedAt.Add(-2 * time.Minute)
+	req.WalkForwardFolds = 3
+	req.ResultGates = domainresearch.ResultGatePolicy{
+		Enabled:               true,
+		MinTrades:             10,
+		MaxDrawdownPct:        100,
+		RequireOutOfSample:    true,
+		RequireWalkForward:    true,
+		RequireRegimeAnalysis: true,
+		RequireCosts:          true,
+	}
+
+	got, err := service.BacktestRules(context.Background(), req)
+	if err != nil {
+		t.Fatalf("backtest rules with completed failed gates: %v", err)
+	}
+
+	if got.Result.Outcome != domainresearch.OutcomeRejected {
+		t.Fatalf("completed failed gates should reject, got %s", got.Result.Outcome)
+	}
+	if !containsReason(got.Result.Reasons, "research_decision_rejected_by_gates") {
+		t.Fatalf("missing rejection decision reason: %#v", got.Result.Reasons)
+	}
+	if !containsReason(got.Result.Reasons, "gate_min_trades_failed:3<10") {
+		t.Fatalf("missing aggregate min-trades failure: %#v", got.Result.Reasons)
+	}
+	if !containsReason(got.Result.Reasons, "walk_forward_fold:1:gate_min_trades_failed:1<10") {
+		t.Fatalf("missing fold min-trades failure: %#v", got.Result.Reasons)
 	}
 }
 

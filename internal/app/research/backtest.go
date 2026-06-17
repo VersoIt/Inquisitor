@@ -128,7 +128,15 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	}
 	if coverage.Percent < minCoverage {
 		metrics := backtestSummaryMetrics(coverage, domainbacktest.Summary{})
-		result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusFailed, domainresearch.OutcomeNotExecuted, metrics, append(coverageReasons, "regime_coverage_below_threshold"))
+		result, finalRun, stats, err := s.recordBacktestResult(
+			ctx,
+			run,
+			domainresearch.StatusFailed,
+			domainresearch.OutcomeNotExecuted,
+			"Fixed-horizon research backtest failed: historical regime coverage is insufficient; trades were not evaluated.",
+			metrics,
+			append(coverageReasons, "regime_coverage_below_threshold"),
+		)
 		if err != nil {
 			return BacktestResult{}, err
 		}
@@ -153,6 +161,10 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	}
 	metrics := backtestMetrics(coverage, summary, split, walkForward, skipped)
 	gates, err := domainresearch.EvaluateMetricsGates(metrics, req.ResultGates)
+	if err != nil {
+		return BacktestResult{}, err
+	}
+	decision, err := domainresearch.DecideResultFromGates(metrics, req.ResultGates, gates)
 	if err != nil {
 		return BacktestResult{}, err
 	}
@@ -190,7 +202,8 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	if gates.Enabled {
 		reasons = append(reasons, gates.Reasons...)
 	}
-	result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusCompleted, domainresearch.OutcomeInconclusive, metrics, reasons)
+	reasons = append(reasons, decision.Reasons...)
+	result, finalRun, stats, err := s.recordBacktestResult(ctx, run, decision.FinalStatus, decision.Outcome, decision.Summary, metrics, reasons)
 	if err != nil {
 		return BacktestResult{}, err
 	}
@@ -466,16 +479,12 @@ func summarizeBacktestWalkForward(initialEquity decimal.Decimal, trades []domain
 	return result, nil
 }
 
-func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.Run, finalStatus domainresearch.Status, outcome domainresearch.Outcome, metrics domainresearch.Metrics, reasons []string) (domainresearch.Result, domainresearch.Run, domainresearch.RecordResultStats, error) {
-	text := "Fixed-horizon research backtest completed with cost-aware execution assumptions; walk-forward validation is not implemented yet."
-	if outcome == domainresearch.OutcomeNotExecuted {
-		text = "Fixed-horizon research backtest failed: historical regime coverage is insufficient; trades were not evaluated."
-	}
+func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.Run, finalStatus domainresearch.Status, outcome domainresearch.Outcome, summary string, metrics domainresearch.Metrics, reasons []string) (domainresearch.Result, domainresearch.Run, domainresearch.RecordResultStats, error) {
 	result, err := domainresearch.NewResult(domainresearch.ResultInput{
 		RunID:       run.RunID,
 		FinalStatus: finalStatus,
 		Outcome:     outcome,
-		Summary:     text,
+		Summary:     summary,
 		Metrics:     metrics,
 		Reasons:     reasons,
 		RecordedAt:  s.clock.Now(),

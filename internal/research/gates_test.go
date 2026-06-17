@@ -179,6 +179,101 @@ func TestEvaluateResultGatesMarksCandidateEligibility(t *testing.T) {
 	}
 }
 
+func TestDecideResultFromGatesTableDriven(t *testing.T) {
+	policy := research.ResultGatePolicy{
+		Enabled:               true,
+		MinTrades:             3,
+		MinProfitFactor:       decimal.RequireFromString("1.2"),
+		MinExpectancy:         decimal.RequireFromString("0.05"),
+		MaxDrawdownPct:        12,
+		RequireOutOfSample:    true,
+		RequireWalkForward:    true,
+		RequireRegimeAnalysis: true,
+		RequireCosts:          true,
+	}
+
+	tests := []struct {
+		name         string
+		mutatePolicy func(*research.ResultGatePolicy)
+		mutate       func(*research.Metrics)
+		want         research.Outcome
+		wantReason   string
+	}{
+		{
+			name: "disabled gates stay inconclusive",
+			mutatePolicy: func(policy *research.ResultGatePolicy) {
+				policy.Enabled = false
+			},
+			want:       research.OutcomeInconclusive,
+			wantReason: "research_gates_disabled",
+		},
+		{
+			name: "missing out of sample stays inconclusive",
+			mutate: func(metrics *research.Metrics) {
+				metrics.OutOfSample = false
+				metrics.InSampleTrades = 0
+				metrics.OutOfSampleTrades = 0
+			},
+			want:       research.OutcomeInconclusive,
+			wantReason: "validation_incomplete:out_of_sample",
+		},
+		{
+			name: "missing walk forward stays inconclusive",
+			mutate: func(metrics *research.Metrics) {
+				metrics.WalkForward = false
+				metrics.WalkForwardFolds = 0
+				metrics.WalkForwardPassedFolds = 0
+				metrics.WalkForwardTrades = 0
+			},
+			want:       research.OutcomeInconclusive,
+			wantReason: "validation_incomplete:walk_forward",
+		},
+		{
+			name:       "passing completed gates become candidate",
+			want:       research.OutcomeCandidate,
+			wantReason: "research_decision_candidate",
+		},
+		{
+			name: "failing completed gates become rejected",
+			mutate: func(metrics *research.Metrics) {
+				metrics.Trades = 2
+				metrics.InSampleTrades = 1
+				metrics.OutOfSampleTrades = 1
+			},
+			want:       research.OutcomeRejected,
+			wantReason: "research_decision_rejected_by_gates",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metrics := gateMetrics()
+			if tt.mutate != nil {
+				tt.mutate(&metrics)
+			}
+			policy := policy
+			if tt.mutatePolicy != nil {
+				tt.mutatePolicy(&policy)
+			}
+			evaluation, err := research.EvaluateMetricsGates(metrics, policy)
+			if err != nil {
+				t.Fatalf("evaluate metrics gates: %v", err)
+			}
+
+			got, err := research.DecideResultFromGates(metrics, policy, evaluation)
+			if err != nil {
+				t.Fatalf("decide result from gates: %v", err)
+			}
+			if got.FinalStatus != research.StatusCompleted || got.Outcome != tt.want {
+				t.Fatalf("decision mismatch: %#v", got)
+			}
+			if !containsString(got.Reasons, tt.wantReason) {
+				t.Fatalf("missing reason %q in %#v", tt.wantReason, got.Reasons)
+			}
+		})
+	}
+}
+
 func TestValidateResultGatePolicyRejectsInvalidPolicyTableDriven(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -36,6 +36,13 @@ type ResultGateCheck struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
+type ResultGateDecision struct {
+	FinalStatus Status   `json:"final_status"`
+	Outcome     Outcome  `json:"outcome"`
+	Summary     string   `json:"summary"`
+	Reasons     []string `json:"reasons"`
+}
+
 func EvaluateResultGates(result Result, policy ResultGatePolicy) (ResultGateEvaluation, error) {
 	if err := ValidateResult(result); err != nil {
 		return ResultGateEvaluation{}, err
@@ -158,6 +165,44 @@ func EvaluateMetricsGates(metrics Metrics, policy ResultGatePolicy) (ResultGateE
 	return evaluation, nil
 }
 
+func DecideResultFromGates(metrics Metrics, policy ResultGatePolicy, evaluation ResultGateEvaluation) (ResultGateDecision, error) {
+	if err := ValidateResultGatePolicy(policy); err != nil {
+		return ResultGateDecision{}, err
+	}
+	if !policy.Enabled {
+		return ResultGateDecision{
+			FinalStatus: StatusCompleted,
+			Outcome:     OutcomeInconclusive,
+			Summary:     "Fixed-horizon research backtest completed, but research gates are disabled; candidate decision was not made.",
+			Reasons:     []string{"research_gates_disabled"},
+		}, nil
+	}
+
+	incomplete := incompleteValidationReasons(metrics, policy)
+	if len(incomplete) > 0 {
+		return ResultGateDecision{
+			FinalStatus: StatusCompleted,
+			Outcome:     OutcomeInconclusive,
+			Summary:     "Fixed-horizon research backtest completed, but required validation gates are incomplete; candidate decision was not made.",
+			Reasons:     incomplete,
+		}, nil
+	}
+	if evaluation.Passed {
+		return ResultGateDecision{
+			FinalStatus: StatusCompleted,
+			Outcome:     OutcomeCandidate,
+			Summary:     "Fixed-horizon research backtest passed configured conservative research gates; live trading remains disabled.",
+			Reasons:     []string{"research_decision_candidate"},
+		}, nil
+	}
+	return ResultGateDecision{
+		FinalStatus: StatusCompleted,
+		Outcome:     OutcomeRejected,
+		Summary:     "Fixed-horizon research backtest completed required validation but failed configured conservative research gates.",
+		Reasons:     []string{"research_decision_rejected_by_gates"},
+	}, nil
+}
+
 func ValidateResultGatePolicy(policy ResultGatePolicy) error {
 	var problems []string
 	if policy.MinTrades < 0 {
@@ -176,6 +221,20 @@ func ValidateResultGatePolicy(policy ResultGatePolicy) error {
 		return errors.New("research result gate policy validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func incompleteValidationReasons(metrics Metrics, policy ResultGatePolicy) []string {
+	var reasons []string
+	if policy.RequireOutOfSample && !metrics.OutOfSample {
+		reasons = append(reasons, "validation_incomplete:out_of_sample")
+	}
+	if policy.RequireWalkForward && metrics.WalkForwardFolds == 0 {
+		reasons = append(reasons, "validation_incomplete:walk_forward")
+	}
+	if policy.RequireRegimeAnalysis && !metrics.RegimeAnalysisIncluded {
+		reasons = append(reasons, "validation_incomplete:regime_analysis")
+	}
+	return reasons
 }
 
 func profitFactorGateCheck(metrics Metrics, threshold decimal.Decimal) (ResultGateCheck, error) {
