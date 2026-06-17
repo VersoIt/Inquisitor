@@ -18,6 +18,8 @@ import (
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
 	runID := flag.String("run-id", "", "candidate research run id")
+	record := flag.Bool("record", false, "persist an allowed paper validation record")
+	validationID := flag.String("validation-id", "", "optional paper validation record id for idempotent reruns")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
 
@@ -42,9 +44,16 @@ func main() {
 	defer db.Close()
 
 	researchRepo := postgres.NewResearchRunRepository(db)
-	result, err := apppaper.NewService(researchRepo, researchRepo).ValidateCandidate(ctx, apppaper.ValidateCandidateRequest{
-		RunID:  *runID,
-		Policy: policy,
+	paperRecords := postgres.NewPaperValidationRepository(db)
+	result, err := apppaper.NewService(
+		researchRepo,
+		researchRepo,
+		apppaper.WithValidationRecordRepository(paperRecords),
+	).ValidateCandidate(ctx, apppaper.ValidateCandidateRequest{
+		RunID:        *runID,
+		Policy:       policy,
+		Record:       *record,
+		ValidationID: *validationID,
 	})
 	if err != nil {
 		log.Error("paper validation readiness check failed", "error", err)
@@ -63,6 +72,11 @@ func main() {
 		"hypothesis_version", result.Run.HypothesisVersion,
 		"outcome", result.Result.Outcome,
 		"requested_at", result.Plan.RequestedAt,
+		"record_requested", *record,
+		"recorded", result.Record.ValidationID != "",
+		"validation_id", result.Record.ValidationID,
+		"record_inserted", result.RecordStats.Inserted,
+		"record_updated", result.RecordStats.Updated,
 	)
 	if !result.Plan.Allowed {
 		os.Exit(1)

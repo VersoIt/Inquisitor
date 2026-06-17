@@ -54,10 +54,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 conservative research gate evaluation for fixed-horizon backtests, using configured minimum trades, profit factor, expectancy, max drawdown, out-of-sample, walk-forward, regime-analysis, and cost-inclusion requirements.
 - Initial Phase 4 fixed chronological walk-forward fold validation for research backtests, with per-fold conservative gate checks and explicit passed/failed fold counts.
 - Initial Phase 4 candidate/rejection decisions for completed fixed-horizon validation: incomplete validation remains `INCONCLUSIVE`, completed failed gates become `REJECTED`, and completed passed gates become `CANDIDATE`; still without live trading.
-- Initial Phase 4 paper-validation readiness guard that allows paper-mode progression only for completed `CANDIDATE` research results with conservative paper simulation settings and live trading disabled.
+- Initial Phase 4 paper-validation readiness guard and optional validation record persistence that allows paper-mode progression only for completed `CANDIDATE` research results with conservative paper simulation settings and live trading disabled.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add paper-validation execution records behind strict candidate-only gates, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add a paper-validation execution journal with simulated fills and equity tracking behind strict candidate-only gates, still without live trading.
 
 ## What This Is Not
 
@@ -126,8 +126,9 @@ Initial migrations are in `migrations/`:
 - `007_research_runs.sql`
 - `008_research_results.sql`
 - `009_research_run_market_scope.sql`
+- `010_paper_validation_records.sql`
 
-They define the first market-data, realtime, regime-state, hypothesis, research-run, and research-result tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, and paper-validation record tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 
@@ -299,6 +300,18 @@ $env:DATABASE_DSN="postgres://inquisitor:inquisitor@localhost:5432/inquisitor?ss
 go run ./cmd/paper -config configs/config.example.yaml -run-id research_...
 ```
 
+To persist an allowed validation plan as an idempotent paper-validation record, pass `-record`. The command writes a `paper_validation_records` row only when the plan is allowed; blocked plans are never recorded.
+
+```powershell
+go run ./cmd/paper -config configs/config.example.yaml -run-id research_... -record
+```
+
+For explicit reruns, pass a stable id:
+
+```powershell
+go run ./cmd/paper -config configs/config.example.yaml -run-id research_... -record -validation-id paper_validation_001
+```
+
 The command exits with a non-zero status when the plan is not allowed, making it safe to use as a gate before any future paper executor.
 
 ## Regime Classification
@@ -337,6 +350,7 @@ make research-evaluate-rules RUN_ID=research_...
 make research-backtest RUN_ID=research_... HOLDING_PERIOD_CANDLES=1 QUANTITY=1 OUT_OF_SAMPLE_START=2026-06-02T00:00:00Z WALK_FORWARD_FOLDS=4 REPORT_PATH=reports/research_001.md REPORT_FORMAT=markdown
 make research-record-not-executed RUN_ID=research_...
 make paper-validate RUN_ID=research_...
+make paper-validate RUN_ID=research_... PAPER_RECORD=1 VALIDATION_ID=paper_validation_001
 ```
 
 ## Architecture Boundary

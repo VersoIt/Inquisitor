@@ -181,6 +181,170 @@ func TestNewValidationPlanRejectsInvalidInputsTableDriven(t *testing.T) {
 	}
 }
 
+func TestNewValidationRecordBuildsPlannedRecordFromAllowedPlan(t *testing.T) {
+	run, result := paperRunResult(t, domainresearch.OutcomeCandidate)
+	requestedAt := time.Date(2026, 6, 17, 15, 0, 0, 0, time.FixedZone("MSK", 3*60*60))
+	plan, err := paper.NewValidationPlan(run, result, validSafetyPolicy(), requestedAt)
+	if err != nil {
+		t.Fatalf("new validation plan: %v", err)
+	}
+
+	got, err := paper.NewValidationRecord(paper.ValidationRecordInput{
+		ValidationID: " paper_validation_0001 ",
+		Plan:         plan,
+	})
+	if err != nil {
+		t.Fatalf("new validation record: %v", err)
+	}
+
+	if got.ValidationID != "paper_validation_0001" || got.RunID != run.RunID {
+		t.Fatalf("record identity mismatch: %#v", got)
+	}
+	if got.Status != paper.ValidationStatusPlanned || got.Mode != "paper" {
+		t.Fatalf("record state mismatch: %#v", got)
+	}
+	if !got.InitialBalance.Equal(plan.InitialBalance) || got.MinimumDays != plan.MinimumDays {
+		t.Fatalf("record safety settings mismatch: %#v", got)
+	}
+	if !got.PlannedAt.Equal(requestedAt.UTC()) {
+		t.Fatalf("expected planned_at %s, got %s", requestedAt.UTC(), got.PlannedAt)
+	}
+	if len(got.Reasons) != 1 || got.Reasons[0] != "paper_validation_allowed" {
+		t.Fatalf("record reasons mismatch: %#v", got.Reasons)
+	}
+
+	plan.Reasons[0] = "mutated_after_record_creation"
+	if got.Reasons[0] != "paper_validation_allowed" {
+		t.Fatalf("record reasons must be immutable copy, got %#v", got.Reasons)
+	}
+}
+
+func TestNewValidationRecordRejectsInvalidInputsTableDriven(t *testing.T) {
+	run, result := paperRunResult(t, domainresearch.OutcomeCandidate)
+	requestedAt := time.Date(2026, 6, 17, 15, 0, 0, 0, time.UTC)
+	allowedPlan, err := paper.NewValidationPlan(run, result, validSafetyPolicy(), requestedAt)
+	if err != nil {
+		t.Fatalf("new allowed validation plan: %v", err)
+	}
+	_, rejectedResult := paperRunResult(t, domainresearch.OutcomeRejected)
+	blockedPlan, err := paper.NewValidationPlan(run, rejectedResult, validSafetyPolicy(), requestedAt)
+	if err != nil {
+		t.Fatalf("new blocked validation plan: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		input      paper.ValidationRecordInput
+		wantErrSub string
+	}{
+		{
+			name: "blocked plan",
+			input: paper.ValidationRecordInput{
+				ValidationID: "paper_validation_0001",
+				Plan:         blockedPlan,
+			},
+			wantErrSub: "allowed",
+		},
+		{
+			name: "missing validation id",
+			input: paper.ValidationRecordInput{
+				ValidationID: " ",
+				Plan:         allowedPlan,
+			},
+			wantErrSub: "validation_id",
+		},
+		{
+			name: "invalid mode from plan",
+			input: paper.ValidationRecordInput{
+				ValidationID: "paper_validation_0001",
+				Plan: func() paper.ValidationPlan {
+					plan := allowedPlan
+					plan.Mode = "live"
+					return plan
+				}(),
+			},
+			wantErrSub: "mode",
+		},
+		{
+			name: "missing planned at from plan",
+			input: paper.ValidationRecordInput{
+				ValidationID: "paper_validation_0001",
+				Plan: func() paper.ValidationPlan {
+					plan := allowedPlan
+					plan.RequestedAt = time.Time{}
+					return plan
+				}(),
+			},
+			wantErrSub: "planned_at",
+		},
+		{
+			name: "empty reason from plan",
+			input: paper.ValidationRecordInput{
+				ValidationID: "paper_validation_0001",
+				Plan: func() paper.ValidationPlan {
+					plan := allowedPlan
+					plan.Reasons = []string{"paper_validation_allowed", " "}
+					return plan
+				}(),
+			},
+			wantErrSub: "reasons[1]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := paper.NewValidationRecord(tt.input)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
+	}
+}
+
+func TestValidateValidationRecordQueryRejectsInvalidInputsTableDriven(t *testing.T) {
+	start := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		query      paper.ValidationRecordQuery
+		wantErrSub string
+	}{
+		{
+			name:       "unknown status",
+			query:      paper.ValidationRecordQuery{Status: "NOPE"},
+			wantErrSub: "status",
+		},
+		{
+			name: "end before start",
+			query: paper.ValidationRecordQuery{
+				Start: start,
+				End:   start,
+			},
+			wantErrSub: "end",
+		},
+		{
+			name:       "negative limit",
+			query:      paper.ValidationRecordQuery{Limit: -1},
+			wantErrSub: "limit",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := paper.ValidateValidationRecordQuery(tt.query)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
+	}
+}
+
 func paperRunResult(t *testing.T, outcome domainresearch.Outcome) (domainresearch.Run, domainresearch.Result) {
 	t.Helper()
 

@@ -1,7 +1,9 @@
 package paper
 
 import (
+	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +32,54 @@ type ValidationPlan struct {
 	MinimumDays    int
 	RequestedAt    time.Time
 	Reasons        []string
+}
+
+type ValidationStatus string
+
+const (
+	ValidationStatusPlanned   ValidationStatus = "PLANNED"
+	ValidationStatusRunning   ValidationStatus = "RUNNING"
+	ValidationStatusCompleted ValidationStatus = "COMPLETED"
+	ValidationStatusCancelled ValidationStatus = "CANCELLED"
+)
+
+type ValidationRecord struct {
+	ValidationID   string
+	RunID          string
+	Status         ValidationStatus
+	Mode           string
+	InitialBalance decimal.Decimal
+	MinimumDays    int
+	Reasons        []string
+	PlannedAt      time.Time
+}
+
+type ValidationRecordInput struct {
+	ValidationID string
+	Plan         ValidationPlan
+}
+
+type ValidationRecordStats struct {
+	Inserted int
+	Updated  int
+}
+
+type ValidationRecordQuery struct {
+	ValidationID string
+	RunID        string
+	Status       ValidationStatus
+	Start        time.Time
+	End          time.Time
+	Limit        int
+}
+
+type ValidationRecordRepository interface {
+	RecordValidation(ctx context.Context, record ValidationRecord) (ValidationRecordStats, error)
+	ListValidationRecords(ctx context.Context, query ValidationRecordQuery) ([]ValidationRecord, error)
+}
+
+func (s ValidationRecordStats) Total() int {
+	return s.Inserted + s.Updated
 }
 
 func NewValidationPlan(run domainresearch.Run, result domainresearch.Result, policy SafetyPolicy, requestedAt time.Time) (ValidationPlan, error) {
@@ -67,6 +117,26 @@ func NewValidationPlan(run domainresearch.Run, result domainresearch.Result, pol
 	}, nil
 }
 
+func NewValidationRecord(input ValidationRecordInput) (ValidationRecord, error) {
+	if !input.Plan.Allowed {
+		return ValidationRecord{}, errors.New("paper validation record failed: allowed validation plan is required")
+	}
+	record := ValidationRecord{
+		ValidationID:   strings.TrimSpace(input.ValidationID),
+		RunID:          strings.TrimSpace(input.Plan.RunID),
+		Status:         ValidationStatusPlanned,
+		Mode:           strings.ToLower(strings.TrimSpace(input.Plan.Mode)),
+		InitialBalance: input.Plan.InitialBalance,
+		MinimumDays:    input.Plan.MinimumDays,
+		Reasons:        append([]string(nil), input.Plan.Reasons...),
+		PlannedAt:      input.Plan.RequestedAt.UTC(),
+	}
+	if err := ValidateValidationRecord(record); err != nil {
+		return ValidationRecord{}, err
+	}
+	return record, nil
+}
+
 func ValidateSafetyPolicy(policy SafetyPolicy) error {
 	var problems []string
 	if policy.InitialBalance.LessThanOrEqual(decimal.Zero) {
@@ -79,6 +149,71 @@ func ValidateSafetyPolicy(policy SafetyPolicy) error {
 		return errors.New("paper safety policy validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func ValidateValidationRecord(record ValidationRecord) error {
+	var problems []string
+	if strings.TrimSpace(record.ValidationID) == "" {
+		problems = append(problems, "validation_id is required")
+	}
+	if strings.TrimSpace(record.RunID) == "" {
+		problems = append(problems, "run_id is required")
+	}
+	if !KnownValidationStatus(record.Status) {
+		problems = append(problems, "status is unsupported")
+	}
+	if strings.ToLower(strings.TrimSpace(record.Mode)) != "paper" {
+		problems = append(problems, "mode must be paper")
+	}
+	if record.InitialBalance.LessThanOrEqual(decimal.Zero) {
+		problems = append(problems, "initial_balance must be positive")
+	}
+	if record.MinimumDays <= 0 {
+		problems = append(problems, "minimum_days must be positive")
+	}
+	if record.PlannedAt.IsZero() {
+		problems = append(problems, "planned_at is required")
+	}
+	for index, reason := range record.Reasons {
+		if strings.TrimSpace(reason) == "" {
+			problems = append(problems, "reasons["+strconv.Itoa(index)+"] must not be empty")
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New("paper validation record validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func ValidateValidationRecordQuery(query ValidationRecordQuery) error {
+	if query.Status != "" && !KnownValidationStatus(query.Status) {
+		return errors.New("status is unsupported")
+	}
+	if !query.Start.IsZero() && !query.End.IsZero() && !query.End.After(query.Start) {
+		return errors.New("end must be after start")
+	}
+	if query.Limit < 0 {
+		return errors.New("limit must be greater than or equal to zero")
+	}
+	return nil
+}
+
+func ValidateValidationRecords(records []ValidationRecord) error {
+	for index, record := range records {
+		if err := ValidateValidationRecord(record); err != nil {
+			return errors.New("paper_validation_record[" + decimal.NewFromInt(int64(index)).String() + "]: " + err.Error())
+		}
+	}
+	return nil
+}
+
+func KnownValidationStatus(status ValidationStatus) bool {
+	switch status {
+	case ValidationStatusPlanned, ValidationStatusRunning, ValidationStatusCompleted, ValidationStatusCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 func paperBlockers(run domainresearch.Run, result domainresearch.Result, policy SafetyPolicy) []string {

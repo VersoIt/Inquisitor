@@ -2,6 +2,8 @@ package paper
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -19,29 +21,50 @@ type ResultRepository interface {
 }
 
 type Service struct {
-	runs    RunRepository
-	results ResultRepository
-	clock   clock.Clock
+	runs        RunRepository
+	results     ResultRepository
+	records     domainpaper.ValidationRecordRepository
+	clock       clock.Clock
+	idGenerator IDGenerator
 }
 
 type Option func(*Service)
 
+type IDGenerator interface {
+	NewID() (string, error)
+}
+
+type CryptoIDGenerator struct{}
+
+func (CryptoIDGenerator) NewID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate paper validation id: %w", err)
+	}
+	return "paper_validation_" + hex.EncodeToString(raw[:]), nil
+}
+
 type ValidateCandidateRequest struct {
-	RunID  string
-	Policy domainpaper.SafetyPolicy
+	RunID        string
+	Policy       domainpaper.SafetyPolicy
+	Record       bool
+	ValidationID string
 }
 
 type ValidateCandidateResult struct {
-	Run    domainresearch.Run
-	Result domainresearch.Result
-	Plan   domainpaper.ValidationPlan
+	Run         domainresearch.Run
+	Result      domainresearch.Result
+	Plan        domainpaper.ValidationPlan
+	Record      domainpaper.ValidationRecord
+	RecordStats domainpaper.ValidationRecordStats
 }
 
 func NewService(runs RunRepository, results ResultRepository, options ...Option) *Service {
 	service := &Service{
-		runs:    runs,
-		results: results,
-		clock:   clock.SystemClock{},
+		runs:        runs,
+		results:     results,
+		clock:       clock.SystemClock{},
+		idGenerator: CryptoIDGenerator{},
 	}
 	for _, option := range options {
 		option(service)
@@ -52,6 +75,18 @@ func NewService(runs RunRepository, results ResultRepository, options ...Option)
 func WithClock(clock clock.Clock) Option {
 	return func(service *Service) {
 		service.clock = clock
+	}
+}
+
+func WithValidationRecordRepository(records domainpaper.ValidationRecordRepository) Option {
+	return func(service *Service) {
+		service.records = records
+	}
+}
+
+func WithIDGenerator(generator IDGenerator) Option {
+	return func(service *Service) {
+		service.idGenerator = generator
 	}
 }
 
@@ -99,9 +134,42 @@ func (s *Service) ValidateCandidate(ctx context.Context, req ValidateCandidateRe
 	if err != nil {
 		return ValidateCandidateResult{}, err
 	}
-	return ValidateCandidateResult{
+	out := ValidateCandidateResult{
 		Run:    runs[0],
 		Result: results[0],
 		Plan:   plan,
-	}, nil
+	}
+	if !req.Record || !plan.Allowed {
+		return out, nil
+	}
+	if s.records == nil {
+		return ValidateCandidateResult{}, fmt.Errorf("paper validation service requires validation record repository")
+	}
+
+	validationID := strings.TrimSpace(req.ValidationID)
+	if validationID == "" {
+		if s.idGenerator == nil {
+			return ValidateCandidateResult{}, fmt.Errorf("paper validation service requires validation id generator")
+		}
+		generatedID, err := s.idGenerator.NewID()
+		if err != nil {
+			return ValidateCandidateResult{}, err
+		}
+		validationID = generatedID
+	}
+
+	record, err := domainpaper.NewValidationRecord(domainpaper.ValidationRecordInput{
+		ValidationID: validationID,
+		Plan:         plan,
+	})
+	if err != nil {
+		return ValidateCandidateResult{}, err
+	}
+	stats, err := s.records.RecordValidation(ctx, record)
+	if err != nil {
+		return ValidateCandidateResult{}, fmt.Errorf("record paper validation %q: %w", record.ValidationID, err)
+	}
+	out.Record = record
+	out.RecordStats = stats
+	return out, nil
 }

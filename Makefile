@@ -23,6 +23,8 @@ OUT_OF_SAMPLE_START ?=
 WALK_FORWARD_FOLDS ?= 0
 REPORT_PATH ?=
 REPORT_FORMAT ?= json
+PAPER_RECORD ?=
+VALIDATION_ID ?=
 
 .PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate docker-up docker-down
 
@@ -71,7 +73,7 @@ research-record-not-executed:
 	$(GO) run ./cmd/research-result -config $(CONFIG) -run-id $(RUN_ID) -final-status FAILED -outcome NOT_EXECUTED -summary "$(RESULT_SUMMARY)" -reasons scaffold_only
 
 paper-validate:
-	$(GO) run ./cmd/paper -config $(CONFIG) -run-id $(RUN_ID)
+	$(GO) run ./cmd/paper -config $(CONFIG) -run-id $(RUN_ID) $(if $(PAPER_RECORD),-record,) $(if $(VALIDATION_ID),-validation-id $(VALIDATION_ID),)
 
 docker-up:
 	docker compose up -d postgres

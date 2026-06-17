@@ -73,6 +73,76 @@ func TestServiceValidateCandidateReturnsBlockedPlanForNonCandidate(t *testing.T)
 	}
 }
 
+func TestServiceValidateCandidateRecordsAllowedPlan(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	requestedAt := plannedAt.Add(3 * time.Hour)
+	run, result := testRunResult(t, plannedAt, domainresearch.OutcomeCandidate)
+	records := &fakeValidationRecordRepository{
+		stats: domainpaper.ValidationRecordStats{Inserted: 1},
+	}
+	ids := &fakeIDGenerator{id: "paper_validation_app_0001"}
+	service := apppaper.NewService(
+		&fakeRunRepository{runs: []domainresearch.Run{run}},
+		&fakeResultRepository{results: []domainresearch.Result{result}},
+		apppaper.WithClock(clock.FixedClock{Time: requestedAt}),
+		apppaper.WithValidationRecordRepository(records),
+		apppaper.WithIDGenerator(ids),
+	)
+
+	got, err := service.ValidateCandidate(context.Background(), apppaper.ValidateCandidateRequest{
+		RunID:  run.RunID,
+		Policy: validPolicy(),
+		Record: true,
+	})
+	if err != nil {
+		t.Fatalf("validate and record candidate: %v", err)
+	}
+
+	if got.Record.ValidationID != "paper_validation_app_0001" || got.Record.RunID != run.RunID {
+		t.Fatalf("record identity mismatch: %#v", got.Record)
+	}
+	if got.RecordStats.Inserted != 1 || got.RecordStats.Updated != 0 {
+		t.Fatalf("record stats mismatch: %#v", got.RecordStats)
+	}
+	if records.calls != 1 || records.record.ValidationID != got.Record.ValidationID {
+		t.Fatalf("record repository call mismatch: calls=%d record=%#v", records.calls, records.record)
+	}
+	if ids.calls != 1 {
+		t.Fatalf("expected one id generation call, got %d", ids.calls)
+	}
+	if !got.Record.PlannedAt.Equal(requestedAt) {
+		t.Fatalf("planned_at mismatch: got %s want %s", got.Record.PlannedAt, requestedAt)
+	}
+}
+
+func TestServiceValidateCandidateSkipsRecordingBlockedPlan(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	run, result := testRunResult(t, plannedAt, domainresearch.OutcomeRejected)
+	records := &fakeValidationRecordRepository{}
+	service := apppaper.NewService(
+		&fakeRunRepository{runs: []domainresearch.Run{run}},
+		&fakeResultRepository{results: []domainresearch.Result{result}},
+		apppaper.WithClock(clock.FixedClock{Time: plannedAt.Add(3 * time.Hour)}),
+		apppaper.WithValidationRecordRepository(records),
+		apppaper.WithIDGenerator(&fakeIDGenerator{id: "paper_validation_app_0001"}),
+	)
+
+	got, err := service.ValidateCandidate(context.Background(), apppaper.ValidateCandidateRequest{
+		RunID:  run.RunID,
+		Policy: validPolicy(),
+		Record: true,
+	})
+	if err != nil {
+		t.Fatalf("validate blocked candidate: %v", err)
+	}
+	if got.Plan.Allowed {
+		t.Fatalf("expected blocked plan: %#v", got.Plan)
+	}
+	if records.calls != 0 || got.Record.ValidationID != "" {
+		t.Fatalf("blocked plan must not be recorded: calls=%d record=%#v", records.calls, got.Record)
+	}
+}
+
 func TestServiceValidateCandidateRejectsInvalidInputsTableDriven(t *testing.T) {
 	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	run, result := testRunResult(t, plannedAt, domainresearch.OutcomeCandidate)
@@ -159,6 +229,104 @@ func TestServiceValidateCandidateRejectsInvalidInputsTableDriven(t *testing.T) {
 	}
 }
 
+func TestServiceValidateCandidateRejectsRecordingFailuresTableDriven(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	run, result := testRunResult(t, plannedAt, domainresearch.OutcomeCandidate)
+	repositoryErr := errors.New("postgres unavailable")
+
+	tests := []struct {
+		name       string
+		service    *apppaper.Service
+		req        apppaper.ValidateCandidateRequest
+		wantErrSub string
+	}{
+		{
+			name: "missing record repository",
+			service: apppaper.NewService(
+				&fakeRunRepository{runs: []domainresearch.Run{run}},
+				&fakeResultRepository{results: []domainresearch.Result{result}},
+				apppaper.WithClock(clock.FixedClock{Time: plannedAt}),
+				apppaper.WithIDGenerator(&fakeIDGenerator{id: "paper_validation_app_0001"}),
+			),
+			req: apppaper.ValidateCandidateRequest{
+				RunID:  run.RunID,
+				Policy: validPolicy(),
+				Record: true,
+			},
+			wantErrSub: "validation record repository",
+		},
+		{
+			name: "missing id generator",
+			service: apppaper.NewService(
+				&fakeRunRepository{runs: []domainresearch.Run{run}},
+				&fakeResultRepository{results: []domainresearch.Result{result}},
+				apppaper.WithClock(clock.FixedClock{Time: plannedAt}),
+				apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{}),
+				apppaper.WithIDGenerator(nil),
+			),
+			req: apppaper.ValidateCandidateRequest{
+				RunID:  run.RunID,
+				Policy: validPolicy(),
+				Record: true,
+			},
+			wantErrSub: "id generator",
+		},
+		{
+			name: "record repository error",
+			service: apppaper.NewService(
+				&fakeRunRepository{runs: []domainresearch.Run{run}},
+				&fakeResultRepository{results: []domainresearch.Result{result}},
+				apppaper.WithClock(clock.FixedClock{Time: plannedAt}),
+				apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{err: repositoryErr}),
+				apppaper.WithIDGenerator(&fakeIDGenerator{id: "paper_validation_app_0001"}),
+			),
+			req: apppaper.ValidateCandidateRequest{
+				RunID:  run.RunID,
+				Policy: validPolicy(),
+				Record: true,
+			},
+			wantErrSub: repositoryErr.Error(),
+		},
+		{
+			name: "explicit validation id bypasses generator",
+			service: apppaper.NewService(
+				&fakeRunRepository{runs: []domainresearch.Run{run}},
+				&fakeResultRepository{results: []domainresearch.Result{result}},
+				apppaper.WithClock(clock.FixedClock{Time: plannedAt}),
+				apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{}),
+				apppaper.WithIDGenerator(nil),
+			),
+			req: apppaper.ValidateCandidateRequest{
+				RunID:        run.RunID,
+				Policy:       validPolicy(),
+				Record:       true,
+				ValidationID: "paper_validation_explicit_0001",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.service.ValidateCandidate(context.Background(), tt.req)
+			if tt.wantErrSub == "" {
+				if err != nil {
+					t.Fatalf("validate candidate: %v", err)
+				}
+				if got.Record.ValidationID != tt.req.ValidationID {
+					t.Fatalf("explicit validation id mismatch: %#v", got.Record)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
+	}
+}
+
 type fakeRunRepository struct {
 	runs    []domainresearch.Run
 	queries []domainresearch.Query
@@ -185,6 +353,40 @@ func (r *fakeResultRepository) ListResults(_ context.Context, query domainresear
 		return nil, r.err
 	}
 	return append([]domainresearch.Result(nil), r.results...), nil
+}
+
+type fakeValidationRecordRepository struct {
+	record domainpaper.ValidationRecord
+	stats  domainpaper.ValidationRecordStats
+	calls  int
+	err    error
+}
+
+func (r *fakeValidationRecordRepository) RecordValidation(_ context.Context, record domainpaper.ValidationRecord) (domainpaper.ValidationRecordStats, error) {
+	r.calls++
+	r.record = record
+	if r.err != nil {
+		return domainpaper.ValidationRecordStats{}, r.err
+	}
+	return r.stats, nil
+}
+
+func (r *fakeValidationRecordRepository) ListValidationRecords(_ context.Context, _ domainpaper.ValidationRecordQuery) ([]domainpaper.ValidationRecord, error) {
+	return nil, nil
+}
+
+type fakeIDGenerator struct {
+	id    string
+	err   error
+	calls int
+}
+
+func (g *fakeIDGenerator) NewID() (string, error) {
+	g.calls++
+	if g.err != nil {
+		return "", g.err
+	}
+	return g.id, nil
 }
 
 func testRunResult(t *testing.T, plannedAt time.Time, outcome domainresearch.Outcome) (domainresearch.Run, domainresearch.Result) {
