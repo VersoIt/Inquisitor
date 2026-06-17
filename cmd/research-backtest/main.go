@@ -4,7 +4,9 @@ import (
 	"context"
 	"flag"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -15,6 +17,7 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/config"
 	domainfeatures "github.com/VersoIt/Inquisitor/internal/features"
 	"github.com/VersoIt/Inquisitor/internal/logger"
+	domainresearch "github.com/VersoIt/Inquisitor/internal/research"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
@@ -34,6 +37,8 @@ func main() {
 	snapshotLimit := flag.Int("snapshot-limit", 100, "maximum orderbook snapshots loaded for each rule observation")
 	webSocketConnected := flag.Bool("websocket-connected", true, "runtime health flag passed into data-quality features")
 	orderbookValid := flag.Bool("orderbook-valid", true, "runtime orderbook health flag passed into data-quality features")
+	reportPath := flag.String("report-path", "", "optional path for a JSON or Markdown research report artifact")
+	reportFormat := flag.String("report-format", string(domainresearch.ReportFormatJSON), "research report format: json, markdown, or md")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
 
@@ -129,6 +134,19 @@ func main() {
 		log.Error("research backtest failed", "error", err)
 		os.Exit(1)
 	}
+	reportWrite, err := writeResearchReport(*reportPath, *reportFormat, result.Run, result.Result, time.Now())
+	if err != nil {
+		log.Error("failed to write research report", "error", err)
+		os.Exit(1)
+	}
+	if reportWrite.Written {
+		log.Info(
+			"research report written",
+			"path", reportWrite.Path,
+			"format", reportWrite.Format,
+			"bytes", reportWrite.Bytes,
+		)
+	}
 
 	log.Info(
 		"research backtest completed",
@@ -159,6 +177,48 @@ func main() {
 		"result_inserted", result.Stats.ResultInserted,
 		"result_updated", result.Stats.ResultUpdated,
 	)
+}
+
+type researchReportWriteResult struct {
+	Written bool
+	Path    string
+	Format  domainresearch.ReportFormat
+	Bytes   int
+}
+
+func writeResearchReport(pathValue, formatValue string, run domainresearch.Run, result domainresearch.Result, generatedAt time.Time) (researchReportWriteResult, error) {
+	path := strings.TrimSpace(pathValue)
+	if path == "" {
+		return researchReportWriteResult{}, nil
+	}
+	format, err := domainresearch.ParseReportFormat(formatValue)
+	if err != nil {
+		return researchReportWriteResult{}, err
+	}
+	reportBytes, err := domainresearch.RenderReport(domainresearch.ReportInput{
+		Run:         run,
+		Result:      result,
+		GeneratedAt: generatedAt,
+	}, format)
+	if err != nil {
+		return researchReportWriteResult{}, err
+	}
+
+	cleanPath := filepath.Clean(path)
+	if dir := filepath.Dir(cleanPath); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return researchReportWriteResult{}, err
+		}
+	}
+	if err := os.WriteFile(cleanPath, reportBytes, 0o644); err != nil {
+		return researchReportWriteResult{}, err
+	}
+	return researchReportWriteResult{
+		Written: true,
+		Path:    cleanPath,
+		Format:  format,
+		Bytes:   len(reportBytes),
+	}, nil
 }
 
 func featureServiceConfig(cfg *config.Config) appfeatures.ServiceConfig {
