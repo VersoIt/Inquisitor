@@ -150,6 +150,20 @@ func TestValidateTableDriven(t *testing.T) {
 			},
 			wantErrSub: "regime.adx_trend_threshold must be greater",
 		},
+		{
+			name: "rejects disabled research walk-forward gate",
+			mutate: func(cfg *config.Config) {
+				cfg.Research.RequireWalkForward = false
+			},
+			wantErrSub: "research.require_walk_forward must be true",
+		},
+		{
+			name: "rejects invalid research drawdown threshold",
+			mutate: func(cfg *config.Config) {
+				cfg.Research.MaxDrawdownPct = 101
+			},
+			wantErrSub: "research.max_drawdown_pct",
+		},
 	}
 
 	for _, tt := range tests {
@@ -222,6 +236,15 @@ func validConfig() config.Config {
 			ADXTrendThreshold:  25,
 			ADXRangeThreshold:  18,
 			ATRSpikeMultiplier: 2.5,
+		},
+		Research: config.ResearchConfig{
+			MinTrades:             200,
+			MinProfitFactor:       1.15,
+			MinExpectancyR:        0.05,
+			MaxDrawdownPct:        15,
+			RequireOutOfSample:    true,
+			RequireWalkForward:    true,
+			RequireRegimeAnalysis: true,
 		},
 	}
 }

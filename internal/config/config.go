@@ -286,6 +286,27 @@ func (c Config) Validate() error {
 	if c.Regime.ATRSpikeMultiplier <= 0 {
 		problems = append(problems, "regime.atr_spike_multiplier must be positive")
 	}
+	if c.Research.MinTrades <= 0 {
+		problems = append(problems, "research.min_trades must be positive")
+	}
+	if c.Research.MinProfitFactor <= 0 {
+		problems = append(problems, "research.min_profit_factor must be positive")
+	}
+	if c.Research.MinExpectancyR < 0 {
+		problems = append(problems, "research.min_expectancy_r must be greater than or equal to zero")
+	}
+	if c.Research.MaxDrawdownPct <= 0 || c.Research.MaxDrawdownPct > 100 {
+		problems = append(problems, "research.max_drawdown_pct must be greater than 0 and no more than 100")
+	}
+	if !c.Research.RequireOutOfSample {
+		problems = append(problems, "research.require_out_of_sample must be true")
+	}
+	if !c.Research.RequireWalkForward {
+		problems = append(problems, "research.require_walk_forward must be true")
+	}
+	if !c.Research.RequireRegimeAnalysis {
+		problems = append(problems, "research.require_regime_analysis must be true")
+	}
 
 	if len(problems) > 0 {
 		return fmt.Errorf("config validation failed: %s", strings.Join(problems, "; "))

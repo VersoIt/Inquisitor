@@ -51,9 +51,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 fixed-horizon research backtest over rule matches, with explicit holding-period candles, fixed research quantity, cost-aware metrics, overlap prevention, and automatic result recording; still without risk-engine sizing, paper execution, or live trading.
 - Initial Phase 4 explicit out-of-sample split metrics for fixed-horizon research backtests, including separate in-sample and out-of-sample trade counts, net PnL, profit factor, and drawdown.
 - Initial Phase 4 JSON/Markdown research report artifacts for fixed-horizon backtests, with stable run metadata, decision status, metrics, validation reasons, and safety gaps.
+- Initial Phase 4 conservative research gate evaluation for fixed-horizon backtests, using configured minimum trades, profit factor, expectancy, max drawdown, out-of-sample, walk-forward, regime-analysis, and cost-inclusion requirements.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add walk-forward validation gates, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add real walk-forward folds/segments, still without live trading.
 
 ## What This Is Not
 
@@ -276,7 +277,7 @@ go run ./cmd/research-backtest -config configs/config.example.yaml -run-id resea
 
 `-report-format` accepts `json`, `markdown`, or `md`. JSON is the default when `-report-path` is provided.
 
-This command only backtests rule matches after regime gating. It enters on the next candle open after a signal observation, exits after the explicit holding horizon, prevents overlapping simulated trades per symbol/interval, applies conservative fees/spread/slippage, and records an `INCONCLUSIVE` result because walk-forward validation is not implemented yet. When `-out-of-sample-start` is provided, trades with entry time before the split are reported as in-sample and trades at or after the split are reported as out-of-sample. Optional reports include run metadata, decision status, metrics, validation reasons, and safety gaps, but they do not promote a strategy to live trading. It does not perform risk-engine position sizing, paper execution, or live orders.
+This command only backtests rule matches after regime gating. It enters on the next candle open after a signal observation, exits after the explicit holding horizon, prevents overlapping simulated trades per symbol/interval, applies conservative fees/spread/slippage, and records an `INCONCLUSIVE` result because walk-forward validation is not implemented yet. When `-out-of-sample-start` is provided, trades with entry time before the split are reported as in-sample and trades at or after the split are reported as out-of-sample. The command evaluates configured research gates from `research.*` and records explicit gate reasons such as `gate_min_trades_failed` or `gate_walk_forward_missing`; because walk-forward folds are not implemented yet, the fixed-horizon backtest cannot become a `CANDIDATE`. Optional reports include run metadata, decision status, metrics, validation reasons, and safety gaps, but they do not promote a strategy to live trading. It does not perform risk-engine position sizing, paper execution, or live orders.
 
 ## Regime Classification
 

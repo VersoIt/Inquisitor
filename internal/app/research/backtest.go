@@ -26,6 +26,7 @@ type BacktestRequest struct {
 	InitialEquity        decimal.Decimal
 	Quantity             decimal.Decimal
 	Costs                domainbacktest.CostModel
+	ResultGates          domainresearch.ResultGatePolicy
 	CandleLimit          int
 	TradeLimit           int
 	SnapshotLimit        int
@@ -42,6 +43,7 @@ type BacktestResult struct {
 	Split    BacktestSplit
 	Coverage RegimeCoverage
 	Skipped  BacktestSkipped
+	Gates    domainresearch.ResultGateEvaluation
 }
 
 type BacktestSplit struct {
@@ -112,7 +114,8 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		minCoverage = defaultMinRegimeCoveragePct
 	}
 	if coverage.Percent < minCoverage {
-		result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusFailed, domainresearch.OutcomeNotExecuted, coverage, domainbacktest.Summary{}, BacktestSplit{}, BacktestSkipped{}, append(coverageReasons, "regime_coverage_below_threshold"))
+		metrics := backtestMetrics(coverage, domainbacktest.Summary{}, BacktestSplit{}, BacktestSkipped{})
+		result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusFailed, domainresearch.OutcomeNotExecuted, metrics, append(coverageReasons, "regime_coverage_below_threshold"))
 		if err != nil {
 			return BacktestResult{}, err
 		}
@@ -128,6 +131,11 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		return BacktestResult{}, err
 	}
 	split, err := summarizeBacktestSplit(req.InitialEquity, trades, req.OutOfSampleStart)
+	if err != nil {
+		return BacktestResult{}, err
+	}
+	metrics := backtestMetrics(coverage, summary, split, skipped)
+	gates, err := domainresearch.EvaluateMetricsGates(metrics, req.ResultGates)
 	if err != nil {
 		return BacktestResult{}, err
 	}
@@ -153,7 +161,10 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 	if len(trades) == 0 {
 		reasons = append(reasons, "no_rule_matches_backtested")
 	}
-	result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusCompleted, domainresearch.OutcomeInconclusive, coverage, summary, split, skipped, reasons)
+	if gates.Enabled {
+		reasons = append(reasons, gates.Reasons...)
+	}
+	result, finalRun, stats, err := s.recordBacktestResult(ctx, run, domainresearch.StatusCompleted, domainresearch.OutcomeInconclusive, metrics, reasons)
 	if err != nil {
 		return BacktestResult{}, err
 	}
@@ -166,6 +177,7 @@ func (s *Service) BacktestRules(ctx context.Context, req BacktestRequest) (Backt
 		Split:    split,
 		Coverage: coverage,
 		Skipped:  skipped,
+		Gates:    gates,
 	}, nil
 }
 
@@ -196,6 +208,9 @@ func validateBacktestRequest(req BacktestRequest) error {
 		return fmt.Errorf("feature limits must be non-negative")
 	}
 	if err := domainbacktest.ValidateCostModel(req.Costs); err != nil {
+		return err
+	}
+	if err := domainresearch.ValidateResultGatePolicy(req.ResultGates); err != nil {
 		return err
 	}
 	return nil
@@ -371,8 +386,8 @@ func summarizeBacktestSplit(initialEquity decimal.Decimal, trades []domainbackte
 	}, nil
 }
 
-func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.Run, finalStatus domainresearch.Status, outcome domainresearch.Outcome, coverage RegimeCoverage, summary domainbacktest.Summary, split BacktestSplit, skipped BacktestSkipped, reasons []string) (domainresearch.Result, domainresearch.Run, domainresearch.RecordResultStats, error) {
-	text := "Fixed-horizon research backtest completed with cost-aware execution assumptions; out-of-sample and walk-forward validation are not implemented yet."
+func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.Run, finalStatus domainresearch.Status, outcome domainresearch.Outcome, metrics domainresearch.Metrics, reasons []string) (domainresearch.Result, domainresearch.Run, domainresearch.RecordResultStats, error) {
+	text := "Fixed-horizon research backtest completed with cost-aware execution assumptions; walk-forward validation is not implemented yet."
 	if outcome == domainresearch.OutcomeNotExecuted {
 		text = "Fixed-horizon research backtest failed: historical regime coverage is insufficient; trades were not evaluated."
 	}
@@ -381,7 +396,7 @@ func (s *Service) recordBacktestResult(ctx context.Context, run domainresearch.R
 		FinalStatus: finalStatus,
 		Outcome:     outcome,
 		Summary:     text,
-		Metrics:     backtestMetrics(coverage, summary, split, skipped),
+		Metrics:     metrics,
 		Reasons:     reasons,
 		RecordedAt:  s.clock.Now(),
 	})

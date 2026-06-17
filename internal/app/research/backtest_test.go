@@ -124,6 +124,63 @@ func TestServiceBacktestRulesRecordsOutOfSampleSplitMetrics(t *testing.T) {
 	}
 }
 
+func TestServiceBacktestRulesRecordsResearchGateFailures(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	hypothesis := singleMarketHypothesisRecord(t, plannedAt.Add(-time.Hour))
+	run := ruleEvaluationRun(t, plannedAt, hypothesis)
+	regimes := &fakeRegimeRepository{statesByKey: map[string][]domainregime.State{
+		"BTCUSDT|1": {
+			testRuleRegimeState(plannedAt.Add(-3*time.Minute), domainregime.RegimeTrendUp, 80),
+			testRuleRegimeState(plannedAt.Add(-2*time.Minute), domainregime.RegimeTrendUp, 80),
+			testRuleRegimeState(plannedAt.Add(-time.Minute), domainregime.RegimeTrendUp, 80),
+		},
+	}}
+	candles := &fakeCandleRepository{candles: []marketdata.Candle{
+		testBacktestCandle(plannedAt.Add(-3*time.Minute), "100", "101"),
+		testBacktestCandle(plannedAt.Add(-2*time.Minute), "100", "99"),
+		testBacktestCandle(plannedAt.Add(-time.Minute), "100", "102"),
+	}}
+	service := testBacktestService(
+		plannedAt,
+		hypothesis,
+		run,
+		&fakeResultRecorder{stats: domainresearch.RecordResultStats{RunUpdated: 1, ResultInserted: 1}},
+		regimes,
+		&fakeFeatureAssembler{featureSet: ruleFeatureSet("101", "100")},
+		candles,
+	)
+	req := validBacktestRequest(t, run.RunID)
+	req.OutOfSampleStart = plannedAt.Add(-2 * time.Minute)
+	req.ResultGates = domainresearch.ResultGatePolicy{
+		Enabled:               true,
+		MinTrades:             10,
+		MinProfitFactor:       decimal.RequireFromString("1.1"),
+		MaxDrawdownPct:        10,
+		RequireOutOfSample:    true,
+		RequireWalkForward:    true,
+		RequireRegimeAnalysis: true,
+		RequireCosts:          true,
+	}
+
+	got, err := service.BacktestRules(context.Background(), req)
+	if err != nil {
+		t.Fatalf("backtest rules with gates: %v", err)
+	}
+
+	if !got.Gates.Enabled || got.Gates.Passed {
+		t.Fatalf("expected failing gate evaluation: %#v", got.Gates)
+	}
+	if !containsReason(got.Result.Reasons, "gate_min_trades_failed:3<10") {
+		t.Fatalf("missing min-trades gate reason: %#v", got.Result.Reasons)
+	}
+	if !containsReason(got.Result.Reasons, "gate_walk_forward_missing") {
+		t.Fatalf("missing walk-forward gate reason: %#v", got.Result.Reasons)
+	}
+	if got.Result.Outcome != domainresearch.OutcomeInconclusive {
+		t.Fatalf("fixed-horizon backtest must remain inconclusive before walk-forward, got %s", got.Result.Outcome)
+	}
+}
+
 func TestServiceBacktestRulesRecordsFailedResultWhenCoverageIsIncomplete(t *testing.T) {
 	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	hypothesis := singleMarketHypothesisRecord(t, plannedAt.Add(-time.Hour))

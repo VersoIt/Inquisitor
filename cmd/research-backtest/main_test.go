@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
+	"github.com/VersoIt/Inquisitor/internal/config"
 	domainresearch "github.com/VersoIt/Inquisitor/internal/research"
 )
 
@@ -88,6 +91,27 @@ func TestWriteResearchReportTableDriven(t *testing.T) {
 				t.Fatalf("report missing %q:\n%s", tt.wantContent, raw)
 			}
 		})
+	}
+}
+
+func TestResearchGatePolicyBuildsEnabledPolicyFromConfig(t *testing.T) {
+	got, err := researchGatePolicy(config.ResearchConfig{
+		MinTrades:             200,
+		MinProfitFactor:       1.15,
+		MinExpectancyR:        0.05,
+		MaxDrawdownPct:        15,
+		RequireOutOfSample:    true,
+		RequireWalkForward:    true,
+		RequireRegimeAnalysis: true,
+	})
+	if err != nil {
+		t.Fatalf("research gate policy: %v", err)
+	}
+	if !got.Enabled || got.MinTrades != 200 || !got.MinProfitFactor.Equal(decimal.RequireFromString("1.15")) || !got.MinExpectancy.Equal(decimal.RequireFromString("0.05")) {
+		t.Fatalf("policy mismatch: %#v", got)
+	}
+	if !got.RequireOutOfSample || !got.RequireWalkForward || !got.RequireRegimeAnalysis || !got.RequireCosts {
+		t.Fatalf("policy conservative flags mismatch: %#v", got)
 	}
 }
 

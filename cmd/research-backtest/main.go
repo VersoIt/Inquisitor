@@ -88,6 +88,11 @@ func main() {
 		log.Error("invalid backtest cost model", "error", err)
 		os.Exit(1)
 	}
+	resultGates, err := researchGatePolicy(cfg.Research)
+	if err != nil {
+		log.Error("invalid research gate policy", "error", err)
+		os.Exit(1)
+	}
 
 	ctx := context.Background()
 	db, err := postgres.Open(ctx, cfg.Database)
@@ -121,6 +126,7 @@ func main() {
 		InitialEquity:        initialEquity,
 		Quantity:             quantity,
 		Costs:                costs,
+		ResultGates:          resultGates,
 		CandleLimit:          *candleLimit,
 		TradeLimit:           *tradeLimit,
 		SnapshotLimit:        *snapshotLimit,
@@ -169,6 +175,9 @@ func main() {
 		"out_of_sample_trades", result.Split.OutOfSample.Trades,
 		"out_of_sample_net_pnl", result.Split.OutOfSample.NetPnL.String(),
 		"max_drawdown_pct", result.Result.Metrics.MaxDrawdownPct,
+		"research_gates_enabled", result.Gates.Enabled,
+		"research_gates_passed", result.Gates.Passed,
+		"research_gate_reasons", result.Gates.Reasons,
 		"holding_period_candles", *holdingPeriodCandles,
 		"quantity", quantity.String(),
 		"spread_bps", *spreadBPS,
@@ -184,6 +193,24 @@ type researchReportWriteResult struct {
 	Path    string
 	Format  domainresearch.ReportFormat
 	Bytes   int
+}
+
+func researchGatePolicy(cfg config.ResearchConfig) (domainresearch.ResultGatePolicy, error) {
+	policy := domainresearch.ResultGatePolicy{
+		Enabled:               true,
+		MinTrades:             cfg.MinTrades,
+		MinProfitFactor:       decimal.NewFromFloat(cfg.MinProfitFactor),
+		MinExpectancy:         decimal.NewFromFloat(cfg.MinExpectancyR),
+		MaxDrawdownPct:        cfg.MaxDrawdownPct,
+		RequireOutOfSample:    cfg.RequireOutOfSample,
+		RequireWalkForward:    cfg.RequireWalkForward,
+		RequireRegimeAnalysis: cfg.RequireRegimeAnalysis,
+		RequireCosts:          true,
+	}
+	if err := domainresearch.ValidateResultGatePolicy(policy); err != nil {
+		return domainresearch.ResultGatePolicy{}, err
+	}
+	return policy, nil
 }
 
 func writeResearchReport(pathValue, formatValue string, run domainresearch.Run, result domainresearch.Result, generatedAt time.Time) (researchReportWriteResult, error) {
