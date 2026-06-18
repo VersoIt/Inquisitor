@@ -150,7 +150,7 @@ func TestPaperValidationRepositoryIntegrationTableDriven(t *testing.T) {
 					t.Fatalf("transition validation: stats=%#v error=%v", transitionStats, err)
 				}
 
-				trade := testPaperValidationTrade(t, plannedAt.Add(3*time.Hour))
+				trade := testPaperValidationTrade(t, plannedAt.Add(7*time.Hour))
 				trade.ValidationID = runningRecord.ValidationID
 				if _, err := tradeRepo.RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade}, domainpaper.ValidationStatusRunning); err != nil {
 					t.Fatalf("record trade fixture: %v", err)
