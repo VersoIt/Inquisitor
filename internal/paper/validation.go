@@ -47,11 +47,15 @@ type ValidationRecord struct {
 	ValidationID   string
 	RunID          string
 	Status         ValidationStatus
+	StatusReason   string
 	Mode           string
 	InitialBalance decimal.Decimal
 	MinimumDays    int
 	Reasons        []string
 	PlannedAt      time.Time
+	StartedAt      time.Time
+	CompletedAt    time.Time
+	CancelledAt    time.Time
 }
 
 type ValidationRecordInput struct {
@@ -75,6 +79,7 @@ type ValidationRecordQuery struct {
 
 type ValidationRecordRepository interface {
 	RecordValidation(ctx context.Context, record ValidationRecord) (ValidationRecordStats, error)
+	TransitionValidation(ctx context.Context, record ValidationRecord, expectedStatus ValidationStatus) (ValidationRecordStats, error)
 	ListValidationRecords(ctx context.Context, query ValidationRecordQuery) ([]ValidationRecord, error)
 }
 
@@ -137,6 +142,79 @@ func NewValidationRecord(input ValidationRecordInput) (ValidationRecord, error) 
 	return record, nil
 }
 
+func StartValidation(record ValidationRecord, startedAt time.Time) (ValidationRecord, error) {
+	if err := ValidateValidationRecord(record); err != nil {
+		return ValidationRecord{}, err
+	}
+	if record.Status != ValidationStatusPlanned {
+		return ValidationRecord{}, errors.New("paper validation start failed: status must be PLANNED")
+	}
+	startedAt = startedAt.UTC()
+	if startedAt.IsZero() {
+		return ValidationRecord{}, errors.New("paper validation start failed: started_at is required")
+	}
+	if startedAt.Before(record.PlannedAt) {
+		return ValidationRecord{}, errors.New("paper validation start failed: started_at must not be before planned_at")
+	}
+	record.Status = ValidationStatusRunning
+	record.StartedAt = startedAt
+	if err := ValidateValidationRecord(record); err != nil {
+		return ValidationRecord{}, err
+	}
+	return record, nil
+}
+
+func CompleteValidation(record ValidationRecord, completedAt time.Time) (ValidationRecord, error) {
+	if err := ValidateValidationRecord(record); err != nil {
+		return ValidationRecord{}, err
+	}
+	if record.Status != ValidationStatusRunning {
+		return ValidationRecord{}, errors.New("paper validation completion failed: status must be RUNNING")
+	}
+	completedAt = completedAt.UTC()
+	if completedAt.IsZero() {
+		return ValidationRecord{}, errors.New("paper validation completion failed: completed_at is required")
+	}
+	minimumEnd := record.StartedAt.AddDate(0, 0, record.MinimumDays)
+	if completedAt.Before(minimumEnd) {
+		return ValidationRecord{}, errors.New("paper validation completion failed: minimum validation period has not elapsed")
+	}
+	record.Status = ValidationStatusCompleted
+	record.StatusReason = "minimum_validation_period_completed"
+	record.CompletedAt = completedAt
+	if err := ValidateValidationRecord(record); err != nil {
+		return ValidationRecord{}, err
+	}
+	return record, nil
+}
+
+func CancelValidation(record ValidationRecord, cancelledAt time.Time, reason string) (ValidationRecord, error) {
+	if err := ValidateValidationRecord(record); err != nil {
+		return ValidationRecord{}, err
+	}
+	if record.Status != ValidationStatusPlanned && record.Status != ValidationStatusRunning {
+		return ValidationRecord{}, errors.New("paper validation cancellation failed: status must be PLANNED or RUNNING")
+	}
+	cancelledAt = cancelledAt.UTC()
+	if cancelledAt.IsZero() {
+		return ValidationRecord{}, errors.New("paper validation cancellation failed: cancelled_at is required")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ValidationRecord{}, errors.New("paper validation cancellation failed: reason is required")
+	}
+	if cancelledAt.Before(record.PlannedAt) || (!record.StartedAt.IsZero() && cancelledAt.Before(record.StartedAt)) {
+		return ValidationRecord{}, errors.New("paper validation cancellation failed: cancelled_at precedes validation lifecycle")
+	}
+	record.Status = ValidationStatusCancelled
+	record.StatusReason = reason
+	record.CancelledAt = cancelledAt
+	if err := ValidateValidationRecord(record); err != nil {
+		return ValidationRecord{}, err
+	}
+	return record, nil
+}
+
 func ValidateSafetyPolicy(policy SafetyPolicy) error {
 	var problems []string
 	if policy.InitialBalance.LessThanOrEqual(decimal.Zero) {
@@ -174,6 +252,7 @@ func ValidateValidationRecord(record ValidationRecord) error {
 	if record.PlannedAt.IsZero() {
 		problems = append(problems, "planned_at is required")
 	}
+	problems = append(problems, validateValidationLifecycle(record)...)
 	for index, reason := range record.Reasons {
 		if strings.TrimSpace(reason) == "" {
 			problems = append(problems, "reasons["+strconv.Itoa(index)+"] must not be empty")
@@ -183,6 +262,60 @@ func ValidateValidationRecord(record ValidationRecord) error {
 		return errors.New("paper validation record validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func validateValidationLifecycle(record ValidationRecord) []string {
+	var problems []string
+	reason := strings.TrimSpace(record.StatusReason)
+	switch record.Status {
+	case ValidationStatusPlanned:
+		if !record.StartedAt.IsZero() || !record.CompletedAt.IsZero() || !record.CancelledAt.IsZero() {
+			problems = append(problems, "PLANNED status must not have lifecycle timestamps")
+		}
+		if reason != "" {
+			problems = append(problems, "PLANNED status must not have status_reason")
+		}
+	case ValidationStatusRunning:
+		if record.StartedAt.IsZero() {
+			problems = append(problems, "RUNNING status requires started_at")
+		}
+		if !record.CompletedAt.IsZero() || !record.CancelledAt.IsZero() {
+			problems = append(problems, "RUNNING status must not have terminal timestamps")
+		}
+		if reason != "" {
+			problems = append(problems, "RUNNING status must not have status_reason")
+		}
+	case ValidationStatusCompleted:
+		if record.StartedAt.IsZero() || record.CompletedAt.IsZero() {
+			problems = append(problems, "COMPLETED status requires started_at and completed_at")
+		}
+		if !record.CancelledAt.IsZero() {
+			problems = append(problems, "COMPLETED status must not have cancelled_at")
+		}
+		if reason == "" {
+			problems = append(problems, "COMPLETED status requires status_reason")
+		}
+	case ValidationStatusCancelled:
+		if record.CancelledAt.IsZero() {
+			problems = append(problems, "CANCELLED status requires cancelled_at")
+		}
+		if !record.CompletedAt.IsZero() {
+			problems = append(problems, "CANCELLED status must not have completed_at")
+		}
+		if reason == "" {
+			problems = append(problems, "CANCELLED status requires status_reason")
+		}
+	}
+	if !record.StartedAt.IsZero() && record.StartedAt.Before(record.PlannedAt) {
+		problems = append(problems, "started_at must not be before planned_at")
+	}
+	if !record.CompletedAt.IsZero() && (record.StartedAt.IsZero() || record.CompletedAt.Before(record.StartedAt.AddDate(0, 0, record.MinimumDays))) {
+		problems = append(problems, "completed_at must satisfy minimum validation period")
+	}
+	if !record.CancelledAt.IsZero() && (record.CancelledAt.Before(record.PlannedAt) || (!record.StartedAt.IsZero() && record.CancelledAt.Before(record.StartedAt))) {
+		problems = append(problems, "cancelled_at must not precede validation lifecycle")
+	}
+	return problems
 }
 
 func ValidateValidationRecordQuery(query ValidationRecordQuery) error {
@@ -203,6 +336,18 @@ func ValidateValidationRecords(records []ValidationRecord) error {
 		if err := ValidateValidationRecord(record); err != nil {
 			return errors.New("paper_validation_record[" + decimal.NewFromInt(int64(index)).String() + "]: " + err.Error())
 		}
+	}
+	return nil
+}
+
+func ValidateValidationTransition(expectedStatus ValidationStatus, record ValidationRecord) error {
+	if err := ValidateValidationRecord(record); err != nil {
+		return err
+	}
+	valid := expectedStatus == ValidationStatusPlanned && (record.Status == ValidationStatusRunning || record.Status == ValidationStatusCancelled) ||
+		expectedStatus == ValidationStatusRunning && (record.Status == ValidationStatusCompleted || record.Status == ValidationStatusCancelled)
+	if !valid {
+		return errors.New("paper validation transition is unsupported")
 	}
 	return nil
 }

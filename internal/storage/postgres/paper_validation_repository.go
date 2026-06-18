@@ -22,6 +22,9 @@ func (r *PaperValidationRepository) RecordValidation(ctx context.Context, record
 	if err := domainpaper.ValidateValidationRecord(record); err != nil {
 		return domainpaper.ValidationRecordStats{}, err
 	}
+	if record.Status != domainpaper.ValidationStatusPlanned {
+		return domainpaper.ValidationRecordStats{}, fmt.Errorf("record paper validation requires PLANNED status")
+	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -36,9 +39,10 @@ func (r *PaperValidationRepository) RecordValidation(ctx context.Context, record
 
 	insertStatement, err := tx.PrepareContext(ctx, `
 		INSERT INTO paper_validation_records (
-			validation_id, run_id, status, mode, initial_balance, minimum_days, reasons_json, planned_at
+			validation_id, run_id, status, status_reason, mode, initial_balance, minimum_days,
+			reasons_json, planned_at, started_at, completed_at, cancelled_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 		)
 		ON CONFLICT (validation_id)
 		DO NOTHING
@@ -50,15 +54,19 @@ func (r *PaperValidationRepository) RecordValidation(ctx context.Context, record
 
 	updateStatement, err := tx.PrepareContext(ctx, `
 		UPDATE paper_validation_records
-		SET run_id = $2,
-		    status = $3,
-		    mode = $4,
-		    initial_balance = $5,
-		    minimum_days = $6,
-		    reasons_json = $7,
-		    planned_at = $8,
-		    updated_at = NOW()
+		SET updated_at = NOW()
 		WHERE validation_id = $1
+		  AND run_id = $2
+		  AND status = $3
+		  AND status_reason = $4
+		  AND mode = $5
+		  AND initial_balance = $6::numeric
+		  AND minimum_days = $7
+		  AND reasons_json = $8::jsonb
+		  AND planned_at = $9
+		  AND started_at IS NOT DISTINCT FROM $10::timestamptz
+		  AND completed_at IS NOT DISTINCT FROM $11::timestamptz
+		  AND cancelled_at IS NOT DISTINCT FROM $12::timestamptz
 	`)
 	if err != nil {
 		return domainpaper.ValidationRecordStats{}, fmt.Errorf("prepare paper validation record update: %w", err)
@@ -105,6 +113,47 @@ func (r *PaperValidationRepository) RecordValidation(ctx context.Context, record
 	return domainpaper.ValidationRecordStats{Updated: int(updated)}, nil
 }
 
+func (r *PaperValidationRepository) TransitionValidation(ctx context.Context, record domainpaper.ValidationRecord, expectedStatus domainpaper.ValidationStatus) (domainpaper.ValidationRecordStats, error) {
+	if err := domainpaper.ValidateValidationTransition(expectedStatus, record); err != nil {
+		return domainpaper.ValidationRecordStats{}, err
+	}
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE paper_validation_records
+		SET status = $2,
+		    status_reason = $3,
+		    started_at = $4,
+		    completed_at = $5,
+		    cancelled_at = $6,
+		    updated_at = NOW()
+		WHERE validation_id = $1
+		  AND status = $7
+		  AND ($2 <> 'RUNNING' OR NOT EXISTS (
+		      SELECT 1
+		      FROM paper_validation_trades
+		      WHERE paper_validation_trades.validation_id = paper_validation_records.validation_id
+		  ))
+	`,
+		record.ValidationID,
+		string(record.Status),
+		record.StatusReason,
+		nullableTime(record.StartedAt),
+		nullableTime(record.CompletedAt),
+		nullableTime(record.CancelledAt),
+		string(expectedStatus),
+	)
+	if err != nil {
+		return domainpaper.ValidationRecordStats{}, fmt.Errorf("transition paper validation %s from %s to %s: %w", record.ValidationID, expectedStatus, record.Status, err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return domainpaper.ValidationRecordStats{}, fmt.Errorf("read paper validation transition rows affected: %w", err)
+	}
+	if updated != 1 {
+		return domainpaper.ValidationRecordStats{}, fmt.Errorf("transition paper validation %s from %s affected %d rows", record.ValidationID, expectedStatus, updated)
+	}
+	return domainpaper.ValidationRecordStats{Updated: int(updated)}, nil
+}
+
 func (r *PaperValidationRepository) ListValidationRecords(ctx context.Context, query domainpaper.ValidationRecordQuery) ([]domainpaper.ValidationRecord, error) {
 	if err := domainpaper.ValidateValidationRecordQuery(query); err != nil {
 		return nil, err
@@ -116,7 +165,8 @@ func (r *PaperValidationRepository) ListValidationRecords(ctx context.Context, q
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT validation_id, run_id, status, mode, initial_balance::text, minimum_days, reasons_json::text, planned_at
+		SELECT validation_id, run_id, status, status_reason, mode, initial_balance::text, minimum_days,
+		       reasons_json::text, planned_at, started_at, completed_at, cancelled_at
 		FROM paper_validation_records
 		WHERE ($1::text = '' OR validation_id = $1)
 		  AND ($2::text = '' OR run_id = $2)
@@ -157,11 +207,15 @@ func paperValidationSQLArgs(record domainpaper.ValidationRecord) ([]any, error) 
 		record.ValidationID,
 		record.RunID,
 		string(record.Status),
+		record.StatusReason,
 		record.Mode,
 		record.InitialBalance.String(),
 		record.MinimumDays,
 		reasonsJSON,
 		record.PlannedAt.UTC(),
+		nullableTime(record.StartedAt),
+		nullableTime(record.CompletedAt),
+		nullableTime(record.CancelledAt),
 	}, nil
 }
 
@@ -170,21 +224,29 @@ func scanPaperValidationRecord(scanner interface {
 }) (domainpaper.ValidationRecord, error) {
 	var record domainpaper.ValidationRecord
 	var statusValue, initialBalanceValue, reasonsJSON string
+	var startedAt, completedAt, cancelledAt sql.NullTime
 	if err := scanner.Scan(
 		&record.ValidationID,
 		&record.RunID,
 		&statusValue,
+		&record.StatusReason,
 		&record.Mode,
 		&initialBalanceValue,
 		&record.MinimumDays,
 		&reasonsJSON,
 		&record.PlannedAt,
+		&startedAt,
+		&completedAt,
+		&cancelledAt,
 	); err != nil {
 		return domainpaper.ValidationRecord{}, fmt.Errorf("scan paper validation record: %w", err)
 	}
 
 	var err error
 	record.Status = domainpaper.ValidationStatus(statusValue)
+	record.StartedAt = startedAt.Time
+	record.CompletedAt = completedAt.Time
+	record.CancelledAt = cancelledAt.Time
 	record.InitialBalance, err = decimal.NewFromString(initialBalanceValue)
 	if err != nil {
 		return domainpaper.ValidationRecord{}, fmt.Errorf("parse paper validation record initial balance: %w", err)

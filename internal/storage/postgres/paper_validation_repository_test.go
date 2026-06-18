@@ -48,6 +48,7 @@ func TestPaperValidationRepositoryIntegrationTableDriven(t *testing.T) {
 
 	repo := postgres.NewPaperValidationRepository(db)
 	tradeRepo := postgres.NewPaperValidationTradeRepository(db)
+	performanceRepo := postgres.NewPaperDailyPerformanceRepository(db)
 	record := testPaperValidationRecord(plannedAt.Add(2 * time.Hour))
 	record.RunID = finalRun.RunID
 
@@ -68,11 +69,9 @@ func TestPaperValidationRepositoryIntegrationTableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "updates existing paper validation",
+			name: "accepts exact idempotent paper validation",
 			run: func(t *testing.T) {
-				updated := record
-				updated.MinimumDays = 45
-				stats, err := repo.RecordValidation(ctx, updated)
+				stats, err := repo.RecordValidation(ctx, record)
 				if err != nil {
 					t.Fatalf("update paper validation: %v", err)
 				}
@@ -95,7 +94,7 @@ func TestPaperValidationRepositoryIntegrationTableDriven(t *testing.T) {
 				if len(got) != 1 {
 					t.Fatalf("expected one validation record, got %d", len(got))
 				}
-				if got[0].ValidationID != record.ValidationID || got[0].MinimumDays != 45 {
+				if got[0].ValidationID != record.ValidationID || got[0].MinimumDays != record.MinimumDays {
 					t.Fatalf("unexpected validation record: %#v", got[0])
 				}
 			},
@@ -106,10 +105,10 @@ func TestPaperValidationRepositoryIntegrationTableDriven(t *testing.T) {
 				if _, err := repo.RecordValidation(ctx, record); err != nil {
 					t.Fatalf("ensure paper validation fixture: %v", err)
 				}
-				trade := testPaperValidationTrade(t, plannedAt.Add(3*time.Hour))
+				trade := testPaperValidationTrade(t, plannedAt.Add(7*time.Hour))
 				trade.ValidationID = record.ValidationID
 
-				stats, err := tradeRepo.RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade})
+				stats, err := tradeRepo.RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade}, domainpaper.ValidationStatusPlanned)
 				if err != nil {
 					t.Fatalf("record paper validation trade: %v", err)
 				}
@@ -131,6 +130,45 @@ func TestPaperValidationRepositoryIntegrationTableDriven(t *testing.T) {
 				}
 				if got[0].TradeID != trade.TradeID || !got[0].EquityAfter.Equal(trade.EquityAfter) {
 					t.Fatalf("unexpected validation trade: %#v", got[0])
+				}
+			},
+		},
+		{
+			name: "transitions lifecycle and stores daily performance",
+			run: func(t *testing.T) {
+				runningRecord := record
+				runningRecord.ValidationID += "_running"
+				if _, err := repo.RecordValidation(ctx, runningRecord); err != nil {
+					t.Fatalf("ensure paper validation fixture: %v", err)
+				}
+				running, err := domainpaper.StartValidation(runningRecord, plannedAt.Add(6*time.Hour))
+				if err != nil {
+					t.Fatalf("start validation: %v", err)
+				}
+				transitionStats, err := repo.TransitionValidation(ctx, running, domainpaper.ValidationStatusPlanned)
+				if err != nil || transitionStats.Updated != 1 {
+					t.Fatalf("transition validation: stats=%#v error=%v", transitionStats, err)
+				}
+
+				trade := testPaperValidationTrade(t, plannedAt.Add(3*time.Hour))
+				trade.ValidationID = runningRecord.ValidationID
+				if _, err := tradeRepo.RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade}, domainpaper.ValidationStatusRunning); err != nil {
+					t.Fatalf("record trade fixture: %v", err)
+				}
+				daily, err := domainpaper.BuildDailyPerformance(runningRecord.ValidationID, runningRecord.InitialBalance, []domainpaper.ValidationTrade{trade}, plannedAt.Add(9*time.Hour))
+				if err != nil {
+					t.Fatalf("build daily performance: %v", err)
+				}
+				stats, err := performanceRepo.RecordDailyPerformance(ctx, daily)
+				if err != nil {
+					t.Fatalf("record daily performance: %v", err)
+				}
+				if stats.Total() != 1 {
+					t.Fatalf("daily stats mismatch: %#v", stats)
+				}
+				listed, err := performanceRepo.ListDailyPerformance(ctx, domainpaper.DailyPerformanceQuery{ValidationID: runningRecord.ValidationID, Limit: 10})
+				if err != nil || len(listed) != 1 {
+					t.Fatalf("list daily performance: records=%#v error=%v", listed, err)
 				}
 			},
 		},
@@ -174,6 +212,12 @@ func candidateResearchResult(t *testing.T, runID string, recordedAt time.Time) d
 
 func cleanupPaperValidationRecords(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM paper_validation_daily_performance
+		WHERE validation_id IN ('paper_validation_sqlmock_0001', 'paper_validation_sqlmock_0001_running')
+	`); err != nil {
+		t.Fatalf("cleanup paper daily performance: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `
 		DELETE FROM paper_validation_trades
 		WHERE validation_id IN ('paper_validation_sqlmock_0001')

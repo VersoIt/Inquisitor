@@ -68,7 +68,7 @@ type ValidationTradeQuery struct {
 }
 
 type ValidationTradeRepository interface {
-	RecordValidationTrades(ctx context.Context, trades []ValidationTrade) (ValidationTradeStats, error)
+	RecordValidationTrades(ctx context.Context, trades []ValidationTrade, expectedStatus ValidationStatus) (ValidationTradeStats, error)
 	ListValidationTrades(ctx context.Context, query ValidationTradeQuery) ([]ValidationTrade, error)
 }
 

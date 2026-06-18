@@ -20,12 +20,21 @@ func NewPaperValidationTradeRepository(db *sql.DB) *PaperValidationTradeReposito
 	return &PaperValidationTradeRepository{db: db}
 }
 
-func (r *PaperValidationTradeRepository) RecordValidationTrades(ctx context.Context, trades []domainpaper.ValidationTrade) (domainpaper.ValidationTradeStats, error) {
+func (r *PaperValidationTradeRepository) RecordValidationTrades(ctx context.Context, trades []domainpaper.ValidationTrade, expectedStatus domainpaper.ValidationStatus) (domainpaper.ValidationTradeStats, error) {
 	if len(trades) == 0 {
 		return domainpaper.ValidationTradeStats{}, nil
 	}
 	if err := domainpaper.ValidateValidationTrades(trades); err != nil {
 		return domainpaper.ValidationTradeStats{}, err
+	}
+	if expectedStatus != domainpaper.ValidationStatusPlanned && expectedStatus != domainpaper.ValidationStatusRunning {
+		return domainpaper.ValidationTradeStats{}, fmt.Errorf("paper validation trade expected status must be PLANNED or RUNNING")
+	}
+	validationID := trades[0].ValidationID
+	for index, trade := range trades[1:] {
+		if trade.ValidationID != validationID {
+			return domainpaper.ValidationTradeStats{}, fmt.Errorf("paper validation trade[%d] validation_id must match batch", index+1)
+		}
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -38,6 +47,33 @@ func (r *PaperValidationTradeRepository) RecordValidationTrades(ctx context.Cont
 			_ = tx.Rollback()
 		}
 	}()
+
+	var actualStatus string
+	var startedAt sql.NullTime
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status, started_at
+		FROM paper_validation_records
+		WHERE validation_id = $1
+		FOR UPDATE
+	`, validationID).Scan(&actualStatus, &startedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return domainpaper.ValidationTradeStats{}, fmt.Errorf("paper validation %s not found", validationID)
+		}
+		return domainpaper.ValidationTradeStats{}, fmt.Errorf("lock paper validation %s for trade write: %w", validationID, err)
+	}
+	if domainpaper.ValidationStatus(actualStatus) != expectedStatus {
+		return domainpaper.ValidationTradeStats{}, fmt.Errorf("paper validation %s status is %s, expected %s", validationID, actualStatus, expectedStatus)
+	}
+	if expectedStatus == domainpaper.ValidationStatusRunning {
+		if !startedAt.Valid {
+			return domainpaper.ValidationTradeStats{}, fmt.Errorf("running paper validation %s has no started_at", validationID)
+		}
+		for index, trade := range trades {
+			if trade.RoundTrip.Entry.Time.Before(startedAt.Time.UTC()) {
+				return domainpaper.ValidationTradeStats{}, fmt.Errorf("paper validation trade[%d] entry_time precedes started_at", index)
+			}
+		}
+	}
 
 	insertStatement, err := tx.PrepareContext(ctx, `
 		INSERT INTO paper_validation_trades (

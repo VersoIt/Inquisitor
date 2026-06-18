@@ -58,9 +58,11 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Initial Phase 4 paper-validation trade journal domain and PostgreSQL persistence for simulated round trips, conservative fill prices, fees, net PnL, and equity tracking; still without order placement or live trading.
 - Initial Phase 4 paper simulation journal command that generates fixed-horizon round trips from persisted hypotheses, regime states, feature inputs, and candles, then writes them behind a persisted candidate-only validation record.
 - Optional strict JSON paper-simulation input for deterministic manual scenarios, with the same conservative costs, candidate guard, and journal-conflict protection as generated simulations.
+- Paper-validation lifecycle transitions with optimistic status guards, a real minimum-day boundary, explicit cancellation reasons, and a hard separation between offline simulation journals and fresh live-paper periods.
+- Deterministic UTC daily paper-performance aggregation with equity-continuity validation and idempotent PostgreSQL snapshots for PnL, fees, expectancy, win rate, profit factor, and drawdown.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major Phase 4 slice should add paper-validation lifecycle transitions and daily performance/risk aggregation, still without live trading.
+The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major slice should build the risk-engine boundary and append-only live-market paper executor on top of the lifecycle, still without exchange order placement.
 
 ## What This Is Not
 
@@ -131,8 +133,9 @@ Initial migrations are in `migrations/`:
 - `009_research_run_market_scope.sql`
 - `010_paper_validation_records.sql`
 - `011_paper_validation_trades.sql`
+- `012_paper_validation_lifecycle_performance.sql`
 
-They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation record, and paper-validation trade journal tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, and daily performance tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 
@@ -351,6 +354,25 @@ Record the manual scenario:
 go run ./cmd/paper-simulate -config configs/config.example.yaml -validation-id paper_validation_001 -file reports/paper_simulation.json -trade-id-prefix paper_trade_001 -symbol BTCUSDT -interval 1
 ```
 
+Build and persist UTC daily performance snapshots from a validation journal:
+
+```powershell
+go run ./cmd/paper-report -config configs/config.example.yaml -validation-id paper_validation_001 -action report -record-daily
+```
+
+Start a real paper-observation period only with a fresh, empty journal. Offline simulations are intentionally rejected here so historical PnL cannot satisfy the live-paper requirement:
+
+```powershell
+go run ./cmd/paper-report -config configs/config.example.yaml -validation-id paper_validation_001 -action start
+```
+
+Completion is allowed only after the configured calendar-day minimum has elapsed. `COMPLETED` means the observation period ended; it does not approve live trading. Approval still requires the future risk engine, kill-switch evidence, acceptable paper metrics, and manual review.
+
+```powershell
+go run ./cmd/paper-report -config configs/config.example.yaml -validation-id paper_validation_001 -action complete
+go run ./cmd/paper-report -config configs/config.example.yaml -validation-id paper_validation_001 -action cancel -reason "operator requested stop"
+```
+
 ## Regime Classification
 
 The regime command reads persisted candles, public trades, and orderbook snapshots, computes the latest feature set in the requested window, classifies the market regime, and upserts one `regime_states` row per symbol/interval. It does not run strategies and cannot place orders.
@@ -390,6 +412,10 @@ make paper-validate RUN_ID=research_...
 make paper-validate RUN_ID=research_... PAPER_RECORD=1 VALIDATION_ID=paper_validation_001
 make paper-simulate VALIDATION_ID=paper_validation_001 PAPER_TRADE_PREFIX=paper_trade_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-simulate VALIDATION_ID=paper_validation_001 PAPER_SIM_FILE=reports/paper_simulation.json PAPER_TRADE_PREFIX=paper_trade_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
+make paper-report VALIDATION_ID=paper_validation_001
+make paper-start VALIDATION_ID=paper_validation_001
+make paper-complete VALIDATION_ID=paper_validation_001
+make paper-cancel VALIDATION_ID=paper_validation_001 PAPER_CANCEL_REASON="operator requested stop"
 ```
 
 ## Architecture Boundary

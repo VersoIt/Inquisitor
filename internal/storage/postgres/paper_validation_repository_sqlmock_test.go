@@ -45,10 +45,9 @@ func TestPaperValidationRepositorySQLMockTableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "updates existing paper validation on conflict",
+			name: "accepts exact idempotent paper validation on conflict",
 			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
 				record := testPaperValidationRecord(plannedAt)
-				record.MinimumDays = 45
 				mock.ExpectBegin()
 				mock.ExpectPrepare("INSERT INTO paper_validation_records")
 				mock.ExpectPrepare("UPDATE paper_validation_records")
@@ -74,16 +73,20 @@ func TestPaperValidationRepositorySQLMockTableDriven(t *testing.T) {
 			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
 				record := testPaperValidationRecord(plannedAt)
 				rows := sqlmock.NewRows([]string{
-					"validation_id", "run_id", "status", "mode", "initial_balance", "minimum_days", "reasons_json", "planned_at",
+					"validation_id", "run_id", "status", "status_reason", "mode", "initial_balance", "minimum_days", "reasons_json", "planned_at", "started_at", "completed_at", "cancelled_at",
 				}).AddRow(
 					record.ValidationID,
 					record.RunID,
 					string(record.Status),
+					record.StatusReason,
 					record.Mode,
 					record.InitialBalance.String(),
 					record.MinimumDays,
 					mustStringSliceJSON(t, record.Reasons),
 					record.PlannedAt,
+					nil,
+					nil,
+					nil,
 				)
 				mock.ExpectQuery("SELECT validation_id, run_id").
 					WithArgs(record.ValidationID, record.RunID, string(domainpaper.ValidationStatusPlanned), plannedAt.Add(-time.Hour), plannedAt.Add(time.Hour), 20).
@@ -105,6 +108,45 @@ func TestPaperValidationRepositorySQLMockTableDriven(t *testing.T) {
 				}
 				if got[0].ValidationID != record.ValidationID || !got[0].InitialBalance.Equal(record.InitialBalance) {
 					t.Fatalf("record did not round-trip: %#v", got[0])
+				}
+			},
+		},
+		{
+			name: "transitions validation with optimistic status guard",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				planned := testPaperValidationRecord(plannedAt)
+				running, err := domainpaper.StartValidation(planned, plannedAt.Add(time.Hour))
+				if err != nil {
+					t.Fatalf("start validation fixture: %v", err)
+				}
+				mock.ExpectExec("UPDATE paper_validation_records").
+					WithArgs(validationTransitionSQLArgs(running, domainpaper.ValidationStatusPlanned)...).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+
+				stats, err := postgres.NewPaperValidationRepository(db).TransitionValidation(ctx, running, domainpaper.ValidationStatusPlanned)
+				if err != nil {
+					t.Fatalf("transition validation: %v", err)
+				}
+				if stats.Updated != 1 || stats.Total() != 1 {
+					t.Fatalf("transition stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "rejects stale optimistic transition",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				planned := testPaperValidationRecord(plannedAt)
+				running, err := domainpaper.StartValidation(planned, plannedAt.Add(time.Hour))
+				if err != nil {
+					t.Fatalf("start validation fixture: %v", err)
+				}
+				mock.ExpectExec("UPDATE paper_validation_records").
+					WithArgs(validationTransitionSQLArgs(running, domainpaper.ValidationStatusPlanned)...).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+
+				_, err = postgres.NewPaperValidationRepository(db).TransitionValidation(ctx, running, domainpaper.ValidationStatusPlanned)
+				if err == nil || !strings.Contains(err.Error(), "affected 0 rows") {
+					t.Fatalf("expected stale transition error, got %v", err)
 				}
 			},
 		},
@@ -150,6 +192,18 @@ func TestPaperValidationRepositoryRejectsInvalidInputsBeforeSQLTableDriven(t *te
 			},
 			wantErrSub: "status",
 		},
+		{
+			name: "record rejects lifecycle state before transaction",
+			run: func(db *sql.DB) error {
+				record, err := domainpaper.StartValidation(testPaperValidationRecord(plannedAt), plannedAt.Add(time.Hour))
+				if err != nil {
+					t.Fatalf("start validation fixture: %v", err)
+				}
+				_, err = postgres.NewPaperValidationRepository(db).RecordValidation(ctx, record)
+				return err
+			},
+			wantErrSub: "PLANNED",
+		},
 	}
 
 	for _, tt := range tests {
@@ -188,10 +242,33 @@ func paperValidationSQLArgs(t *testing.T, record domainpaper.ValidationRecord) [
 		record.ValidationID,
 		record.RunID,
 		string(record.Status),
+		record.StatusReason,
 		record.Mode,
 		record.InitialBalance.String(),
 		record.MinimumDays,
 		mustStringSliceJSON(t, record.Reasons),
 		record.PlannedAt.UTC(),
+		nullableDriverTime(record.StartedAt),
+		nullableDriverTime(record.CompletedAt),
+		nullableDriverTime(record.CancelledAt),
+	}
+}
+
+func nullableDriverTime(value time.Time) driver.Value {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC()
+}
+
+func validationTransitionSQLArgs(record domainpaper.ValidationRecord, expected domainpaper.ValidationStatus) []driver.Value {
+	return []driver.Value{
+		record.ValidationID,
+		string(record.Status),
+		record.StatusReason,
+		nullableDriverTime(record.StartedAt),
+		nullableDriverTime(record.CompletedAt),
+		nullableDriverTime(record.CancelledAt),
+		string(expected),
 	}
 }

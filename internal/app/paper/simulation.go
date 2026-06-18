@@ -248,7 +248,7 @@ func (s *Service) recordSimulation(
 
 	var stats domainpaper.ValidationTradeStats
 	if len(validationTrades) > 0 {
-		stats, err = s.trades.RecordValidationTrades(ctx, validationTrades)
+		stats, err = s.trades.RecordValidationTrades(ctx, validationTrades, domainpaper.ValidationStatusPlanned)
 		if err != nil {
 			return RecordSimulationResult{}, fmt.Errorf("record paper validation trades %q: %w", simulation.record.ValidationID, err)
 		}
@@ -321,6 +321,10 @@ func equivalentFill(left, right domainbacktest.Fill) bool {
 }
 
 func (s *Service) loadValidationRecord(ctx context.Context, validationID string) (domainpaper.ValidationRecord, error) {
+	validationID = strings.TrimSpace(validationID)
+	if validationID == "" {
+		return domainpaper.ValidationRecord{}, fmt.Errorf("validation_id is required")
+	}
 	records, err := s.records.ListValidationRecords(ctx, domainpaper.ValidationRecordQuery{
 		ValidationID: validationID,
 		Limit:        2,

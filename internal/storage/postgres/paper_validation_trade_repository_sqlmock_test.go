@@ -29,6 +29,8 @@ func TestPaperValidationTradeRepositorySQLMockTableDriven(t *testing.T) {
 			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
 				trade := testPaperValidationTrade(t, entryTime)
 				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT status").WithArgs(trade.ValidationID).
+					WillReturnRows(sqlmock.NewRows([]string{"status", "started_at"}).AddRow(string(domainpaper.ValidationStatusPlanned), nil))
 				mock.ExpectPrepare("INSERT INTO paper_validation_trades")
 				mock.ExpectPrepare("UPDATE paper_validation_trades")
 				mock.ExpectExec("INSERT INTO paper_validation_trades").
@@ -36,7 +38,7 @@ func TestPaperValidationTradeRepositorySQLMockTableDriven(t *testing.T) {
 					WillReturnResult(sqlmock.NewResult(1, 1))
 				mock.ExpectCommit()
 
-				stats, err := postgres.NewPaperValidationTradeRepository(db).RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade})
+				stats, err := postgres.NewPaperValidationTradeRepository(db).RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade}, domainpaper.ValidationStatusPlanned)
 				if err != nil {
 					t.Fatalf("record paper validation trade: %v", err)
 				}
@@ -52,6 +54,8 @@ func TestPaperValidationTradeRepositorySQLMockTableDriven(t *testing.T) {
 				trade.EquityBefore = decimal.RequireFromString("1200")
 				trade.EquityAfter = trade.EquityBefore.Add(trade.RoundTrip.NetPnL)
 				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT status").WithArgs(trade.ValidationID).
+					WillReturnRows(sqlmock.NewRows([]string{"status", "started_at"}).AddRow(string(domainpaper.ValidationStatusPlanned), nil))
 				mock.ExpectPrepare("INSERT INTO paper_validation_trades")
 				mock.ExpectPrepare("UPDATE paper_validation_trades")
 				mock.ExpectExec("INSERT INTO paper_validation_trades").
@@ -62,12 +66,42 @@ func TestPaperValidationTradeRepositorySQLMockTableDriven(t *testing.T) {
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectCommit()
 
-				stats, err := postgres.NewPaperValidationTradeRepository(db).RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade})
+				stats, err := postgres.NewPaperValidationTradeRepository(db).RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade}, domainpaper.ValidationStatusPlanned)
 				if err != nil {
 					t.Fatalf("record existing paper validation trade: %v", err)
 				}
 				if stats.Inserted != 0 || stats.Updated != 1 || stats.Total() != 1 {
 					t.Fatalf("stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "rejects stale validation status under row lock",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				trade := testPaperValidationTrade(t, entryTime)
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT status").WithArgs(trade.ValidationID).
+					WillReturnRows(sqlmock.NewRows([]string{"status", "started_at"}).AddRow(string(domainpaper.ValidationStatusRunning), entryTime))
+				mock.ExpectRollback()
+
+				_, err := postgres.NewPaperValidationTradeRepository(db).RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade}, domainpaper.ValidationStatusPlanned)
+				if err == nil || !strings.Contains(err.Error(), "expected PLANNED") {
+					t.Fatalf("expected stale status error, got %v", err)
+				}
+			},
+		},
+		{
+			name: "rejects running trade before lifecycle start",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				trade := testPaperValidationTrade(t, entryTime)
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT status").WithArgs(trade.ValidationID).
+					WillReturnRows(sqlmock.NewRows([]string{"status", "started_at"}).AddRow(string(domainpaper.ValidationStatusRunning), entryTime.Add(time.Hour)))
+				mock.ExpectRollback()
+
+				_, err := postgres.NewPaperValidationTradeRepository(db).RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade}, domainpaper.ValidationStatusRunning)
+				if err == nil || !strings.Contains(err.Error(), "precedes started_at") {
+					t.Fatalf("expected lifecycle time error, got %v", err)
 				}
 			},
 		},
@@ -140,7 +174,7 @@ func TestPaperValidationTradeRepositoryRejectsInvalidInputsBeforeSQLTableDriven(
 			run: func(db *sql.DB) error {
 				trade := testPaperValidationTrade(t, entryTime)
 				trade.TradeID = " "
-				_, err := postgres.NewPaperValidationTradeRepository(db).RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade})
+				_, err := postgres.NewPaperValidationTradeRepository(db).RecordValidationTrades(ctx, []domainpaper.ValidationTrade{trade}, domainpaper.ValidationStatusPlanned)
 				return err
 			},
 			wantErrSub: "trade_id",

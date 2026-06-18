@@ -328,6 +328,163 @@ func TestServiceValidateCandidateRejectsRecordingFailuresTableDriven(t *testing.
 	}
 }
 
+func TestServiceValidationLifecycleTransitionsTableDriven(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	run, result := testRunResult(t, plannedAt, domainresearch.OutcomeCandidate)
+
+	tests := []struct {
+		name          string
+		record        domainpaper.ValidationRecord
+		now           time.Time
+		run           func(*apppaper.Service) (apppaper.LifecycleResult, error)
+		wantStatus    domainpaper.ValidationStatus
+		wantExpected  domainpaper.ValidationStatus
+		wantErrSub    string
+		wantRepoCalls int
+	}{
+		{
+			name:   "starts planned candidate",
+			record: testValidationRecord(t, run.RunID, plannedAt, domainpaper.ValidationStatusPlanned),
+			now:    plannedAt.Add(time.Hour),
+			run: func(service *apppaper.Service) (apppaper.LifecycleResult, error) {
+				return service.StartValidation(context.Background(), " paper_validation_app_0001 ")
+			},
+			wantStatus: domainpaper.ValidationStatusRunning, wantExpected: domainpaper.ValidationStatusPlanned, wantRepoCalls: 1,
+		},
+		{
+			name:   "completes at minimum boundary",
+			record: testValidationRecord(t, run.RunID, plannedAt, domainpaper.ValidationStatusRunning),
+			now:    plannedAt.Add(time.Hour).AddDate(0, 0, 30),
+			run: func(service *apppaper.Service) (apppaper.LifecycleResult, error) {
+				return service.CompleteValidation(context.Background(), "paper_validation_app_0001")
+			},
+			wantStatus: domainpaper.ValidationStatusCompleted, wantExpected: domainpaper.ValidationStatusRunning, wantRepoCalls: 1,
+		},
+		{
+			name:   "rejects early completion",
+			record: testValidationRecord(t, run.RunID, plannedAt, domainpaper.ValidationStatusRunning),
+			now:    plannedAt.Add(time.Hour).AddDate(0, 0, 30).Add(-time.Nanosecond),
+			run: func(service *apppaper.Service) (apppaper.LifecycleResult, error) {
+				return service.CompleteValidation(context.Background(), "paper_validation_app_0001")
+			},
+			wantErrSub: "minimum validation period", wantRepoCalls: 0,
+		},
+		{
+			name:   "cancels running validation",
+			record: testValidationRecord(t, run.RunID, plannedAt, domainpaper.ValidationStatusRunning),
+			now:    plannedAt.Add(2 * time.Hour),
+			run: func(service *apppaper.Service) (apppaper.LifecycleResult, error) {
+				return service.CancelValidation(context.Background(), "paper_validation_app_0001", " operator stop ")
+			},
+			wantStatus: domainpaper.ValidationStatusCancelled, wantExpected: domainpaper.ValidationStatusRunning, wantRepoCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			records := &fakeValidationRecordRepository{
+				records: []domainpaper.ValidationRecord{tt.record},
+				stats:   domainpaper.ValidationRecordStats{Updated: 1},
+			}
+			service := apppaper.NewService(
+				&fakeRunRepository{runs: []domainresearch.Run{run}},
+				&fakeResultRepository{results: []domainresearch.Result{result}},
+				apppaper.WithValidationRecordRepository(records),
+				apppaper.WithValidationTradeRepository(&fakeValidationTradeRepository{}),
+				apppaper.WithClock(clock.FixedClock{Time: tt.now}),
+			)
+			got, err := tt.run(service)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("transition validation: %v", err)
+				}
+				if got.Record.Status != tt.wantStatus || got.Stats.Updated != 1 {
+					t.Fatalf("lifecycle result mismatch: %#v", got)
+				}
+			}
+			if records.transitionCalls != tt.wantRepoCalls {
+				t.Fatalf("transition call count mismatch: got %d want %d", records.transitionCalls, tt.wantRepoCalls)
+			}
+			if tt.wantRepoCalls > 0 && records.transitionExpected != tt.wantExpected {
+				t.Fatalf("expected status mismatch: got %s want %s", records.transitionExpected, tt.wantExpected)
+			}
+		})
+	}
+}
+
+func TestServiceBuildPerformanceReportPersistsDailySnapshots(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 18, 8, 0, 0, 0, time.UTC)
+	record := testValidationRecord(t, "research_paper_app_0001", plannedAt, domainpaper.ValidationStatusPlanned)
+	first := mustRoundTrip(t, plannedAt.Add(time.Hour), domainbacktest.DirectionLong, "100", "110")
+	second := mustRoundTrip(t, plannedAt.Add(25*time.Hour), domainbacktest.DirectionLong, "100", "95")
+	journal, err := domainpaper.NewValidationTradeSequence(domainpaper.ValidationTradeSequenceInput{
+		ValidationID: record.ValidationID, TradeIDPrefix: "paper_trade", Exchange: "bybit", Category: "linear",
+		Symbol: "BTCUSDT", Interval: "1", RoundTrips: []domainbacktest.RoundTrip{first, second},
+		InitialEquity: record.InitialBalance, RecordedAt: second.Exit.Time.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("new validation trade sequence: %v", err)
+	}
+	performance := &fakeDailyPerformanceRepository{stats: domainpaper.DailyPerformanceStats{Inserted: 2}}
+	service := apppaper.NewService(
+		nil,
+		nil,
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithValidationTradeRepository(&fakeValidationTradeRepository{records: journal}),
+		apppaper.WithDailyPerformanceRepository(performance),
+		apppaper.WithClock(clock.FixedClock{Time: plannedAt.Add(48 * time.Hour)}),
+	)
+
+	got, err := service.BuildPerformanceReport(context.Background(), apppaper.PerformanceReportRequest{
+		ValidationID: " paper_validation_app_0001 ",
+		RecordDaily:  true,
+	})
+	if err != nil {
+		t.Fatalf("build performance report: %v", err)
+	}
+	if got.Summary.Trades != 2 || len(got.Daily) != 2 || got.DailyStats.Inserted != 2 {
+		t.Fatalf("performance report mismatch: %#v", got)
+	}
+	if performance.calls != 1 || len(performance.records) != 2 {
+		t.Fatalf("daily persistence mismatch: %#v", performance)
+	}
+}
+
+func TestServiceStartValidationRejectsOfflineSimulationJournal(t *testing.T) {
+	plannedAt := time.Date(2026, 6, 18, 8, 0, 0, 0, time.UTC)
+	run, result := testRunResult(t, plannedAt, domainresearch.OutcomeCandidate)
+	record := testValidationRecord(t, run.RunID, plannedAt.Add(time.Hour), domainpaper.ValidationStatusPlanned)
+	journal, err := domainpaper.NewValidationTradeSequence(domainpaper.ValidationTradeSequenceInput{
+		ValidationID: record.ValidationID, TradeIDPrefix: "offline", Exchange: "bybit", Category: "linear",
+		Symbol: "BTCUSDT", Interval: "1",
+		RoundTrips:    []domainbacktest.RoundTrip{mustRoundTrip(t, plannedAt.Add(2*time.Hour), domainbacktest.DirectionLong, "100", "110")},
+		InitialEquity: record.InitialBalance, RecordedAt: plannedAt.Add(4 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("new offline journal: %v", err)
+	}
+	records := &fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}
+	service := apppaper.NewService(
+		&fakeRunRepository{runs: []domainresearch.Run{run}},
+		&fakeResultRepository{results: []domainresearch.Result{result}},
+		apppaper.WithValidationRecordRepository(records),
+		apppaper.WithValidationTradeRepository(&fakeValidationTradeRepository{records: journal}),
+		apppaper.WithClock(clock.FixedClock{Time: plannedAt.Add(5 * time.Hour)}),
+	)
+
+	_, err = service.StartValidation(context.Background(), record.ValidationID)
+	if err == nil || !strings.Contains(err.Error(), "empty journal") {
+		t.Fatalf("expected offline journal rejection, got %v", err)
+	}
+	if records.transitionCalls != 0 {
+		t.Fatalf("rejected start must not transition record, got %d calls", records.transitionCalls)
+	}
+}
+
 func TestServiceRecordSimulationPersistsCandidateValidationTrades(t *testing.T) {
 	plannedAt := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	recordedAt := plannedAt.Add(4 * time.Hour)
@@ -365,6 +522,9 @@ func TestServiceRecordSimulationPersistsCandidateValidationTrades(t *testing.T) 
 	}
 	if len(got.Trades) != 2 || len(trades.records) != 2 || trades.calls != 1 {
 		t.Fatalf("trade repository mismatch: result=%d stored=%d calls=%d", len(got.Trades), len(trades.records), trades.calls)
+	}
+	if trades.expectedStatus != domainpaper.ValidationStatusPlanned {
+		t.Fatalf("offline simulation must use PLANNED status guard, got %s", trades.expectedStatus)
 	}
 	if got.Trades[0].TradeID != "paper_trade_app_000001" || got.Trades[1].TradeID != "paper_trade_app_000002" {
 		t.Fatalf("trade ids mismatch: %#v", got.Trades)
@@ -758,12 +918,24 @@ func (r *fakeResultRepository) ListResults(_ context.Context, query domainresear
 }
 
 type fakeValidationRecordRepository struct {
-	record  domainpaper.ValidationRecord
-	records []domainpaper.ValidationRecord
-	queries []domainpaper.ValidationRecordQuery
-	stats   domainpaper.ValidationRecordStats
-	calls   int
-	err     error
+	record             domainpaper.ValidationRecord
+	records            []domainpaper.ValidationRecord
+	queries            []domainpaper.ValidationRecordQuery
+	stats              domainpaper.ValidationRecordStats
+	calls              int
+	transitionCalls    int
+	transitionExpected domainpaper.ValidationStatus
+	err                error
+}
+
+func (r *fakeValidationRecordRepository) TransitionValidation(_ context.Context, record domainpaper.ValidationRecord, expected domainpaper.ValidationStatus) (domainpaper.ValidationRecordStats, error) {
+	r.transitionCalls++
+	r.transitionExpected = expected
+	r.record = record
+	if r.err != nil {
+		return domainpaper.ValidationRecordStats{}, r.err
+	}
+	return r.stats, nil
 }
 
 func (r *fakeValidationRecordRepository) RecordValidation(_ context.Context, record domainpaper.ValidationRecord) (domainpaper.ValidationRecordStats, error) {
@@ -784,15 +956,42 @@ func (r *fakeValidationRecordRepository) ListValidationRecords(_ context.Context
 }
 
 type fakeValidationTradeRepository struct {
-	records []domainpaper.ValidationTrade
-	queries []domainpaper.ValidationTradeQuery
-	stats   domainpaper.ValidationTradeStats
+	records        []domainpaper.ValidationTrade
+	queries        []domainpaper.ValidationTradeQuery
+	stats          domainpaper.ValidationTradeStats
+	calls          int
+	expectedStatus domainpaper.ValidationStatus
+	err            error
+}
+
+type fakeDailyPerformanceRepository struct {
+	records []domainpaper.DailyPerformance
+	queries []domainpaper.DailyPerformanceQuery
+	stats   domainpaper.DailyPerformanceStats
 	calls   int
 	err     error
 }
 
-func (r *fakeValidationTradeRepository) RecordValidationTrades(_ context.Context, records []domainpaper.ValidationTrade) (domainpaper.ValidationTradeStats, error) {
+func (r *fakeDailyPerformanceRepository) RecordDailyPerformance(_ context.Context, records []domainpaper.DailyPerformance) (domainpaper.DailyPerformanceStats, error) {
 	r.calls++
+	if r.err != nil {
+		return domainpaper.DailyPerformanceStats{}, r.err
+	}
+	r.records = append(r.records, records...)
+	return r.stats, nil
+}
+
+func (r *fakeDailyPerformanceRepository) ListDailyPerformance(_ context.Context, query domainpaper.DailyPerformanceQuery) ([]domainpaper.DailyPerformance, error) {
+	r.queries = append(r.queries, query)
+	if r.err != nil {
+		return nil, r.err
+	}
+	return append([]domainpaper.DailyPerformance(nil), r.records...), nil
+}
+
+func (r *fakeValidationTradeRepository) RecordValidationTrades(_ context.Context, records []domainpaper.ValidationTrade, expectedStatus domainpaper.ValidationStatus) (domainpaper.ValidationTradeStats, error) {
+	r.calls++
+	r.expectedStatus = expectedStatus
 	if r.err != nil {
 		return domainpaper.ValidationTradeStats{}, r.err
 	}
@@ -918,6 +1117,17 @@ func testValidationRecord(t *testing.T, runID string, plannedAt time.Time, statu
 		MinimumDays:    30,
 		Reasons:        []string{"paper_validation_allowed"},
 		PlannedAt:      plannedAt,
+	}
+	switch status {
+	case domainpaper.ValidationStatusRunning:
+		record.StartedAt = plannedAt.Add(time.Hour)
+	case domainpaper.ValidationStatusCompleted:
+		record.StartedAt = plannedAt.Add(time.Hour)
+		record.CompletedAt = record.StartedAt.AddDate(0, 0, record.MinimumDays)
+		record.StatusReason = "minimum_validation_period_completed"
+	case domainpaper.ValidationStatusCancelled:
+		record.CancelledAt = plannedAt.Add(time.Hour)
+		record.StatusReason = "test cancellation"
 	}
 	if err := domainpaper.ValidateValidationRecord(record); err != nil {
 		t.Fatalf("validate paper record fixture: %v", err)
