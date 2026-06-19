@@ -136,6 +136,48 @@ func TestValidateTableDriven(t *testing.T) {
 			wantErrSub: "risk.max_spread_bps must be greater than or equal to zero",
 		},
 		{
+			name: "rejects risk per trade above one percent",
+			mutate: func(cfg *config.Config) {
+				cfg.Risk.RiskPerTradePct = 1.01
+			},
+			wantErrSub: "risk.risk_per_trade_pct",
+		},
+		{
+			name: "rejects inverted risk loss limits",
+			mutate: func(cfg *config.Config) {
+				cfg.Risk.MaxDailyLossPct = 4
+			},
+			wantErrSub: "daily <= weekly",
+		},
+		{
+			name: "rejects zero losing streak limit",
+			mutate: func(cfg *config.Config) {
+				cfg.Risk.MaxLosingStreak = 0
+			},
+			wantErrSub: "risk.max_losing_streak",
+		},
+		{
+			name: "rejects negative max slippage",
+			mutate: func(cfg *config.Config) {
+				cfg.Risk.MaxSlippageBps = -1
+			},
+			wantErrSub: "risk.max_slippage_bps",
+		},
+		{
+			name: "rejects correlated exposure above portfolio exposure",
+			mutate: func(cfg *config.Config) {
+				cfg.Risk.PortfolioMaxCorrelatedExposurePct = cfg.Risk.PortfolioMaxCryptoExposurePct + 1
+			},
+			wantErrSub: "risk.portfolio_max_correlated_exposure_pct",
+		},
+		{
+			name: "rejects zero max open positions",
+			mutate: func(cfg *config.Config) {
+				cfg.Trading.MaxOpenPositions = 0
+			},
+			wantErrSub: "trading.max_open_positions",
+		},
+		{
 			name: "rejects regime confidence outside percent range",
 			mutate: func(cfg *config.Config) {
 				cfg.Regime.MinConfidence = 101
@@ -231,19 +273,25 @@ func validConfig() config.Config {
 			ConservativeMultiplier: 1,
 		},
 		Trading: config.TradingConfig{
-			Enabled:   false,
-			Mode:      "paper",
-			AllowLive: false,
+			Enabled:          false,
+			Mode:             "paper",
+			AllowLive:        false,
+			MaxOpenPositions: 2,
+			MaxLeverage:      1,
 		},
 		Live: config.LiveConfig{
 			WithdrawalPermissionAllowed: false,
 		},
 		Risk: config.RiskConfig{
-			RiskPerTradePct:     0.25,
-			MaxDailyLossPct:     1,
-			MaxWeeklyLossPct:    3,
-			MaxTotalDrawdownPct: 8,
-			MinConfidence:       70,
+			RiskPerTradePct:                   0.25,
+			MaxDailyLossPct:                   1,
+			MaxWeeklyLossPct:                  3,
+			MaxTotalDrawdownPct:               8,
+			MaxLosingStreak:                   5,
+			MinConfidence:                     70,
+			MinLiquidityUSDT:                  100000,
+			PortfolioMaxCryptoExposurePct:     30,
+			PortfolioMaxCorrelatedExposurePct: 20,
 		},
 		Regime: config.RegimeConfig{
 			MinConfidence:      70,

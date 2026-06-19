@@ -4,7 +4,7 @@ Inquisitor is being built as a research-first crypto quant platform, not as a mo
 
 ## Current Scope
 
-This repository has completed the first Phase 1 market-data foundation slice, implemented the core Phase 2 realtime slice, and has started Phase 3 feature engineering:
+This repository has progressed from the Phase 1 market-data foundation through research and paper-validation lifecycle slices, and has started the Phase 7 risk boundary:
 
 - Go module and baseline package layout.
 - Docker Compose PostgreSQL service.
@@ -60,9 +60,10 @@ This repository has completed the first Phase 1 market-data foundation slice, im
 - Optional strict JSON paper-simulation input for deterministic manual scenarios, with the same conservative costs, candidate guard, and journal-conflict protection as generated simulations.
 - Paper-validation lifecycle transitions with optimistic status guards, a real minimum-day boundary, explicit cancellation reasons, and a hard separation between offline simulation journals and fresh live-paper periods.
 - Deterministic UTC daily paper-performance aggregation with equity-continuity validation and idempotent PostgreSQL snapshots for PnL, fees, expectancy, win rate, profit factor, and drawdown.
+- Initial Phase 7 fail-closed trade Risk Engine with exact decimal position sizing, all 26 specified safety checks, configuration-to-policy mapping, and application orchestration; it does not place orders.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The remaining Phase 2 hardening focus is persisted smoke verification against PostgreSQL when Docker is available. The next major slice should build the risk-engine boundary and append-only live-market paper executor on top of the lifecycle, still without exchange order placement.
+The next Phase 7 slices should add durable risk-decision auditing and persistent Kill Switch state before an append-only live-market paper executor is connected. Exchange order placement remains intentionally absent.
 
 ## What This Is Not
 

@@ -259,17 +259,44 @@ func (c Config) Validate() error {
 	if c.Trading.Enabled && c.Trading.Mode == "live" && !c.Trading.AllowLive {
 		problems = append(problems, "trading.mode=live requires trading.allow_live=true")
 	}
-	if c.Risk.RiskPerTradePct <= 0 {
-		problems = append(problems, "risk.risk_per_trade_pct must be positive")
+	if c.Trading.MaxOpenPositions <= 0 {
+		problems = append(problems, "trading.max_open_positions must be positive")
 	}
-	if c.Risk.MaxDailyLossPct <= 0 || c.Risk.MaxWeeklyLossPct <= 0 || c.Risk.MaxTotalDrawdownPct <= 0 {
-		problems = append(problems, "risk loss limits must be positive")
+	if c.Trading.MaxLeverage <= 0 {
+		problems = append(problems, "trading.max_leverage must be positive")
+	}
+	if c.Risk.RiskPerTradePct <= 0 || c.Risk.RiskPerTradePct > 1 {
+		problems = append(problems, "risk.risk_per_trade_pct must be greater than 0 and no more than 1")
+	}
+	if c.Risk.MaxDailyLossPct <= 0 || c.Risk.MaxDailyLossPct > 100 ||
+		c.Risk.MaxWeeklyLossPct <= 0 || c.Risk.MaxWeeklyLossPct > 100 ||
+		c.Risk.MaxTotalDrawdownPct <= 0 || c.Risk.MaxTotalDrawdownPct > 100 {
+		problems = append(problems, "risk loss limits must be greater than 0 and no more than 100")
+	}
+	if c.Risk.MaxDailyLossPct > c.Risk.MaxWeeklyLossPct || c.Risk.MaxWeeklyLossPct > c.Risk.MaxTotalDrawdownPct {
+		problems = append(problems, "risk loss limits must satisfy daily <= weekly <= total drawdown")
+	}
+	if c.Risk.MaxLosingStreak <= 0 {
+		problems = append(problems, "risk.max_losing_streak must be positive")
 	}
 	if c.Risk.MinConfidence < 0 || c.Risk.MinConfidence > 100 {
 		problems = append(problems, "risk.min_confidence must be between 0 and 100")
 	}
 	if c.Risk.MaxSpreadBps < 0 {
 		problems = append(problems, "risk.max_spread_bps must be greater than or equal to zero")
+	}
+	if c.Risk.MaxSlippageBps < 0 {
+		problems = append(problems, "risk.max_slippage_bps must be greater than or equal to zero")
+	}
+	if c.Risk.MinLiquidityUSDT < 0 {
+		problems = append(problems, "risk.min_liquidity_usdt must be greater than or equal to zero")
+	}
+	if c.Risk.PortfolioMaxCryptoExposurePct <= 0 || c.Risk.PortfolioMaxCryptoExposurePct > 100 {
+		problems = append(problems, "risk.portfolio_max_crypto_exposure_pct must be greater than 0 and no more than 100")
+	}
+	if c.Risk.PortfolioMaxCorrelatedExposurePct <= 0 ||
+		c.Risk.PortfolioMaxCorrelatedExposurePct > c.Risk.PortfolioMaxCryptoExposurePct {
+		problems = append(problems, "risk.portfolio_max_correlated_exposure_pct must be greater than 0 and no more than portfolio_max_crypto_exposure_pct")
 	}
 	if c.Regime.MinConfidence < 0 || c.Regime.MinConfidence > 100 {
 		problems = append(problems, "regime.min_confidence must be between 0 and 100")
