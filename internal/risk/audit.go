@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type DecisionAuditInput struct {
@@ -17,14 +19,19 @@ type DecisionAuditInput struct {
 }
 
 type DecisionAuditRecord struct {
-	DecisionID   string
-	Decision     Decision
-	Mode         Mode
-	HypothesisID string
-	StrategyName string
-	Symbol       string
-	Side         Side
-	RecordedAt   time.Time
+	DecisionID      string
+	Decision        Decision
+	Mode            Mode
+	HypothesisID    string
+	StrategyName    string
+	Symbol          string
+	Side            Side
+	EntryPrice      decimal.Decimal
+	Leverage        decimal.Decimal
+	Confidence      int
+	IntentReason    string
+	IntentCreatedAt time.Time
+	RecordedAt      time.Time
 }
 
 type DecisionAuditStats struct {
@@ -54,14 +61,19 @@ func NewDecisionAuditRecord(input DecisionAuditInput) (DecisionAuditRecord, erro
 	decision.CreatedAt = decision.CreatedAt.UTC()
 
 	record := DecisionAuditRecord{
-		DecisionID:   strings.TrimSpace(input.DecisionID),
-		Decision:     decision,
-		Mode:         input.Runtime.Mode,
-		HypothesisID: intent.HypothesisID,
-		StrategyName: intent.StrategyName,
-		Symbol:       intent.Symbol,
-		Side:         intent.Side,
-		RecordedAt:   input.RecordedAt.UTC(),
+		DecisionID:      strings.TrimSpace(input.DecisionID),
+		Decision:        decision,
+		Mode:            input.Runtime.Mode,
+		HypothesisID:    intent.HypothesisID,
+		StrategyName:    intent.StrategyName,
+		Symbol:          intent.Symbol,
+		Side:            intent.Side,
+		EntryPrice:      intent.EntryPrice,
+		Leverage:        intent.Leverage,
+		Confidence:      intent.Confidence,
+		IntentReason:    intent.Reason,
+		IntentCreatedAt: intent.CreatedAt.UTC(),
+		RecordedAt:      input.RecordedAt.UTC(),
 	}
 	if err := ValidateDecisionAuditRecord(record); err != nil {
 		return DecisionAuditRecord{}, err
@@ -108,6 +120,9 @@ func ValidateDecisionAuditRecord(record DecisionAuditRecord) error {
 	if !KnownSide(record.Side) {
 		problems = append(problems, "side must be LONG or SHORT")
 	}
+	if record.Decision.Approved {
+		problems = append(problems, validateApprovedDecisionIntentSnapshot(record)...)
+	}
 	if record.RecordedAt.IsZero() {
 		problems = append(problems, "recorded_at is required")
 	}
@@ -118,6 +133,50 @@ func ValidateDecisionAuditRecord(record DecisionAuditRecord) error {
 		return errors.New("risk decision audit validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func validateApprovedDecisionIntentSnapshot(record DecisionAuditRecord) []string {
+	var problems []string
+	if record.EntryPrice.LessThanOrEqual(decimal.Zero) {
+		problems = append(problems, "approved decision requires positive entry_price")
+	}
+	if record.Leverage.LessThanOrEqual(decimal.Zero) {
+		problems = append(problems, "approved decision requires positive leverage")
+	}
+	if record.Confidence < 0 || record.Confidence > 100 {
+		problems = append(problems, "approved decision requires confidence between zero and 100")
+	}
+	if strings.TrimSpace(record.IntentReason) == "" {
+		problems = append(problems, "approved decision requires intent_reason")
+	}
+	if record.IntentReason != strings.TrimSpace(record.IntentReason) {
+		problems = append(problems, "intent_reason must be trimmed")
+	}
+	if record.IntentCreatedAt.IsZero() {
+		problems = append(problems, "approved decision requires intent_created_at")
+	}
+	if !record.IntentCreatedAt.IsZero() && !record.Decision.CreatedAt.IsZero() && record.IntentCreatedAt.After(record.Decision.CreatedAt) {
+		problems = append(problems, "intent_created_at must not be after decision created_at")
+	}
+	if record.EntryPrice.GreaterThan(decimal.Zero) && record.Decision.StopLoss.GreaterThan(decimal.Zero) && KnownSide(record.Side) {
+		switch record.Side {
+		case SideLong:
+			if !record.Decision.StopLoss.LessThan(record.EntryPrice) {
+				problems = append(problems, "approved LONG decision requires stop_loss below entry_price")
+			}
+			if record.Decision.TakeProfit.IsPositive() && !record.Decision.TakeProfit.GreaterThan(record.EntryPrice) {
+				problems = append(problems, "approved LONG decision requires take_profit above entry_price")
+			}
+		case SideShort:
+			if !record.Decision.StopLoss.GreaterThan(record.EntryPrice) {
+				problems = append(problems, "approved SHORT decision requires stop_loss above entry_price")
+			}
+			if record.Decision.TakeProfit.IsPositive() && !record.Decision.TakeProfit.LessThan(record.EntryPrice) {
+				problems = append(problems, "approved SHORT decision requires take_profit below entry_price")
+			}
+		}
+	}
+	return problems
 }
 
 func ValidateDecisionAuditRecords(records []DecisionAuditRecord) error {

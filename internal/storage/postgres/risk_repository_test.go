@@ -92,7 +92,8 @@ func TestRiskRepositoriesIntegrationTableDriven(t *testing.T) {
 				if err != nil {
 					t.Fatalf("list risk decisions: %v", err)
 				}
-				if len(got) != 1 || got[0].DecisionID != decision.DecisionID || !got[0].Decision.MaxLoss.Equal(decision.Decision.MaxLoss) {
+				if len(got) != 1 || got[0].DecisionID != decision.DecisionID || !got[0].Decision.MaxLoss.Equal(decision.Decision.MaxLoss) ||
+					!got[0].EntryPrice.Equal(decision.EntryPrice) || got[0].Confidence != decision.Confidence {
 					t.Fatalf("unexpected risk decisions: %#v", got)
 				}
 			},

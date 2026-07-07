@@ -87,6 +87,7 @@ func TestRiskDecisionRepositorySQLMockTableDriven(t *testing.T) {
 				checksJSON := mustRiskChecksJSON(t, record.Decision.Checks)
 				rows := sqlmock.NewRows([]string{
 					"decision_id", "intent_id", "mode", "hypothesis_id", "strategy_name", "symbol", "side",
+					"entry_price", "leverage", "confidence", "intent_reason", "intent_created_at",
 					"approved", "final_quantity", "max_loss", "stop_loss", "take_profit", "reason",
 					"checks_json", "created_at", "recorded_at",
 				}).AddRow(
@@ -97,6 +98,11 @@ func TestRiskDecisionRepositorySQLMockTableDriven(t *testing.T) {
 					record.StrategyName,
 					record.Symbol,
 					string(record.Side),
+					record.EntryPrice.String(),
+					record.Leverage.String(),
+					record.Confidence,
+					record.IntentReason,
+					record.IntentCreatedAt,
 					record.Decision.Approved,
 					record.Decision.FinalQuantity.String(),
 					record.Decision.MaxLoss.String(),
@@ -124,7 +130,8 @@ func TestRiskDecisionRepositorySQLMockTableDriven(t *testing.T) {
 				if err != nil {
 					t.Fatalf("list risk decisions: %v", err)
 				}
-				if len(got) != 1 || got[0].DecisionID != record.DecisionID || !got[0].Decision.MaxLoss.Equal(record.Decision.MaxLoss) {
+				if len(got) != 1 || got[0].DecisionID != record.DecisionID || !got[0].Decision.MaxLoss.Equal(record.Decision.MaxLoss) ||
+					!got[0].EntryPrice.Equal(record.EntryPrice) || got[0].Confidence != record.Confidence {
 					t.Fatalf("unexpected risk decisions: %#v", got)
 				}
 			},
@@ -338,12 +345,17 @@ func testRiskDecisionAuditRecord(now time.Time) domainrisk.DecisionAuditRecord {
 			},
 			CreatedAt: now,
 		},
-		Mode:         domainrisk.ModePaper,
-		HypothesisID: "hypothesis_sqlmock_0001",
-		StrategyName: "trend-momentum",
-		Symbol:       "BTCUSDT",
-		Side:         domainrisk.SideLong,
-		RecordedAt:   now.Add(time.Second),
+		Mode:            domainrisk.ModePaper,
+		HypothesisID:    "hypothesis_sqlmock_0001",
+		StrategyName:    "trend-momentum",
+		Symbol:          "BTCUSDT",
+		Side:            domainrisk.SideLong,
+		EntryPrice:      decimal.RequireFromString("100000"),
+		Leverage:        decimal.RequireFromString("1"),
+		Confidence:      80,
+		IntentReason:    "signal confirmed",
+		IntentCreatedAt: now.Add(-time.Minute),
+		RecordedAt:      now.Add(time.Second),
 	}
 }
 
@@ -357,6 +369,11 @@ func riskDecisionSQLDriverArgs(t *testing.T, record domainrisk.DecisionAuditReco
 		record.StrategyName,
 		record.Symbol,
 		string(record.Side),
+		record.EntryPrice.String(),
+		record.Leverage.String(),
+		record.Confidence,
+		record.IntentReason,
+		nullableDriverTime(record.IntentCreatedAt),
 		record.Decision.Approved,
 		record.Decision.FinalQuantity.String(),
 		record.Decision.MaxLoss.String(),

@@ -67,6 +67,10 @@ func TestServiceEvaluateLoadsPersistentKillSwitchAndAuditsDecision(t *testing.T)
 	if auditRepo.record.DecisionID != "decision_0001" || auditRepo.record.Mode != domainrisk.ModePaper || auditRepo.record.Symbol != "BTCUSDT" {
 		t.Fatalf("audit record mismatch: %#v", auditRepo.record)
 	}
+	if !auditRepo.record.EntryPrice.Equal(decimal.RequireFromString("100000")) || !auditRepo.record.Leverage.Equal(decimal.RequireFromString("1")) ||
+		auditRepo.record.Confidence != 80 || auditRepo.record.IntentReason != "signal confirmed" {
+		t.Fatalf("audit intent snapshot mismatch: %#v", auditRepo.record)
+	}
 }
 
 func TestServiceEvaluateRejectsDependenciesAndFailuresTableDriven(t *testing.T) {
@@ -275,6 +279,10 @@ func auditIntent(now time.Time) domainrisk.TradeIntent {
 		StrategyName: "trend-momentum",
 		Symbol:       "BTCUSDT",
 		Side:         domainrisk.SideLong,
+		Confidence:   80,
+		EntryPrice:   decimal.RequireFromString("100000"),
+		Leverage:     decimal.RequireFromString("1"),
+		Reason:       "signal confirmed",
 		CreatedAt:    now.Add(-time.Minute),
 	}
 }

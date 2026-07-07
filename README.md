@@ -61,7 +61,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Paper-validation lifecycle transitions with optimistic status guards, a real minimum-day boundary, explicit cancellation reasons, and a hard separation between offline simulation journals and fresh live-paper periods.
 - Deterministic UTC daily paper-performance aggregation with equity-continuity validation and idempotent PostgreSQL snapshots for PnL, fees, expectancy, win rate, profit factor, and drawdown.
 - Initial Phase 7 fail-closed trade Risk Engine with exact decimal position sizing, all 26 specified safety checks, configuration-to-policy mapping, and application orchestration; it does not place orders.
-- Durable Phase 7 risk-decision audit records and persistent Kill Switch events/state, with fail-closed application orchestration and append-only PostgreSQL storage; it still does not place orders.
+- Durable Phase 7 risk-decision audit records with executable intent snapshots and persistent Kill Switch events/state, with fail-closed application orchestration and append-only PostgreSQL storage; it still does not place orders.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
 The next Phase 7 slices should connect the Risk Engine and persisted Kill Switch into an append-only live-market paper executor. Exchange order placement remains intentionally absent.
@@ -137,8 +137,9 @@ Initial migrations are in `migrations/`:
 - `011_paper_validation_trades.sql`
 - `012_paper_validation_lifecycle_performance.sql`
 - `013_risk_controls.sql`
+- `014_risk_decision_intent_snapshot.sql`
 
-They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, and Kill Switch tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, and Kill Switch tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 

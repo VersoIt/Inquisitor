@@ -30,12 +30,14 @@ func (r *RiskDecisionRepository) RecordDecision(ctx context.Context, record doma
 	result, err := r.db.ExecContext(ctx, `
 		INSERT INTO risk_decisions (
 			decision_id, intent_id, mode, hypothesis_id, strategy_name, symbol, side,
+			entry_price, leverage, confidence, intent_reason, intent_created_at,
 			approved, final_quantity, max_loss, stop_loss, take_profit, reason,
 			checks_json, created_at, recorded_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12, $13,
-			$14, $15, $16
+			$8, $9, $10, $11, $12,
+			$13, $14, $15, $16, $17, $18,
+			$19, $20, $21
 		)
 		ON CONFLICT (decision_id) DO NOTHING
 	`, args...)
@@ -69,6 +71,7 @@ func (r *RiskDecisionRepository) ListDecisions(ctx context.Context, query domain
 	}
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT decision_id, intent_id, mode, hypothesis_id, strategy_name, symbol, side,
+		       entry_price::text, leverage::text, confidence, intent_reason, intent_created_at,
 		       approved, final_quantity::text, max_loss::text, stop_loss::text, take_profit::text,
 		       reason, checks_json::text, created_at, recorded_at
 		FROM risk_decisions
@@ -115,15 +118,20 @@ func (r *RiskDecisionRepository) assertExistingDecisionMatches(ctx context.Conte
 		  AND strategy_name = $5
 		  AND symbol = $6
 		  AND side = $7
-		  AND approved = $8
-		  AND final_quantity = $9::numeric
-		  AND max_loss = $10::numeric
-		  AND stop_loss = $11::numeric
-		  AND take_profit = $12::numeric
-		  AND reason = $13
-		  AND checks_json = $14::jsonb
-		  AND created_at = $15
-		  AND recorded_at = $16
+		  AND entry_price = $8::numeric
+		  AND leverage = $9::numeric
+		  AND confidence = $10
+		  AND intent_reason = $11
+		  AND intent_created_at IS NOT DISTINCT FROM $12::timestamptz
+		  AND approved = $13
+		  AND final_quantity = $14::numeric
+		  AND max_loss = $15::numeric
+		  AND stop_loss = $16::numeric
+		  AND take_profit = $17::numeric
+		  AND reason = $18
+		  AND checks_json = $19::jsonb
+		  AND created_at = $20
+		  AND recorded_at = $21
 	`, args...).Scan(&exists); err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("risk decision %s already exists with different payload", args[0])
@@ -146,6 +154,11 @@ func riskDecisionSQLArgs(record domainrisk.DecisionAuditRecord) ([]any, error) {
 		record.StrategyName,
 		record.Symbol,
 		string(record.Side),
+		record.EntryPrice.String(),
+		record.Leverage.String(),
+		record.Confidence,
+		record.IntentReason,
+		nullableTime(record.IntentCreatedAt),
 		record.Decision.Approved,
 		record.Decision.FinalQuantity.String(),
 		record.Decision.MaxLoss.String(),
@@ -161,8 +174,10 @@ func riskDecisionSQLArgs(record domainrisk.DecisionAuditRecord) ([]any, error) {
 func scanRiskDecision(scanner interface{ Scan(dest ...any) error }) (domainrisk.DecisionAuditRecord, error) {
 	var record domainrisk.DecisionAuditRecord
 	var mode, side string
+	var entryPrice, leverage string
 	var finalQuantity, maxLoss, stopLoss, takeProfit string
 	var checksRaw string
+	var intentCreatedAt sql.NullTime
 	if err := scanner.Scan(
 		&record.DecisionID,
 		&record.Decision.IntentID,
@@ -171,6 +186,11 @@ func scanRiskDecision(scanner interface{ Scan(dest ...any) error }) (domainrisk.
 		&record.StrategyName,
 		&record.Symbol,
 		&side,
+		&entryPrice,
+		&leverage,
+		&record.Confidence,
+		&record.IntentReason,
+		&intentCreatedAt,
 		&record.Decision.Approved,
 		&finalQuantity,
 		&maxLoss,
@@ -190,6 +210,8 @@ func scanRiskDecision(scanner interface{ Scan(dest ...any) error }) (domainrisk.
 		raw    string
 		target *decimal.Decimal
 	}{
+		{"entry_price", entryPrice, &record.EntryPrice},
+		{"leverage", leverage, &record.Leverage},
 		{"final_quantity", finalQuantity, &record.Decision.FinalQuantity},
 		{"max_loss", maxLoss, &record.Decision.MaxLoss},
 		{"stop_loss", stopLoss, &record.Decision.StopLoss},
@@ -204,6 +226,9 @@ func scanRiskDecision(scanner interface{ Scan(dest ...any) error }) (domainrisk.
 	}
 	if err := json.Unmarshal([]byte(checksRaw), &record.Decision.Checks); err != nil {
 		return domainrisk.DecisionAuditRecord{}, fmt.Errorf("parse risk decision checks: %w", err)
+	}
+	if intentCreatedAt.Valid {
+		record.IntentCreatedAt = intentCreatedAt.Time.UTC()
 	}
 	record.Decision.CreatedAt = record.Decision.CreatedAt.UTC()
 	record.RecordedAt = record.RecordedAt.UTC()
