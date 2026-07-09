@@ -93,6 +93,20 @@ func TestHypothesisRepositoryIntegrationTableDriven(t *testing.T) {
 func cleanupHypotheses(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
 	if _, err := db.ExecContext(ctx, `
+		DELETE FROM paper_order_tickets
+		WHERE validation_id IN (
+			SELECT validation_id
+			FROM paper_validation_records
+			WHERE run_id IN (
+				SELECT run_id
+				FROM research_runs
+				WHERE hypothesis_name IN ('sqlmock_hypothesis')
+			)
+		)
+	`); err != nil {
+		t.Fatalf("cleanup hypothesis paper order tickets: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
 		DELETE FROM paper_validation_trades
 		WHERE validation_id IN (
 			SELECT validation_id

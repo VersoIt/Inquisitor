@@ -335,7 +335,7 @@ func testRiskDecisionAuditRecord(now time.Time) domainrisk.DecisionAuditRecord {
 			IntentID:      "risk_intent_sqlmock_0001",
 			Approved:      true,
 			FinalQuantity: decimal.RequireFromString("0.25"),
-			MaxLoss:       decimal.RequireFromString("12.5"),
+			MaxLoss:       decimal.RequireFromString("500"),
 			StopLoss:      decimal.RequireFromString("98000"),
 			TakeProfit:    decimal.RequireFromString("102000"),
 			Reason:        "risk_checks_passed",

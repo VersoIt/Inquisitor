@@ -159,6 +159,13 @@ func validateApprovedDecisionIntentSnapshot(record DecisionAuditRecord) []string
 		problems = append(problems, "intent_created_at must not be after decision created_at")
 	}
 	if record.EntryPrice.GreaterThan(decimal.Zero) && record.Decision.StopLoss.GreaterThan(decimal.Zero) && KnownSide(record.Side) {
+		stopDistance := record.EntryPrice.Sub(record.Decision.StopLoss).Abs()
+		if record.Decision.FinalQuantity.GreaterThan(decimal.Zero) && stopDistance.GreaterThan(decimal.Zero) {
+			expectedMaxLoss := record.Decision.FinalQuantity.Mul(stopDistance)
+			if !record.Decision.MaxLoss.Equal(expectedMaxLoss) {
+				problems = append(problems, "approved decision max_loss must equal final_quantity times stop distance")
+			}
+		}
 		switch record.Side {
 		case SideLong:
 			if !record.Decision.StopLoss.LessThan(record.EntryPrice) {

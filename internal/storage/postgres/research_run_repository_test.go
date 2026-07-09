@@ -144,6 +144,16 @@ func TestResearchRunRepositoryIntegrationTableDriven(t *testing.T) {
 func cleanupResearchRuns(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
 	if _, err := db.ExecContext(ctx, `
+		DELETE FROM paper_order_tickets
+		WHERE validation_id IN (
+			SELECT validation_id
+			FROM paper_validation_records
+			WHERE run_id IN ('research_sqlmock_0001')
+		)
+	`); err != nil {
+		t.Fatalf("cleanup research paper order tickets: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
 		DELETE FROM paper_validation_trades
 		WHERE validation_id IN (
 			SELECT validation_id
