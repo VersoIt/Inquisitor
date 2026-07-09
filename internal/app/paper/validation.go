@@ -26,6 +26,7 @@ type Service struct {
 	records     domainpaper.ValidationRecordRepository
 	trades      domainpaper.ValidationTradeRepository
 	tickets     domainpaper.OrderTicketRepository
+	fills       domainpaper.OrderFillRepository
 	performance domainpaper.DailyPerformanceRepository
 	generator   SimulationTradeGenerator
 	clock       clock.Clock
@@ -97,6 +98,12 @@ func WithValidationTradeRepository(trades domainpaper.ValidationTradeRepository)
 func WithOrderTicketRepository(tickets domainpaper.OrderTicketRepository) Option {
 	return func(service *Service) {
 		service.tickets = tickets
+	}
+}
+
+func WithOrderFillRepository(fills domainpaper.OrderFillRepository) Option {
+	return func(service *Service) {
+		service.fills = fills
 	}
 }
 

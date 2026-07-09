@@ -7,21 +7,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	domainhypothesis "github.com/VersoIt/Inquisitor/internal/hypothesis"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
 	domainresearch "github.com/VersoIt/Inquisitor/internal/research"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
-func TestPaperOrderTicketRepositoryIntegrationTableDriven(t *testing.T) {
+func TestPaperOrderFillRepositoryIntegrationTableDriven(t *testing.T) {
 	ctx := context.Background()
 	db := openTestPostgres(t)
 	applyMigrations(t, ctx, db)
+	cleanupPaperOrderFills(t, ctx, db)
 	cleanupPaperValidationRecords(t, ctx, db)
 	cleanupRiskControls(t, ctx, db)
 	cleanupResearchRuns(t, ctx, db)
 	cleanupHypotheses(t, ctx, db)
 	t.Cleanup(func() {
+		cleanupPaperOrderFills(t, context.Background(), db)
 		cleanupPaperValidationRecords(t, context.Background(), db)
 		cleanupRiskControls(t, context.Background(), db)
 		cleanupResearchRuns(t, context.Background(), db)
@@ -47,19 +51,26 @@ func TestPaperOrderTicketRepositoryIntegrationTableDriven(t *testing.T) {
 	if _, err := researchRepo.RecordResult(ctx, finalRun, result); err != nil {
 		t.Fatalf("record research result fixture: %v", err)
 	}
+	validationRepo := postgres.NewPaperValidationRepository(db)
 	validation := testPaperValidationRecord(plannedAt.Add(2 * time.Hour))
 	validation.RunID = finalRun.RunID
-	if _, err := postgres.NewPaperValidationRepository(db).RecordValidation(ctx, validation); err != nil {
+	if _, err := validationRepo.RecordValidation(ctx, validation); err != nil {
 		t.Fatalf("insert paper validation fixture: %v", err)
 	}
-	decision := testRiskDecisionAuditRecord(plannedAt.Add(3 * time.Hour))
+	runningValidation, err := domainpaper.StartValidation(validation, plannedAt.Add(3*time.Hour))
+	if err != nil {
+		t.Fatalf("start paper validation fixture: %v", err)
+	}
+	if _, err := validationRepo.TransitionValidation(ctx, runningValidation, domainpaper.ValidationStatusPlanned); err != nil {
+		t.Fatalf("transition paper validation fixture: %v", err)
+	}
+	decision := testRiskDecisionAuditRecord(plannedAt.Add(4 * time.Hour))
 	if _, err := postgres.NewRiskDecisionRepository(db).RecordDecision(ctx, decision); err != nil {
 		t.Fatalf("insert risk decision fixture: %v", err)
 	}
 
-	repo := postgres.NewPaperOrderTicketRepository(db)
-	ticket := testPaperOrderTicket(plannedAt.Add(4 * time.Hour))
-	ticket.ValidationID = validation.ValidationID
+	ticket := testPaperOrderTicket(plannedAt.Add(5 * time.Hour))
+	ticket.ValidationID = runningValidation.ValidationID
 	ticket.DecisionID = decision.DecisionID
 	ticket.IntentID = decision.Decision.IntentID
 	ticket.Quantity = decision.Decision.FinalQuantity
@@ -70,17 +81,30 @@ func TestPaperOrderTicketRepositoryIntegrationTableDriven(t *testing.T) {
 	ticket.MaxLoss = decision.Decision.MaxLoss
 	ticket.Confidence = decision.Confidence
 	ticket.Reason = decision.Decision.Reason
+	if _, err := postgres.NewPaperOrderTicketRepository(db).RecordOrderTicket(ctx, ticket); err != nil {
+		t.Fatalf("insert paper order ticket fixture: %v", err)
+	}
+
+	repo := postgres.NewPaperOrderFillRepository(db)
+	fill := testPaperOrderFill(plannedAt.Add(6 * time.Hour))
+	fill.TicketID = ticket.TicketID
+	fill.ValidationID = ticket.ValidationID
+	fill.DecisionID = ticket.DecisionID
+	fill.IntentID = ticket.IntentID
+	fill.Quantity = ticket.Quantity
+	fill.Notional = fill.ExecutedPrice.Mul(fill.Quantity)
+	fill.Fee = fill.Notional.Mul(fill.FeeBPS).Div(decimal.RequireFromString("10000"))
 
 	tests := []struct {
 		name string
 		run  func(t *testing.T)
 	}{
 		{
-			name: "records new paper order ticket",
+			name: "records new paper order fill",
 			run: func(t *testing.T) {
-				stats, err := repo.RecordOrderTicket(ctx, ticket)
+				stats, err := repo.RecordOrderFill(ctx, fill)
 				if err != nil {
-					t.Fatalf("record paper order ticket: %v", err)
+					t.Fatalf("record paper order fill: %v", err)
 				}
 				if stats.Inserted != 1 || stats.Skipped != 0 {
 					t.Fatalf("stats mismatch: %#v", stats)
@@ -88,11 +112,11 @@ func TestPaperOrderTicketRepositoryIntegrationTableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "accepts exact idempotent paper order ticket",
+			name: "accepts exact idempotent paper order fill",
 			run: func(t *testing.T) {
-				stats, err := repo.RecordOrderTicket(ctx, ticket)
+				stats, err := repo.RecordOrderFill(ctx, fill)
 				if err != nil {
-					t.Fatalf("record duplicate paper order ticket: %v", err)
+					t.Fatalf("record duplicate paper order fill: %v", err)
 				}
 				if stats.Inserted != 0 || stats.Skipped != 1 {
 					t.Fatalf("stats mismatch: %#v", stats)
@@ -100,31 +124,43 @@ func TestPaperOrderTicketRepositoryIntegrationTableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "rejects conflicting paper order ticket id",
+			name: "rejects conflicting paper order fill id",
 			run: func(t *testing.T) {
-				conflict := ticket
-				conflict.CreatedAt = conflict.CreatedAt.Add(time.Second)
-				_, err := repo.RecordOrderTicket(ctx, conflict)
+				conflict := fill
+				conflict.RecordedAt = conflict.RecordedAt.Add(time.Second)
+				_, err := repo.RecordOrderFill(ctx, conflict)
 				if err == nil || !strings.Contains(err.Error(), "different payload") {
 					t.Fatalf("expected conflict error, got %v", err)
 				}
 			},
 		},
 		{
-			name: "lists stored paper order ticket",
+			name: "rejects second fill for same ticket",
 			run: func(t *testing.T) {
-				got, err := repo.ListOrderTickets(ctx, domainpaper.OrderTicketQuery{
-					ValidationID: ticket.ValidationID,
-					DecisionID:   ticket.DecisionID,
-					Symbol:       ticket.Symbol,
-					Interval:     ticket.Interval,
+				conflict := fill
+				conflict.FillID = "paper_fill_sqlmock_0002"
+				conflict.RecordedAt = conflict.RecordedAt.Add(time.Second)
+				_, err := repo.RecordOrderFill(ctx, conflict)
+				if err == nil || !strings.Contains(err.Error(), "insert paper order fill") {
+					t.Fatalf("expected unique ticket fill error, got %v", err)
+				}
+			},
+		},
+		{
+			name: "lists stored paper order fill",
+			run: func(t *testing.T) {
+				got, err := repo.ListOrderFills(ctx, domainpaper.OrderFillQuery{
+					ValidationID: fill.ValidationID,
+					DecisionID:   fill.DecisionID,
+					Symbol:       fill.Symbol,
+					Interval:     fill.Interval,
 					Limit:        10,
 				})
 				if err != nil {
-					t.Fatalf("list paper order tickets: %v", err)
+					t.Fatalf("list paper order fills: %v", err)
 				}
-				if len(got) != 1 || got[0].TicketID != ticket.TicketID || !got[0].MaxLoss.Equal(ticket.MaxLoss) {
-					t.Fatalf("unexpected order tickets: %#v", got)
+				if len(got) != 1 || got[0].FillID != fill.FillID || !got[0].Fee.Equal(fill.Fee) {
+					t.Fatalf("unexpected order fills: %#v", got)
 				}
 			},
 		},
@@ -135,15 +171,15 @@ func TestPaperOrderTicketRepositoryIntegrationTableDriven(t *testing.T) {
 	}
 }
 
-func cleanupPaperOrderTickets(t *testing.T, ctx context.Context, db *sql.DB) {
+func cleanupPaperOrderFills(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
-	cleanupPaperOrderFills(t, ctx, db)
 	if _, err := db.ExecContext(ctx, `
-		DELETE FROM paper_order_tickets
-		WHERE ticket_id IN ('paper_ticket_sqlmock_0001')
+		DELETE FROM paper_order_fills
+		WHERE fill_id IN ('paper_fill_sqlmock_0001', 'paper_fill_sqlmock_0002')
+		   OR ticket_id IN ('paper_ticket_sqlmock_0001')
 		   OR decision_id IN ('risk_decision_sqlmock_0001')
 		   OR validation_id IN ('paper_validation_sqlmock_0001', 'paper_validation_sqlmock_0001_running')
 	`); err != nil {
-		t.Fatalf("cleanup paper order tickets: %v", err)
+		t.Fatalf("cleanup paper order fills: %v", err)
 	}
 }
