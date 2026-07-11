@@ -213,6 +213,14 @@ func candidateResearchResult(t *testing.T, runID string, recordedAt time.Time) d
 func cleanupPaperValidationRecords(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
 	if _, err := db.ExecContext(ctx, `
+		DELETE FROM paper_open_positions
+		WHERE validation_id IN ('paper_validation_sqlmock_0001', 'paper_validation_sqlmock_0001_running')
+		   OR fill_id IN ('paper_fill_sqlmock_0001', 'paper_fill_sqlmock_0002')
+		   OR ticket_id IN ('paper_ticket_sqlmock_0001')
+	`); err != nil {
+		t.Fatalf("cleanup paper open positions: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
 		DELETE FROM paper_order_fills
 		WHERE validation_id IN ('paper_validation_sqlmock_0001', 'paper_validation_sqlmock_0001_running')
 		   OR ticket_id IN ('paper_ticket_sqlmock_0001')

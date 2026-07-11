@@ -15,16 +15,18 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
-func TestPaperOrderFillRepositoryIntegrationTableDriven(t *testing.T) {
+func TestPaperOpenPositionRepositoryIntegrationTableDriven(t *testing.T) {
 	ctx := context.Background()
 	db := openTestPostgres(t)
 	applyMigrations(t, ctx, db)
+	cleanupPaperOpenPositions(t, ctx, db)
 	cleanupPaperOrderFills(t, ctx, db)
 	cleanupPaperValidationRecords(t, ctx, db)
 	cleanupRiskControls(t, ctx, db)
 	cleanupResearchRuns(t, ctx, db)
 	cleanupHypotheses(t, ctx, db)
 	t.Cleanup(func() {
+		cleanupPaperOpenPositions(t, context.Background(), db)
 		cleanupPaperOrderFills(t, context.Background(), db)
 		cleanupPaperValidationRecords(t, context.Background(), db)
 		cleanupRiskControls(t, context.Background(), db)
@@ -85,7 +87,6 @@ func TestPaperOrderFillRepositoryIntegrationTableDriven(t *testing.T) {
 		t.Fatalf("insert paper order ticket fixture: %v", err)
 	}
 
-	repo := postgres.NewPaperOrderFillRepository(db)
 	fill := testPaperOrderFill(plannedAt.Add(6 * time.Hour))
 	fill.TicketID = ticket.TicketID
 	fill.ValidationID = ticket.ValidationID
@@ -94,17 +95,38 @@ func TestPaperOrderFillRepositoryIntegrationTableDriven(t *testing.T) {
 	fill.Quantity = ticket.Quantity
 	fill.Notional = fill.ExecutedPrice.Mul(fill.Quantity)
 	fill.Fee = fill.Notional.Mul(fill.FeeBPS).Div(decimal.RequireFromString("10000"))
+	if _, err := postgres.NewPaperOrderFillRepository(db).RecordOrderFill(ctx, fill); err != nil {
+		t.Fatalf("insert paper order fill fixture: %v", err)
+	}
+
+	repo := postgres.NewPaperOpenPositionRepository(db)
+	position := testPaperOpenPosition(plannedAt.Add(7 * time.Hour))
+	position.FillID = fill.FillID
+	position.TicketID = ticket.TicketID
+	position.ValidationID = ticket.ValidationID
+	position.DecisionID = ticket.DecisionID
+	position.IntentID = ticket.IntentID
+	position.Quantity = fill.Quantity
+	position.EntryPrice = fill.ExecutedPrice
+	position.EntryNotional = fill.Notional
+	position.EntryFee = fill.Fee
+	position.StopLoss = ticket.StopLoss
+	position.TakeProfit = ticket.TakeProfit
+	position.Leverage = ticket.Leverage
+	position.PlannedMaxLoss = ticket.MaxLoss
+	position.OpenRisk = fill.ExecutedPrice.Sub(ticket.StopLoss).Abs().Mul(fill.Quantity)
+	position.OpenedAt = fill.FilledAt
 
 	tests := []struct {
 		name string
 		run  func(t *testing.T)
 	}{
 		{
-			name: "records new paper order fill",
+			name: "records new paper open position",
 			run: func(t *testing.T) {
-				stats, err := repo.RecordOrderFill(ctx, fill)
+				stats, err := repo.RecordOpenPosition(ctx, position)
 				if err != nil {
-					t.Fatalf("record paper order fill: %v", err)
+					t.Fatalf("record paper open position: %v", err)
 				}
 				if stats.Inserted != 1 || stats.Skipped != 0 {
 					t.Fatalf("stats mismatch: %#v", stats)
@@ -112,11 +134,11 @@ func TestPaperOrderFillRepositoryIntegrationTableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "accepts exact idempotent paper order fill",
+			name: "accepts exact idempotent paper open position",
 			run: func(t *testing.T) {
-				stats, err := repo.RecordOrderFill(ctx, fill)
+				stats, err := repo.RecordOpenPosition(ctx, position)
 				if err != nil {
-					t.Fatalf("record duplicate paper order fill: %v", err)
+					t.Fatalf("record duplicate paper open position: %v", err)
 				}
 				if stats.Inserted != 0 || stats.Skipped != 1 {
 					t.Fatalf("stats mismatch: %#v", stats)
@@ -124,43 +146,43 @@ func TestPaperOrderFillRepositoryIntegrationTableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "rejects conflicting paper order fill id",
+			name: "rejects conflicting paper open position id",
 			run: func(t *testing.T) {
-				conflict := fill
+				conflict := position
 				conflict.RecordedAt = conflict.RecordedAt.Add(time.Second)
-				_, err := repo.RecordOrderFill(ctx, conflict)
+				_, err := repo.RecordOpenPosition(ctx, conflict)
 				if err == nil || !strings.Contains(err.Error(), "different payload") {
 					t.Fatalf("expected conflict error, got %v", err)
 				}
 			},
 		},
 		{
-			name: "rejects second fill for same ticket",
+			name: "rejects second position for same fill",
 			run: func(t *testing.T) {
-				conflict := fill
-				conflict.FillID = "paper_fill_sqlmock_0002"
+				conflict := position
+				conflict.PositionID = "paper_position_sqlmock_0002"
 				conflict.RecordedAt = conflict.RecordedAt.Add(time.Second)
-				_, err := repo.RecordOrderFill(ctx, conflict)
-				if err == nil || !strings.Contains(err.Error(), "insert paper order fill") {
-					t.Fatalf("expected unique ticket fill error, got %v", err)
+				_, err := repo.RecordOpenPosition(ctx, conflict)
+				if err == nil || !strings.Contains(err.Error(), "insert paper open position") {
+					t.Fatalf("expected unique fill position error, got %v", err)
 				}
 			},
 		},
 		{
-			name: "lists stored paper order fill",
+			name: "lists stored paper open position",
 			run: func(t *testing.T) {
-				got, err := repo.ListOrderFills(ctx, domainpaper.OrderFillQuery{
-					ValidationID: fill.ValidationID,
-					DecisionID:   fill.DecisionID,
-					Symbol:       fill.Symbol,
-					Interval:     fill.Interval,
+				got, err := repo.ListOpenPositions(ctx, domainpaper.OpenPositionQuery{
+					ValidationID: position.ValidationID,
+					DecisionID:   position.DecisionID,
+					Symbol:       position.Symbol,
+					Interval:     position.Interval,
 					Limit:        10,
 				})
 				if err != nil {
-					t.Fatalf("list paper order fills: %v", err)
+					t.Fatalf("list paper open positions: %v", err)
 				}
-				if len(got) != 1 || got[0].FillID != fill.FillID || !got[0].Fee.Equal(fill.Fee) {
-					t.Fatalf("unexpected order fills: %#v", got)
+				if len(got) != 1 || got[0].PositionID != position.PositionID || !got[0].OpenRisk.Equal(position.OpenRisk) {
+					t.Fatalf("unexpected open positions: %#v", got)
 				}
 			},
 		},
@@ -171,16 +193,16 @@ func TestPaperOrderFillRepositoryIntegrationTableDriven(t *testing.T) {
 	}
 }
 
-func cleanupPaperOrderFills(t *testing.T, ctx context.Context, db *sql.DB) {
+func cleanupPaperOpenPositions(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
-	cleanupPaperOpenPositions(t, ctx, db)
 	if _, err := db.ExecContext(ctx, `
-		DELETE FROM paper_order_fills
-		WHERE fill_id IN ('paper_fill_sqlmock_0001', 'paper_fill_sqlmock_0002')
+		DELETE FROM paper_open_positions
+		WHERE position_id IN ('paper_position_sqlmock_0001', 'paper_position_sqlmock_0002')
+		   OR fill_id IN ('paper_fill_sqlmock_0001', 'paper_fill_sqlmock_0002')
 		   OR ticket_id IN ('paper_ticket_sqlmock_0001')
 		   OR decision_id IN ('risk_decision_sqlmock_0001')
 		   OR validation_id IN ('paper_validation_sqlmock_0001', 'paper_validation_sqlmock_0001_running')
 	`); err != nil {
-		t.Fatalf("cleanup paper order fills: %v", err)
+		t.Fatalf("cleanup paper open positions: %v", err)
 	}
 }
