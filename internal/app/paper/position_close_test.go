@@ -226,7 +226,9 @@ func (r *fakePositionCloseRepository) RecordPositionClose(_ context.Context, clo
 	if r.recordErr != nil {
 		return domainpaper.PositionCloseStats{}, r.recordErr
 	}
-	r.closes = append(r.closes, close)
+	if r.stats.Skipped == 0 {
+		r.closes = append(r.closes, close)
+	}
 	return r.stats, nil
 }
 

@@ -283,7 +283,9 @@ func (r *fakeEquityEventRepository) RecordEquityEvent(_ context.Context, event d
 	if r.recordErr != nil {
 		return domainpaper.EquityEventStats{}, r.recordErr
 	}
-	r.events = append(r.events, event)
+	if r.stats.Skipped == 0 {
+		r.events = append(r.events, event)
+	}
 	return r.stats, nil
 }
 
