@@ -66,9 +66,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 immutable paper order fill journal that records one conservative entry fill per ticket with copied ticket identity, exact fee/notional math, idempotent persistence, and PostgreSQL constraints.
 - Initial Phase 7 paper open-position ledger that turns a ticket/fill pair into one tracked open position, preserving planned risk while computing actual open risk from the executed entry price.
 - Initial Phase 7 immutable paper position close journal that closes one open position, computes realized gross/net PnL, fees, and return, and prevents duplicate closes for the same position.
+- Initial Phase 7 paper equity event ledger that accounts each position close exactly once, advances validation equity with sequence continuity, and enforces equity math in domain code and PostgreSQL.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add live-market paper fill reconciliation and equity accounting on top of immutable tickets/fills/open/close position journals. Exchange order placement remains intentionally absent.
+The next Phase 7 slices should add live-market paper fill reconciliation and performance reporting on top of immutable tickets/fills/open/close/equity journals. Exchange order placement remains intentionally absent.
 
 ## What This Is Not
 
@@ -147,8 +148,9 @@ Initial migrations are in `migrations/`:
 - `017_paper_order_fills.sql`
 - `018_paper_open_positions.sql`
 - `019_paper_position_closes.sql`
+- `020_paper_equity_events.sql`
 
-They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position, and Kill Switch tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position/equity, and Kill Switch tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 

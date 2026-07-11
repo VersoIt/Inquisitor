@@ -15,10 +15,11 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
-func TestPaperPositionCloseRepositoryIntegrationTableDriven(t *testing.T) {
+func TestPaperEquityEventRepositoryIntegrationTableDriven(t *testing.T) {
 	ctx := context.Background()
 	db := openTestPostgres(t)
 	applyMigrations(t, ctx, db)
+	cleanupPaperEquityEvents(t, ctx, db)
 	cleanupPaperPositionCloses(t, ctx, db)
 	cleanupPaperOpenPositions(t, ctx, db)
 	cleanupPaperOrderFills(t, ctx, db)
@@ -27,6 +28,7 @@ func TestPaperPositionCloseRepositoryIntegrationTableDriven(t *testing.T) {
 	cleanupResearchRuns(t, ctx, db)
 	cleanupHypotheses(t, ctx, db)
 	t.Cleanup(func() {
+		cleanupPaperEquityEvents(t, context.Background(), db)
 		cleanupPaperPositionCloses(t, context.Background(), db)
 		cleanupPaperOpenPositions(t, context.Background(), db)
 		cleanupPaperOrderFills(t, context.Background(), db)
@@ -121,7 +123,6 @@ func TestPaperPositionCloseRepositoryIntegrationTableDriven(t *testing.T) {
 		t.Fatalf("insert paper open position fixture: %v", err)
 	}
 
-	repo := postgres.NewPaperPositionCloseRepository(db)
 	close := testPaperPositionClose(plannedAt.Add(8 * time.Hour))
 	close.PositionID = position.PositionID
 	close.EntryFillID = position.FillID
@@ -135,17 +136,36 @@ func TestPaperPositionCloseRepositoryIntegrationTableDriven(t *testing.T) {
 	close.EntryFee = position.EntryFee
 	close.OpenedAt = position.OpenedAt
 	recomputePaperPositionClose(&close)
+	if _, err := postgres.NewPaperPositionCloseRepository(db).RecordPositionClose(ctx, close); err != nil {
+		t.Fatalf("insert paper position close fixture: %v", err)
+	}
+
+	repo := postgres.NewPaperEquityEventRepository(db)
+	event := testPaperEquityEvent(plannedAt.Add(9 * time.Hour))
+	event.ValidationID = close.ValidationID
+	event.CloseID = close.CloseID
+	event.PositionID = close.PositionID
+	event.Exchange = close.Exchange
+	event.Category = close.Category
+	event.Symbol = close.Symbol
+	event.Interval = close.Interval
+	event.NetPnL = close.NetPnL
+	event.Fees = close.Fees
+	event.EquityBefore = runningValidation.InitialBalance
+	event.EquityAfter = event.EquityBefore.Add(event.NetPnL)
+	event.OccurredAt = close.ClosedAt
+	event.RecordedAt = close.RecordedAt.Add(time.Minute)
 
 	tests := []struct {
 		name string
 		run  func(t *testing.T)
 	}{
 		{
-			name: "records new paper position close",
+			name: "records new paper equity event",
 			run: func(t *testing.T) {
-				stats, err := repo.RecordPositionClose(ctx, close)
+				stats, err := repo.RecordEquityEvent(ctx, event)
 				if err != nil {
-					t.Fatalf("record paper position close: %v", err)
+					t.Fatalf("record paper equity event: %v", err)
 				}
 				if stats.Inserted != 1 || stats.Skipped != 0 {
 					t.Fatalf("stats mismatch: %#v", stats)
@@ -153,11 +173,11 @@ func TestPaperPositionCloseRepositoryIntegrationTableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "accepts exact idempotent paper position close",
+			name: "accepts exact idempotent paper equity event",
 			run: func(t *testing.T) {
-				stats, err := repo.RecordPositionClose(ctx, close)
+				stats, err := repo.RecordEquityEvent(ctx, event)
 				if err != nil {
-					t.Fatalf("record duplicate paper position close: %v", err)
+					t.Fatalf("record duplicate paper equity event: %v", err)
 				}
 				if stats.Inserted != 0 || stats.Skipped != 1 {
 					t.Fatalf("stats mismatch: %#v", stats)
@@ -165,43 +185,44 @@ func TestPaperPositionCloseRepositoryIntegrationTableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "rejects conflicting paper position close id",
+			name: "rejects conflicting paper equity event id",
 			run: func(t *testing.T) {
-				conflict := close
+				conflict := event
 				conflict.RecordedAt = conflict.RecordedAt.Add(time.Second)
-				_, err := repo.RecordPositionClose(ctx, conflict)
+				_, err := repo.RecordEquityEvent(ctx, conflict)
 				if err == nil || !strings.Contains(err.Error(), "different payload") {
 					t.Fatalf("expected conflict error, got %v", err)
 				}
 			},
 		},
 		{
-			name: "rejects second close for same position",
+			name: "rejects second equity event for same close",
 			run: func(t *testing.T) {
-				conflict := close
-				conflict.CloseID = "paper_close_sqlmock_0002"
+				conflict := event
+				conflict.EventID = "paper_equity_sqlmock_0002"
+				conflict.Sequence = 2
 				conflict.RecordedAt = conflict.RecordedAt.Add(time.Second)
-				_, err := repo.RecordPositionClose(ctx, conflict)
-				if err == nil || !strings.Contains(err.Error(), "insert paper position close") {
-					t.Fatalf("expected unique position close error, got %v", err)
+				_, err := repo.RecordEquityEvent(ctx, conflict)
+				if err == nil || !strings.Contains(err.Error(), "insert paper equity event") {
+					t.Fatalf("expected unique close equity error, got %v", err)
 				}
 			},
 		},
 		{
-			name: "lists stored paper position close",
+			name: "lists stored paper equity event",
 			run: func(t *testing.T) {
-				got, err := repo.ListPositionCloses(ctx, domainpaper.PositionCloseQuery{
-					ValidationID: close.ValidationID,
-					PositionID:   close.PositionID,
-					Symbol:       close.Symbol,
-					Interval:     close.Interval,
+				got, err := repo.ListEquityEvents(ctx, domainpaper.EquityEventQuery{
+					ValidationID: event.ValidationID,
+					CloseID:      event.CloseID,
+					Symbol:       event.Symbol,
+					Interval:     event.Interval,
 					Limit:        10,
 				})
 				if err != nil {
-					t.Fatalf("list paper position closes: %v", err)
+					t.Fatalf("list paper equity events: %v", err)
 				}
-				if len(got) != 1 || got[0].CloseID != close.CloseID || !got[0].NetPnL.Equal(close.NetPnL) {
-					t.Fatalf("unexpected position closes: %#v", got)
+				if len(got) != 1 || got[0].EventID != event.EventID || !got[0].EquityAfter.Equal(event.EquityAfter) {
+					t.Fatalf("unexpected equity events: %#v", got)
 				}
 			},
 		},
@@ -212,32 +233,15 @@ func TestPaperPositionCloseRepositoryIntegrationTableDriven(t *testing.T) {
 	}
 }
 
-func cleanupPaperPositionCloses(t *testing.T, ctx context.Context, db *sql.DB) {
+func cleanupPaperEquityEvents(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
-	cleanupPaperEquityEvents(t, ctx, db)
 	if _, err := db.ExecContext(ctx, `
-		DELETE FROM paper_position_closes
-		WHERE close_id IN ('paper_close_sqlmock_0001', 'paper_close_sqlmock_0002')
+		DELETE FROM paper_equity_events
+		WHERE event_id IN ('paper_equity_sqlmock_0001', 'paper_equity_sqlmock_0002')
+		   OR close_id IN ('paper_close_sqlmock_0001', 'paper_close_sqlmock_0002')
 		   OR position_id IN ('paper_position_sqlmock_0001', 'paper_position_sqlmock_0002')
-		   OR entry_fill_id IN ('paper_fill_sqlmock_0001', 'paper_fill_sqlmock_0002')
-		   OR ticket_id IN ('paper_ticket_sqlmock_0001')
-		   OR decision_id IN ('risk_decision_sqlmock_0001')
 		   OR validation_id IN ('paper_validation_sqlmock_0001', 'paper_validation_sqlmock_0001_running')
 	`); err != nil {
-		t.Fatalf("cleanup paper position closes: %v", err)
+		t.Fatalf("cleanup paper equity events: %v", err)
 	}
-}
-
-func recomputePaperPositionClose(close *domainpaper.PositionClose) {
-	close.ExitNotional = close.ExitPrice.Mul(close.Quantity)
-	close.ExitFee = close.ExitNotional.Mul(close.ExitFeeBPS).Div(decimal.RequireFromString("10000"))
-	close.Fees = close.EntryFee.Add(close.ExitFee)
-	switch close.Side {
-	case domainpaper.OrderSideLong:
-		close.GrossPnL = close.ExitPrice.Sub(close.EntryPrice).Mul(close.Quantity)
-	case domainpaper.OrderSideShort:
-		close.GrossPnL = close.EntryPrice.Sub(close.ExitPrice).Mul(close.Quantity)
-	}
-	close.NetPnL = close.GrossPnL.Sub(close.Fees)
-	close.Return = close.NetPnL.Div(close.EntryNotional)
 }

@@ -29,6 +29,7 @@ type Service struct {
 	fills       domainpaper.OrderFillRepository
 	positions   domainpaper.OpenPositionRepository
 	closes      domainpaper.PositionCloseRepository
+	equity      domainpaper.EquityEventRepository
 	performance domainpaper.DailyPerformanceRepository
 	generator   SimulationTradeGenerator
 	clock       clock.Clock
@@ -118,6 +119,12 @@ func WithOpenPositionRepository(positions domainpaper.OpenPositionRepository) Op
 func WithPositionCloseRepository(closes domainpaper.PositionCloseRepository) Option {
 	return func(service *Service) {
 		service.closes = closes
+	}
+}
+
+func WithEquityEventRepository(equity domainpaper.EquityEventRepository) Option {
+	return func(service *Service) {
+		service.equity = equity
 	}
 }
 
