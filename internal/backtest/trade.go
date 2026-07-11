@@ -25,6 +25,13 @@ const (
 	LiquidityTaker LiquidityRole = "TAKER"
 )
 
+type FillRole string
+
+const (
+	FillRoleEntry FillRole = "ENTRY"
+	FillRoleExit  FillRole = "EXIT"
+)
+
 type CostModel struct {
 	MakerFeeBPS                decimal.Decimal
 	TakerFeeBPS                decimal.Decimal
@@ -45,6 +52,16 @@ type RoundTripInput struct {
 	EntryLiquidity LiquidityRole
 	ExitLiquidity  LiquidityRole
 	Costs          CostModel
+}
+
+type FillInput struct {
+	Direction Direction
+	Role      FillRole
+	Time      time.Time
+	MidPrice  decimal.Decimal
+	Quantity  decimal.Decimal
+	Liquidity LiquidityRole
+	Costs     CostModel
 }
 
 type Fill struct {
@@ -68,6 +85,19 @@ type RoundTrip struct {
 	Fees     decimal.Decimal
 	NetPnL   decimal.Decimal
 	Return   decimal.Decimal
+}
+
+func EvaluateFill(input FillInput) (Fill, error) {
+	input.Direction = Direction(strings.ToUpper(strings.TrimSpace(string(input.Direction))))
+	input.Role = FillRole(strings.ToUpper(strings.TrimSpace(string(input.Role))))
+	input.Liquidity = normalizeLiquidity(input.Liquidity)
+	if input.Liquidity == "" {
+		input.Liquidity = LiquidityTaker
+	}
+	if err := ValidateFillInput(input); err != nil {
+		return Fill{}, err
+	}
+	return executableFill(input.Direction, input.Time, input.MidPrice, input.Quantity, input.Liquidity, input.Costs, input.Role == FillRoleEntry), nil
 }
 
 func NewCostModel(makerFeeBPS, takerFeeBPS int, spreadBPS int, slippageBPS int, conservativeSlippageFactor float64) (CostModel, error) {
@@ -149,6 +179,35 @@ func ValidateCostModel(model CostModel) error {
 	return nil
 }
 
+func ValidateFillInput(input FillInput) error {
+	var problems []string
+	if !KnownDirection(input.Direction) {
+		problems = append(problems, "direction must be LONG or SHORT")
+	}
+	if !KnownFillRole(input.Role) {
+		problems = append(problems, "role must be ENTRY or EXIT")
+	}
+	if !KnownLiquidity(input.Liquidity) {
+		problems = append(problems, "liquidity must be MAKER or TAKER")
+	}
+	if input.Time.IsZero() {
+		problems = append(problems, "time is required")
+	}
+	if input.MidPrice.LessThanOrEqual(decimal.Zero) {
+		problems = append(problems, "mid_price must be positive")
+	}
+	if input.Quantity.LessThanOrEqual(decimal.Zero) {
+		problems = append(problems, "quantity must be positive")
+	}
+	if err := ValidateCostModel(input.Costs); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if len(problems) > 0 {
+		return errors.New("backtest fill validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 func ValidateRoundTripInput(input RoundTripInput) error {
 	var problems []string
 	if !KnownDirection(input.Direction) {
@@ -199,6 +258,15 @@ func KnownDirection(direction Direction) bool {
 func KnownLiquidity(liquidity LiquidityRole) bool {
 	switch liquidity {
 	case LiquidityMaker, LiquidityTaker:
+		return true
+	default:
+		return false
+	}
+}
+
+func KnownFillRole(role FillRole) bool {
+	switch role {
+	case FillRoleEntry, FillRoleExit:
 		return true
 	default:
 		return false

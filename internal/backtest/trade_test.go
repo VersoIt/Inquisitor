@@ -120,6 +120,131 @@ func TestEvaluateRoundTripAppliesFeesSpreadAndSlippageTableDriven(t *testing.T) 
 	}
 }
 
+func TestEvaluateFillAppliesConservativePriceImpactTableDriven(t *testing.T) {
+	fillTime := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)
+	costs := mustCostModel(t, 2, 6, 4, 3, 1)
+
+	tests := []struct {
+		name           string
+		input          backtest.FillInput
+		wantPrice      string
+		wantNotional   string
+		wantFee        string
+		wantFeeBPS     string
+		wantSpreadBPS  string
+		wantSlippageBP string
+	}{
+		{
+			name: "long taker entry worsens above mid",
+			input: backtest.FillInput{
+				Direction: backtest.DirectionLong,
+				Role:      backtest.FillRoleEntry,
+				Time:      fillTime,
+				MidPrice:  decimal.RequireFromString("100000"),
+				Quantity:  decimal.RequireFromString("0.5"),
+				Liquidity: backtest.LiquidityTaker,
+				Costs:     costs,
+			},
+			wantPrice:      "100050",
+			wantNotional:   "50025",
+			wantFee:        "30.015",
+			wantFeeBPS:     "6",
+			wantSpreadBPS:  "2",
+			wantSlippageBP: "3",
+		},
+		{
+			name: "long taker exit worsens below mid",
+			input: backtest.FillInput{
+				Direction: backtest.DirectionLong,
+				Role:      backtest.FillRoleExit,
+				Time:      fillTime,
+				MidPrice:  decimal.RequireFromString("101000"),
+				Quantity:  decimal.RequireFromString("0.5"),
+				Liquidity: backtest.LiquidityTaker,
+				Costs:     costs,
+			},
+			wantPrice:      "100949.5",
+			wantNotional:   "50474.75",
+			wantFee:        "30.28485",
+			wantFeeBPS:     "6",
+			wantSpreadBPS:  "2",
+			wantSlippageBP: "3",
+		},
+		{
+			name: "short maker entry worsens below mid with maker fee",
+			input: backtest.FillInput{
+				Direction: backtest.DirectionShort,
+				Role:      backtest.FillRoleEntry,
+				Time:      fillTime,
+				MidPrice:  decimal.RequireFromString("100000"),
+				Quantity:  decimal.RequireFromString("0.5"),
+				Liquidity: backtest.LiquidityMaker,
+				Costs:     costs,
+			},
+			wantPrice:      "99950",
+			wantNotional:   "49975",
+			wantFee:        "9.995",
+			wantFeeBPS:     "2",
+			wantSpreadBPS:  "2",
+			wantSlippageBP: "3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := backtest.EvaluateFill(tt.input)
+			if err != nil {
+				t.Fatalf("evaluate fill: %v", err)
+			}
+			assertDecimal(t, "executed price", got.ExecutedPrice, tt.wantPrice)
+			assertDecimal(t, "notional", got.Notional, tt.wantNotional)
+			assertDecimal(t, "fee", got.Fee, tt.wantFee)
+			assertDecimal(t, "fee bps", got.FeeBPS, tt.wantFeeBPS)
+			assertDecimal(t, "spread bps", got.SpreadBPS, tt.wantSpreadBPS)
+			assertDecimal(t, "slippage bps", got.SlippageBPS, tt.wantSlippageBP)
+		})
+	}
+}
+
+func TestEvaluateFillRejectsInvalidInputsTableDriven(t *testing.T) {
+	fillTime := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)
+	valid := backtest.FillInput{
+		Direction: backtest.DirectionLong,
+		Role:      backtest.FillRoleEntry,
+		Time:      fillTime,
+		MidPrice:  decimal.RequireFromString("100000"),
+		Quantity:  decimal.RequireFromString("0.5"),
+		Liquidity: backtest.LiquidityTaker,
+		Costs:     mustCostModel(t, 2, 6, 4, 3, 1),
+	}
+
+	tests := []struct {
+		name       string
+		mutate     func(*backtest.FillInput)
+		wantErrSub string
+	}{
+		{"unknown direction", func(input *backtest.FillInput) { input.Direction = "SIDEWAYS" }, "direction"},
+		{"unknown role", func(input *backtest.FillInput) { input.Role = "OPEN" }, "role"},
+		{"missing time", func(input *backtest.FillInput) { input.Time = time.Time{} }, "time"},
+		{"zero mid price", func(input *backtest.FillInput) { input.MidPrice = decimal.Zero }, "mid_price"},
+		{"zero quantity", func(input *backtest.FillInput) { input.Quantity = decimal.Zero }, "quantity"},
+		{"unknown liquidity", func(input *backtest.FillInput) { input.Liquidity = "VIP" }, "liquidity"},
+		{"bad costs", func(input *backtest.FillInput) { input.Costs.TakerFeeBPS = decimal.RequireFromString("-1") }, "taker_fee_bps"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := valid
+			tt.mutate(&input)
+
+			_, err := backtest.EvaluateFill(input)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
+	}
+}
+
 func TestEvaluateRoundTripRejectsInvalidInputsTableDriven(t *testing.T) {
 	entryTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	valid := backtest.RoundTripInput{

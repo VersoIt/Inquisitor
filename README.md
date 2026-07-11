@@ -69,6 +69,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 paper equity event ledger that accounts each position close exactly once, advances validation equity with sequence continuity, and enforces equity math in domain code and PostgreSQL.
 - Initial Phase 7 equity-ledger performance report that summarizes live-paper accounting events and can persist UTC daily snapshots from the close/equity journal.
 - Initial Phase 7 paper position settlement use case that safely chains position close recording and equity accounting, allowing retries to continue after a close was already persisted.
+- Initial Phase 7 conservative paper market execution helpers that derive simulated entry/exit fills from mid price plus fee/spread/slippage assumptions before recording fills or settlements.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
 The next Phase 7 slices should add live-market paper fill reconciliation on top of immutable tickets/fills/open/close/equity journals. Exchange order placement remains intentionally absent.
