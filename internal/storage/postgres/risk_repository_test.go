@@ -175,6 +175,14 @@ func TestRiskRepositoriesIntegrationTableDriven(t *testing.T) {
 func cleanupRiskControls(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
 	if _, err := db.ExecContext(ctx, `
+		DELETE FROM paper_position_closes
+		WHERE decision_id IN ('risk_decision_sqlmock_0001')
+		   OR entry_fill_id IN ('paper_fill_sqlmock_0001', 'paper_fill_sqlmock_0002')
+		   OR ticket_id IN ('paper_ticket_sqlmock_0001')
+	`); err != nil {
+		t.Fatalf("cleanup paper position closes: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
 		DELETE FROM paper_open_positions
 		WHERE decision_id IN ('risk_decision_sqlmock_0001')
 		   OR fill_id IN ('paper_fill_sqlmock_0001', 'paper_fill_sqlmock_0002')

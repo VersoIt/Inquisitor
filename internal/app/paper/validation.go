@@ -28,6 +28,7 @@ type Service struct {
 	tickets     domainpaper.OrderTicketRepository
 	fills       domainpaper.OrderFillRepository
 	positions   domainpaper.OpenPositionRepository
+	closes      domainpaper.PositionCloseRepository
 	performance domainpaper.DailyPerformanceRepository
 	generator   SimulationTradeGenerator
 	clock       clock.Clock
@@ -111,6 +112,12 @@ func WithOrderFillRepository(fills domainpaper.OrderFillRepository) Option {
 func WithOpenPositionRepository(positions domainpaper.OpenPositionRepository) Option {
 	return func(service *Service) {
 		service.positions = positions
+	}
+}
+
+func WithPositionCloseRepository(closes domainpaper.PositionCloseRepository) Option {
+	return func(service *Service) {
+		service.closes = closes
 	}
 }
 
