@@ -31,7 +31,7 @@ PAPER_SYMBOL ?=
 PAPER_INTERVAL ?=
 PAPER_CANCEL_REASON ?=
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-start paper-complete paper-cancel docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -85,6 +85,9 @@ paper-simulate:
 
 paper-report:
 	$(GO) run ./cmd/paper-report -config $(CONFIG) -validation-id $(VALIDATION_ID) -action report -record-daily
+
+paper-equity-report:
+	$(GO) run ./cmd/paper-report -config $(CONFIG) -validation-id $(VALIDATION_ID) -action equity-report -record-daily
 
 paper-start:
 	$(GO) run ./cmd/paper-report -config $(CONFIG) -validation-id $(VALIDATION_ID) -action start

@@ -67,9 +67,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 paper open-position ledger that turns a ticket/fill pair into one tracked open position, preserving planned risk while computing actual open risk from the executed entry price.
 - Initial Phase 7 immutable paper position close journal that closes one open position, computes realized gross/net PnL, fees, and return, and prevents duplicate closes for the same position.
 - Initial Phase 7 paper equity event ledger that accounts each position close exactly once, advances validation equity with sequence continuity, and enforces equity math in domain code and PostgreSQL.
+- Initial Phase 7 equity-ledger performance report that summarizes live-paper accounting events and can persist UTC daily snapshots from the close/equity journal.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add live-market paper fill reconciliation and performance reporting on top of immutable tickets/fills/open/close/equity journals. Exchange order placement remains intentionally absent.
+The next Phase 7 slices should add live-market paper fill reconciliation on top of immutable tickets/fills/open/close/equity journals. Exchange order placement remains intentionally absent.
 
 ## What This Is Not
 
@@ -375,6 +376,12 @@ Build and persist UTC daily performance snapshots from a validation journal:
 go run ./cmd/paper-report -config configs/config.example.yaml -validation-id paper_validation_001 -action report -record-daily
 ```
 
+Build and persist UTC daily performance snapshots from the live-paper equity ledger:
+
+```powershell
+go run ./cmd/paper-report -config configs/config.example.yaml -validation-id paper_validation_001 -action equity-report -record-daily
+```
+
 Start a real paper-observation period only with a fresh, empty journal. Offline simulations are intentionally rejected here so historical PnL cannot satisfy the live-paper requirement:
 
 ```powershell
@@ -428,6 +435,7 @@ make paper-validate RUN_ID=research_... PAPER_RECORD=1 VALIDATION_ID=paper_valid
 make paper-simulate VALIDATION_ID=paper_validation_001 PAPER_TRADE_PREFIX=paper_trade_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-simulate VALIDATION_ID=paper_validation_001 PAPER_SIM_FILE=reports/paper_simulation.json PAPER_TRADE_PREFIX=paper_trade_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-report VALIDATION_ID=paper_validation_001
+make paper-equity-report VALIDATION_ID=paper_validation_001
 make paper-start VALIDATION_ID=paper_validation_001
 make paper-complete VALIDATION_ID=paper_validation_001
 make paper-cancel VALIDATION_ID=paper_validation_001 PAPER_CANCEL_REASON="operator requested stop"

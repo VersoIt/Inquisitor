@@ -15,7 +15,7 @@ import (
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
 	validationID := flag.String("validation-id", "", "paper validation record id")
-	action := flag.String("action", "report", "action: report, start, complete, cancel")
+	action := flag.String("action", "report", "action: report, equity-report, start, complete, cancel")
 	cancelReason := flag.String("reason", "", "required cancellation reason")
 	recordDaily := flag.Bool("record-daily", false, "persist idempotent daily performance snapshots")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
@@ -41,6 +41,7 @@ func main() {
 		research,
 		apppaper.WithValidationRecordRepository(postgres.NewPaperValidationRepository(db)),
 		apppaper.WithValidationTradeRepository(postgres.NewPaperValidationTradeRepository(db)),
+		apppaper.WithEquityEventRepository(postgres.NewPaperEquityEventRepository(db)),
 		apppaper.WithDailyPerformanceRepository(postgres.NewPaperDailyPerformanceRepository(db)),
 	)
 
@@ -59,6 +60,33 @@ func main() {
 			"paper performance report built",
 			"validation_id", report.Record.ValidationID,
 			"status", report.Record.Status,
+			"trades", report.Summary.Trades,
+			"wins", report.Summary.Wins,
+			"losses", report.Summary.Losses,
+			"net_pnl", report.Summary.NetPnL.String(),
+			"fees", report.Summary.TotalFees.String(),
+			"expectancy", report.Summary.Expectancy.String(),
+			"win_rate", report.Summary.WinRate.String(),
+			"max_drawdown", report.Summary.MaxDrawdown.String(),
+			"final_equity", report.Summary.FinalEquity.String(),
+			"days", len(report.Daily),
+			"daily_inserted", report.DailyStats.Inserted,
+			"daily_updated", report.DailyStats.Updated,
+		)
+	case "equity-report":
+		report, reportErr := service.BuildEquityPerformanceReport(ctx, apppaper.EquityPerformanceReportRequest{
+			ValidationID: *validationID,
+			RecordDaily:  *recordDaily,
+		})
+		if reportErr != nil {
+			log.Error("paper equity performance report failed", "error", reportErr)
+			os.Exit(1)
+		}
+		log.Info(
+			"paper equity performance report built",
+			"validation_id", report.Record.ValidationID,
+			"status", report.Record.Status,
+			"events", len(report.Events),
 			"trades", report.Summary.Trades,
 			"wins", report.Summary.Wins,
 			"losses", report.Summary.Losses,
