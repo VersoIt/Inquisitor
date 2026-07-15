@@ -206,7 +206,9 @@ func (r *fakeOrderFillRepository) RecordOrderFill(_ context.Context, fill domain
 	if r.err != nil {
 		return domainpaper.OrderFillStats{}, r.err
 	}
-	r.fills = append(r.fills, fill)
+	if r.stats.Skipped == 0 {
+		r.fills = append(r.fills, fill)
+	}
 	return r.stats, nil
 }
 

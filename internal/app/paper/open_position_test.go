@@ -197,7 +197,9 @@ func (r *fakeOpenPositionRepository) RecordOpenPosition(_ context.Context, posit
 	if r.err != nil {
 		return domainpaper.OpenPositionStats{}, r.err
 	}
-	r.positions = append(r.positions, position)
+	if r.stats.Skipped == 0 {
+		r.positions = append(r.positions, position)
+	}
 	return r.stats, nil
 }
 

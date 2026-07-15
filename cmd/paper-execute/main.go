@@ -21,12 +21,12 @@ import (
 
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
-	action := flag.String("action", "", "action: fill, settle")
-	fillID := flag.String("fill-id", "", "stable paper fill id for action=fill")
-	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=fill")
+	action := flag.String("action", "", "action: enter, fill, settle")
+	fillID := flag.String("fill-id", "", "stable paper fill id for action=enter or action=fill")
+	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=enter or action=fill")
 	eventID := flag.String("event-id", "", "stable paper equity event id for action=settle")
 	closeID := flag.String("close-id", "", "stable paper position close id for action=settle")
-	positionID := flag.String("position-id", "", "paper open position id for action=settle")
+	positionID := flag.String("position-id", "", "paper open position id for action=enter or action=settle")
 	midPriceValue := flag.String("mid-price", "", "observed market mid price used for conservative simulated execution")
 	liquidityValue := flag.String("liquidity", string(domainbacktest.LiquidityTaker), "simulated liquidity role: MAKER or TAKER")
 	closeReasonValue := flag.String("close-reason", string(domainpaper.PositionCloseReasonManual), "close reason for action=settle")
@@ -84,6 +84,38 @@ func main() {
 	)
 
 	switch strings.ToLower(strings.TrimSpace(*action)) {
+	case "enter":
+		result, enterErr := service.ReconcileTicketFillAtMarket(ctx, apppaper.ReconcileTicketFillAtMarketRequest{
+			FillID:     *fillID,
+			PositionID: *positionID,
+			TicketID:   *ticketID,
+			Liquidity:  liquidity,
+			MidPrice:   midPrice,
+			Costs:      costs,
+			FilledAt:   occurredAt,
+		})
+		if enterErr != nil {
+			log.Error("paper entry reconciliation failed", "error", enterErr)
+			os.Exit(1)
+		}
+		log.Info(
+			"paper entry reconciliation recorded",
+			"validation_id", result.Record.ValidationID,
+			"ticket_id", result.Ticket.TicketID,
+			"fill_id", result.Fill.FillID,
+			"position_id", result.Position.PositionID,
+			"liquidity", result.Fill.Liquidity,
+			"mid_price", result.Fill.MidPrice.String(),
+			"executed_price", result.Fill.ExecutedPrice.String(),
+			"quantity", result.Fill.Quantity.String(),
+			"notional", result.Fill.Notional.String(),
+			"fee", result.Fill.Fee.String(),
+			"open_risk", result.Position.OpenRisk.String(),
+			"fill_inserted", result.FillStats.Inserted,
+			"fill_skipped", result.FillStats.Skipped,
+			"position_inserted", result.PositionStats.Inserted,
+			"position_skipped", result.PositionStats.Skipped,
+		)
 	case "fill":
 		result, fillErr := service.SimulateOrderFill(ctx, apppaper.SimulateOrderFillRequest{
 			FillID:    *fillID,
