@@ -70,6 +70,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 equity-ledger performance report that summarizes live-paper accounting events and can persist UTC daily snapshots from the close/equity journal.
 - Initial Phase 7 paper position settlement use case that safely chains position close recording and equity accounting, allowing retries to continue after a close was already persisted.
 - Initial Phase 7 conservative paper market execution helpers that derive simulated entry/exit fills from mid price plus fee/spread/slippage assumptions before recording fills or settlements.
+- Initial Phase 7 paper execution CLI that records conservative entry fills and position settlements from observed mid prices without sending exchange orders.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
 The next Phase 7 slices should add live-market paper fill reconciliation on top of immutable tickets/fills/open/close/equity journals. Exchange order placement remains intentionally absent.
@@ -397,6 +398,18 @@ go run ./cmd/paper-report -config configs/config.example.yaml -validation-id pap
 go run ./cmd/paper-report -config configs/config.example.yaml -validation-id paper_validation_001 -action cancel -reason "operator requested stop"
 ```
 
+Record a conservative paper entry fill from an existing immutable paper order ticket and an observed market mid price. This writes only the paper fill journal; it does not send an exchange order:
+
+```powershell
+go run ./cmd/paper-execute -config configs/config.example.yaml -action fill -fill-id paper_fill_001 -ticket-id paper_ticket_001 -mid-price 100000 -liquidity TAKER -at 2026-07-16T12:00:00Z
+```
+
+Settle an existing paper open position from an observed exit mid price. This records the close journal and the equity ledger event idempotently:
+
+```powershell
+go run ./cmd/paper-execute -config configs/config.example.yaml -action settle -event-id paper_equity_001 -close-id paper_close_001 -position-id paper_position_001 -mid-price 101000 -liquidity TAKER -close-reason TAKE_PROFIT -at 2026-07-16T13:00:00Z
+```
+
 ## Regime Classification
 
 The regime command reads persisted candles, public trades, and orderbook snapshots, computes the latest feature set in the requested window, classifies the market regime, and upserts one `regime_states` row per symbol/interval. It does not run strategies and cannot place orders.
@@ -441,6 +454,8 @@ make paper-equity-report VALIDATION_ID=paper_validation_001
 make paper-start VALIDATION_ID=paper_validation_001
 make paper-complete VALIDATION_ID=paper_validation_001
 make paper-cancel VALIDATION_ID=paper_validation_001 PAPER_CANCEL_REASON="operator requested stop"
+make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
+make paper-settle PAPER_EVENT_ID=paper_equity_001 PAPER_CLOSE_ID=paper_close_001 PAPER_POSITION_ID=paper_position_001 PAPER_MID_PRICE=101000 PAPER_CLOSE_REASON=TAKE_PROFIT PAPER_EXECUTION_AT=2026-07-16T13:00:00Z
 ```
 
 ## Architecture Boundary
