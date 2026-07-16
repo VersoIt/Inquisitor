@@ -21,12 +21,17 @@ import (
 
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
-	action := flag.String("action", "", "action: enter, fill, settle")
+	action := flag.String("action", "", "action: pending, enter, fill, settle")
+	validationID := flag.String("validation-id", "", "paper validation id for action=pending")
 	fillID := flag.String("fill-id", "", "stable paper fill id for action=enter or action=fill")
 	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=enter or action=fill")
 	eventID := flag.String("event-id", "", "stable paper equity event id for action=settle")
 	closeID := flag.String("close-id", "", "stable paper position close id for action=settle")
 	positionID := flag.String("position-id", "", "paper open position id for action=enter or action=settle")
+	symbol := flag.String("symbol", "", "optional symbol filter for action=pending")
+	interval := flag.String("interval", "", "optional interval filter for action=pending")
+	pendingLimit := flag.Int("pending-limit", 100, "maximum pending tickets returned by action=pending")
+	pendingScanLimit := flag.Int("pending-scan-limit", 1000, "maximum tickets scanned by action=pending")
 	midPriceValue := flag.String("mid-price", "", "observed market mid price used for conservative simulated execution")
 	liquidityValue := flag.String("liquidity", string(domainbacktest.LiquidityTaker), "simulated liquidity role: MAKER or TAKER")
 	closeReasonValue := flag.String("close-reason", string(domainpaper.PositionCloseReasonManual), "close reason for action=settle")
@@ -42,24 +47,31 @@ func main() {
 		log.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+	actionName := strings.ToLower(strings.TrimSpace(*action))
 	if err := paperExecutionSafetyPolicy(cfg); err != nil {
 		log.Error("invalid paper execution safety policy", "error", err)
 		os.Exit(1)
 	}
-	costs, err := paperExecutionCostModel(cfg, *spreadBPS, *slippageBPS)
-	if err != nil {
-		log.Error("invalid paper execution cost model", "error", err)
-		os.Exit(1)
-	}
-	midPrice, err := parseRequiredDecimal("mid-price", *midPriceValue)
-	if err != nil {
-		log.Error("invalid mid price", "error", err)
-		os.Exit(1)
-	}
-	occurredAt, err := parseRequiredTime("at", *occurredAtValue)
-	if err != nil {
-		log.Error("invalid execution timestamp", "error", err)
-		os.Exit(1)
+	var costs domainbacktest.CostModel
+	var midPrice decimal.Decimal
+	var occurredAt time.Time
+	if actionName != "pending" {
+		var err error
+		costs, err = paperExecutionCostModel(cfg, *spreadBPS, *slippageBPS)
+		if err != nil {
+			log.Error("invalid paper execution cost model", "error", err)
+			os.Exit(1)
+		}
+		midPrice, err = parseRequiredDecimal("mid-price", *midPriceValue)
+		if err != nil {
+			log.Error("invalid mid price", "error", err)
+			os.Exit(1)
+		}
+		occurredAt, err = parseRequiredTime("at", *occurredAtValue)
+		if err != nil {
+			log.Error("invalid execution timestamp", "error", err)
+			os.Exit(1)
+		}
 	}
 	liquidity := domainbacktest.LiquidityRole(strings.ToUpper(strings.TrimSpace(*liquidityValue)))
 
@@ -83,7 +95,42 @@ func main() {
 		apppaper.WithEquityEventRepository(postgres.NewPaperEquityEventRepository(db)),
 	)
 
-	switch strings.ToLower(strings.TrimSpace(*action)) {
+	switch actionName {
+	case "pending":
+		result, pendingErr := service.ListPendingOrderTickets(ctx, apppaper.ListPendingOrderTicketsRequest{
+			ValidationID: *validationID,
+			Symbol:       *symbol,
+			Interval:     *interval,
+			Limit:        *pendingLimit,
+			ScanLimit:    *pendingScanLimit,
+		})
+		if pendingErr != nil {
+			log.Error("paper pending ticket selection failed", "error", pendingErr)
+			os.Exit(1)
+		}
+		log.Info(
+			"paper pending ticket selection completed",
+			"validation_id", result.Record.ValidationID,
+			"status", result.Record.Status,
+			"pending", len(result.Tickets),
+			"scanned", result.ScannedTickets,
+			"filled", result.FilledTickets,
+		)
+		for _, ticket := range result.Tickets {
+			log.Info(
+				"paper pending ticket",
+				"ticket_id", ticket.TicketID,
+				"validation_id", ticket.ValidationID,
+				"symbol", ticket.Symbol,
+				"interval", ticket.Interval,
+				"side", ticket.Side,
+				"quantity", ticket.Quantity.String(),
+				"entry_price", ticket.EntryPrice.String(),
+				"stop_loss", ticket.StopLoss.String(),
+				"take_profit", ticket.TakeProfit.String(),
+				"created_at", ticket.CreatedAt.Format(time.RFC3339),
+			)
+		}
 	case "enter":
 		result, enterErr := service.ReconcileTicketFillAtMarket(ctx, apppaper.ReconcileTicketFillAtMarketRequest{
 			FillID:     *fillID,

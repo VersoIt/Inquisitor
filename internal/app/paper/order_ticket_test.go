@@ -227,7 +227,38 @@ func (r *fakeOrderTicketRepository) ListOrderTickets(_ context.Context, query do
 	if r.err != nil {
 		return nil, r.err
 	}
-	return append([]domainpaper.OrderTicket(nil), r.tickets...), nil
+	var out []domainpaper.OrderTicket
+	for _, ticket := range r.tickets {
+		if query.TicketID != "" && ticket.TicketID != query.TicketID {
+			continue
+		}
+		if query.ValidationID != "" && ticket.ValidationID != query.ValidationID {
+			continue
+		}
+		if query.DecisionID != "" && ticket.DecisionID != query.DecisionID {
+			continue
+		}
+		if query.IntentID != "" && ticket.IntentID != query.IntentID {
+			continue
+		}
+		if query.Symbol != "" && ticket.Symbol != query.Symbol {
+			continue
+		}
+		if query.Interval != "" && ticket.Interval != query.Interval {
+			continue
+		}
+		if !query.Start.IsZero() && ticket.CreatedAt.Before(query.Start) {
+			continue
+		}
+		if !query.End.IsZero() && !ticket.CreatedAt.Before(query.End) {
+			continue
+		}
+		out = append(out, ticket)
+		if query.Limit > 0 && len(out) == query.Limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func appRiskDecisionAudit(recordedAt time.Time) domainrisk.DecisionAuditRecord {

@@ -30,6 +30,8 @@ PAPER_TRADE_PREFIX ?= paper_trade
 PAPER_SYMBOL ?=
 PAPER_INTERVAL ?=
 PAPER_CANCEL_REASON ?=
+PAPER_PENDING_LIMIT ?= 100
+PAPER_PENDING_SCAN_LIMIT ?= 1000
 PAPER_FILL_ID ?=
 PAPER_TICKET_ID ?=
 PAPER_EVENT_ID ?=
@@ -40,7 +42,7 @@ PAPER_EXECUTION_AT ?=
 PAPER_LIQUIDITY ?= TAKER
 PAPER_CLOSE_REASON ?= MANUAL
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-enter paper-fill paper-settle docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-pending paper-enter paper-fill paper-settle docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -106,6 +108,9 @@ paper-complete:
 
 paper-cancel:
 	$(GO) run ./cmd/paper-report -config $(CONFIG) -validation-id $(VALIDATION_ID) -action cancel -reason "$(PAPER_CANCEL_REASON)"
+
+paper-pending:
+	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action pending $(if $(VALIDATION_ID),-validation-id $(VALIDATION_ID),) $(if $(PAPER_SYMBOL),-symbol $(PAPER_SYMBOL),) $(if $(PAPER_INTERVAL),-interval $(PAPER_INTERVAL),) -pending-limit $(PAPER_PENDING_LIMIT) -pending-scan-limit $(PAPER_PENDING_SCAN_LIMIT)
 
 paper-enter:
 	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action enter $(if $(PAPER_FILL_ID),-fill-id $(PAPER_FILL_ID),) $(if $(PAPER_POSITION_ID),-position-id $(PAPER_POSITION_ID),) $(if $(PAPER_TICKET_ID),-ticket-id $(PAPER_TICKET_ID),) $(if $(PAPER_MID_PRICE),-mid-price $(PAPER_MID_PRICE),) $(if $(PAPER_LIQUIDITY),-liquidity $(PAPER_LIQUIDITY),) $(if $(PAPER_EXECUTION_AT),-at $(PAPER_EXECUTION_AT),)
