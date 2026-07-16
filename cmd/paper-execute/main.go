@@ -21,19 +21,19 @@ import (
 
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
-	action := flag.String("action", "", "action: quote, pending, enter, fill, settle")
-	validationID := flag.String("validation-id", "", "paper validation id for action=pending")
-	fillID := flag.String("fill-id", "", "stable paper fill id for action=enter or action=fill")
-	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=enter or action=fill")
+	action := flag.String("action", "", "action: quote, pending, auto-enter, enter, fill, settle")
+	validationID := flag.String("validation-id", "", "paper validation id for action=pending or action=auto-enter")
+	fillID := flag.String("fill-id", "", "stable paper fill id for action=auto-enter, action=enter, or action=fill")
+	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=auto-enter, action=enter, or action=fill")
 	eventID := flag.String("event-id", "", "stable paper equity event id for action=settle")
 	closeID := flag.String("close-id", "", "stable paper position close id for action=settle")
-	positionID := flag.String("position-id", "", "paper open position id for action=enter or action=settle")
-	symbol := flag.String("symbol", "", "optional symbol filter for action=pending")
-	interval := flag.String("interval", "", "optional interval filter for action=pending")
+	positionID := flag.String("position-id", "", "paper open position id for action=auto-enter, action=enter, or action=settle")
+	symbol := flag.String("symbol", "", "optional symbol filter for action=pending or action=auto-enter")
+	interval := flag.String("interval", "", "optional interval filter for action=pending or action=auto-enter")
 	pendingLimit := flag.Int("pending-limit", 100, "maximum pending tickets returned by action=pending")
-	pendingScanLimit := flag.Int("pending-scan-limit", 1000, "maximum tickets scanned by action=pending")
-	quoteAsOfValue := flag.String("quote-as-of", "", "quote observation time in RFC3339 format; defaults to now for action=quote")
-	quoteScanLimit := flag.Int("quote-scan-limit", 1000, "maximum orderbook snapshots scanned by action=quote")
+	pendingScanLimit := flag.Int("pending-scan-limit", 1000, "maximum tickets scanned by action=pending or action=auto-enter")
+	quoteAsOfValue := flag.String("quote-as-of", "", "quote observation time in RFC3339 format; defaults to now for action=quote or action=auto-enter")
+	quoteScanLimit := flag.Int("quote-scan-limit", 1000, "maximum orderbook snapshots scanned by action=quote or action=auto-enter")
 	midPriceValue := flag.String("mid-price", "", "observed market mid price used for conservative simulated execution")
 	liquidityValue := flag.String("liquidity", string(domainbacktest.LiquidityTaker), "simulated liquidity role: MAKER or TAKER")
 	closeReasonValue := flag.String("close-reason", string(domainpaper.PositionCloseReasonManual), "close reason for action=settle")
@@ -57,13 +57,16 @@ func main() {
 	var costs domainbacktest.CostModel
 	var midPrice decimal.Decimal
 	var occurredAt time.Time
-	if actionName != "pending" && actionName != "quote" {
+	if actionRequiresCosts(actionName) {
 		var err error
 		costs, err = paperExecutionCostModel(cfg, *spreadBPS, *slippageBPS)
 		if err != nil {
 			log.Error("invalid paper execution cost model", "error", err)
 			os.Exit(1)
 		}
+	}
+	if actionRequiresManualMarketObservation(actionName) {
+		var err error
 		midPrice, err = parseRequiredDecimal("mid-price", *midPriceValue)
 		if err != nil {
 			log.Error("invalid mid price", "error", err)
@@ -100,14 +103,10 @@ func main() {
 
 	switch actionName {
 	case "quote":
-		asOf := time.Now().UTC()
-		if strings.TrimSpace(*quoteAsOfValue) != "" {
-			parsed, parseErr := parseRequiredTime("quote-as-of", *quoteAsOfValue)
-			if parseErr != nil {
-				log.Error("invalid quote timestamp", "error", parseErr)
-				os.Exit(1)
-			}
-			asOf = parsed
+		asOf, parseErr := parseOptionalTime("quote-as-of", *quoteAsOfValue, time.Now().UTC())
+		if parseErr != nil {
+			log.Error("invalid quote timestamp", "error", parseErr)
+			os.Exit(1)
 		}
 		result, quoteErr := service.SourceOrderbookQuote(ctx, apppaper.SourceOrderbookQuoteRequest{
 			Exchange:     cfg.Exchange.Primary,
@@ -169,6 +168,51 @@ func main() {
 				"created_at", ticket.CreatedAt.Format(time.RFC3339),
 			)
 		}
+	case "auto-enter":
+		asOf, parseErr := parseOptionalTime("quote-as-of", *quoteAsOfValue, time.Now().UTC())
+		if parseErr != nil {
+			log.Error("invalid quote timestamp", "error", parseErr)
+			os.Exit(1)
+		}
+		result, enterErr := service.ReconcilePaperEntryWithQuote(ctx, apppaper.ReconcilePaperEntryWithQuoteRequest{
+			ValidationID:     *validationID,
+			TicketID:         *ticketID,
+			FillID:           *fillID,
+			PositionID:       *positionID,
+			Symbol:           *symbol,
+			Interval:         *interval,
+			Liquidity:        liquidity,
+			Costs:            costs,
+			AsOf:             asOf,
+			MaxStaleness:     time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
+			MaxSpreadBPS:     decimal.NewFromInt(int64(cfg.Risk.MaxSpreadBps)),
+			PendingScanLimit: *pendingScanLimit,
+			QuoteScanLimit:   *quoteScanLimit,
+		})
+		if enterErr != nil {
+			log.Error("paper auto entry reconciliation failed", "error", enterErr)
+			os.Exit(1)
+		}
+		log.Info(
+			"paper auto entry reconciliation recorded",
+			"validation_id", result.Record.ValidationID,
+			"ticket_id", result.Ticket.TicketID,
+			"fill_id", result.Fill.FillID,
+			"position_id", result.Position.PositionID,
+			"quote_sourced", result.QuoteSourced,
+			"used_existing_fill", result.UsedExistingFill,
+			"liquidity", result.Fill.Liquidity,
+			"mid_price", result.Fill.MidPrice.String(),
+			"executed_price", result.Fill.ExecutedPrice.String(),
+			"quantity", result.Fill.Quantity.String(),
+			"notional", result.Fill.Notional.String(),
+			"fee", result.Fill.Fee.String(),
+			"open_risk", result.Position.OpenRisk.String(),
+			"fill_inserted", result.FillStats.Inserted,
+			"fill_skipped", result.FillStats.Skipped,
+			"position_inserted", result.PositionStats.Inserted,
+			"position_skipped", result.PositionStats.Skipped,
+		)
 	case "enter":
 		result, enterErr := service.ReconcileTicketFillAtMarket(ctx, apppaper.ReconcileTicketFillAtMarketRequest{
 			FillID:     *fillID,
@@ -266,6 +310,24 @@ func main() {
 	}
 }
 
+func actionRequiresCosts(action string) bool {
+	switch action {
+	case "auto-enter", "enter", "fill", "settle":
+		return true
+	default:
+		return false
+	}
+}
+
+func actionRequiresManualMarketObservation(action string) bool {
+	switch action {
+	case "enter", "fill", "settle":
+		return true
+	default:
+		return false
+	}
+}
+
 func paperExecutionCostModel(cfg *config.Config, spreadBPSOverride int, slippageBPSOverride int) (domainbacktest.CostModel, error) {
 	spreadBPS := spreadBPSOverride
 	if spreadBPS < 0 {
@@ -344,4 +406,11 @@ func parseRequiredTime(field string, value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%s must be RFC3339: %w", field, err)
 	}
 	return parsed.UTC(), nil
+}
+
+func parseOptionalTime(field string, value string, fallback time.Time) (time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return fallback.UTC(), nil
+	}
+	return parseRequiredTime(field, value)
 }
