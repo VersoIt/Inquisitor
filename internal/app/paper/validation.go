@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/VersoIt/Inquisitor/internal/clock"
+	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
 	domainresearch "github.com/VersoIt/Inquisitor/internal/research"
 )
@@ -31,6 +32,7 @@ type Service struct {
 	closes      domainpaper.PositionCloseRepository
 	equity      domainpaper.EquityEventRepository
 	performance domainpaper.DailyPerformanceRepository
+	orderbooks  marketdata.OrderbookSnapshotRepository
 	generator   SimulationTradeGenerator
 	clock       clock.Clock
 	idGenerator IDGenerator
@@ -125,6 +127,12 @@ func WithPositionCloseRepository(closes domainpaper.PositionCloseRepository) Opt
 func WithEquityEventRepository(equity domainpaper.EquityEventRepository) Option {
 	return func(service *Service) {
 		service.equity = equity
+	}
+}
+
+func WithOrderbookSnapshotRepository(orderbooks marketdata.OrderbookSnapshotRepository) Option {
+	return func(service *Service) {
+		service.orderbooks = orderbooks
 	}
 }
 

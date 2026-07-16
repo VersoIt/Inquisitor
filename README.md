@@ -70,10 +70,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 equity-ledger performance report that summarizes live-paper accounting events and can persist UTC daily snapshots from the close/equity journal.
 - Initial Phase 7 paper position settlement use case that safely chains position close recording and equity accounting, allowing retries to continue after a close was already persisted.
 - Initial Phase 7 conservative paper market execution helpers that derive simulated entry/exit fills from mid price plus fee/spread/slippage assumptions before recording fills or settlements.
-- Initial Phase 7 paper entry reconciliation and execution CLI that selects pending tickets, records conservative entry fills, opens paper positions, and settles positions from observed mid prices without sending exchange orders.
+- Initial Phase 7 paper quote sourcing, entry reconciliation, and execution CLI that selects pending tickets, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, and settles positions without sending exchange orders.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add live-market quote sourcing on top of immutable tickets/fills/open/close/equity journals. Exchange order placement remains intentionally absent.
+The next Phase 7 slices should wire quote sourcing into automated paper entry reconciliation on top of immutable tickets/fills/open/close/equity journals. Exchange order placement remains intentionally absent.
 
 ## What This Is Not
 
@@ -404,6 +404,12 @@ List pending immutable paper order tickets that do not yet have a fill:
 go run ./cmd/paper-execute -config configs/config.example.yaml -action pending -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -pending-limit 100
 ```
 
+Source a fresh persisted orderbook quote for paper execution. The command fails closed when the latest snapshot is stale or the spread exceeds `risk.max_spread_bps`:
+
+```powershell
+go run ./cmd/paper-execute -config configs/config.example.yaml -action quote -symbol BTCUSDT
+```
+
 Reconcile a conservative paper entry from an existing immutable paper order ticket and an observed market mid price. This writes the fill journal and opens the corresponding paper position idempotently; it does not send an exchange order:
 
 ```powershell
@@ -466,6 +472,7 @@ make paper-equity-report VALIDATION_ID=paper_validation_001
 make paper-start VALIDATION_ID=paper_validation_001
 make paper-complete VALIDATION_ID=paper_validation_001
 make paper-cancel VALIDATION_ID=paper_validation_001 PAPER_CANCEL_REASON="operator requested stop"
+make paper-quote PAPER_SYMBOL=BTCUSDT
 make paper-pending VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
