@@ -30,8 +30,8 @@ func main() {
 	eventID := flag.String("event-id", "", "stable paper equity event id for action=auto-exit or action=settle")
 	closeID := flag.String("close-id", "", "stable paper position close id for action=auto-exit or action=settle")
 	positionID := flag.String("position-id", "", "paper open position id for action=auto-enter, action=auto-exit, action=enter, or action=settle")
-	symbol := flag.String("symbol", "", "optional symbol filter for action=pending, action=auto-enter, action=auto-exit, or action=auto-cycle")
-	interval := flag.String("interval", "", "optional interval filter for action=pending, action=auto-enter, action=auto-exit, or action=auto-cycle")
+	symbol := flag.String("symbol", "", "optional symbol filter for action=pending, action=auto-enter, or action=auto-exit; required for action=auto-cycle")
+	interval := flag.String("interval", "", "optional interval filter for action=pending, action=auto-enter, or action=auto-exit; required for action=auto-cycle")
 	pendingLimit := flag.Int("pending-limit", 100, "maximum pending tickets returned by action=pending")
 	pendingScanLimit := flag.Int("pending-scan-limit", 1000, "maximum tickets scanned by action=pending, action=auto-enter, or action=auto-cycle")
 	positionScanLimit := flag.Int("position-scan-limit", 1000, "maximum open positions scanned by action=auto-exit or action=auto-cycle")
@@ -300,6 +300,11 @@ func main() {
 			log.Error("invalid paper execution cycle delay", "cycle_delay", cycleDelay.String())
 			os.Exit(1)
 		}
+		scope, scopeErr := requirePaperExecutionCycleScope(*symbol, *interval)
+		if scopeErr != nil {
+			log.Error("invalid paper execution cycle scope", "error", scopeErr)
+			os.Exit(1)
+		}
 		for cycle := 1; cycle <= *cycleLimit; cycle++ {
 			asOf, parseErr := parseOptionalTime("quote-as-of", *quoteAsOfValue, time.Now().UTC())
 			if parseErr != nil {
@@ -308,8 +313,8 @@ func main() {
 			}
 			result, cycleErr := service.RunPaperExecutionCycle(ctx, apppaper.RunPaperExecutionCycleRequest{
 				ValidationID:      *validationID,
-				Symbol:            *symbol,
-				Interval:          *interval,
+				Symbol:            scope.Symbol,
+				Interval:          scope.Interval,
 				Liquidity:         liquidity,
 				Costs:             costs,
 				AsOf:              asOf,
@@ -445,6 +450,23 @@ func actionRequiresManualMarketObservation(action string) bool {
 
 type paperExecutionLogger interface {
 	Info(msg string, keyValues ...any)
+}
+
+type paperExecutionCycleScope struct {
+	Symbol   string
+	Interval string
+}
+
+func requirePaperExecutionCycleScope(symbolValue string, intervalValue string) (paperExecutionCycleScope, error) {
+	symbol := strings.ToUpper(strings.TrimSpace(symbolValue))
+	interval := strings.TrimSpace(intervalValue)
+	if symbol == "" {
+		return paperExecutionCycleScope{}, fmt.Errorf("symbol is required for action=auto-cycle")
+	}
+	if interval == "" {
+		return paperExecutionCycleScope{}, fmt.Errorf("interval is required for action=auto-cycle")
+	}
+	return paperExecutionCycleScope{Symbol: symbol, Interval: interval}, nil
 }
 
 func logPaperExecutionCycleResult(log paperExecutionLogger, cycle int, result apppaper.RunPaperExecutionCycleResult) {

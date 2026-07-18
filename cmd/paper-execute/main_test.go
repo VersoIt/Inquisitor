@@ -221,6 +221,65 @@ func TestPaperExecutionActionClassificationTableDriven(t *testing.T) {
 	}
 }
 
+func TestRequirePaperExecutionCycleScopeTableDriven(t *testing.T) {
+	tests := []struct {
+		name         string
+		symbol       string
+		interval     string
+		wantSymbol   string
+		wantInterval string
+		wantErrSub   string
+	}{
+		{
+			name:         "explicit scope",
+			symbol:       "BTCUSDT",
+			interval:     "1",
+			wantSymbol:   "BTCUSDT",
+			wantInterval: "1",
+		},
+		{
+			name:         "normalizes symbol and trims interval",
+			symbol:       " btcusdt ",
+			interval:     " 5 ",
+			wantSymbol:   "BTCUSDT",
+			wantInterval: "5",
+		},
+		{
+			name:       "missing symbol",
+			symbol:     " ",
+			interval:   "1",
+			wantErrSub: "symbol",
+		},
+		{
+			name:       "missing interval",
+			symbol:     "BTCUSDT",
+			interval:   " ",
+			wantErrSub: "interval",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := requirePaperExecutionCycleScope(tt.symbol, tt.interval)
+			if tt.wantErrSub != "" {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("require cycle scope: %v", err)
+			}
+			if got.Symbol != tt.wantSymbol || got.Interval != tt.wantInterval {
+				t.Fatalf("scope mismatch: got %#v, want symbol=%q interval=%q", got, tt.wantSymbol, tt.wantInterval)
+			}
+		})
+	}
+}
+
 func TestParsePaperExecutionDecimalTableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
