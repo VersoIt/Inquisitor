@@ -193,6 +193,34 @@ func TestPaperExecutionSafetyPolicyRejectsUnsafeConfigTableDriven(t *testing.T) 
 	}
 }
 
+func TestPaperExecutionActionClassificationTableDriven(t *testing.T) {
+	tests := []struct {
+		action                string
+		wantCosts             bool
+		wantManualObservation bool
+	}{
+		{action: "quote"},
+		{action: "pending"},
+		{action: "auto-enter", wantCosts: true},
+		{action: "auto-exit", wantCosts: true},
+		{action: "auto-cycle", wantCosts: true},
+		{action: "enter", wantCosts: true, wantManualObservation: true},
+		{action: "fill", wantCosts: true, wantManualObservation: true},
+		{action: "settle", wantCosts: true, wantManualObservation: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			if got := actionRequiresCosts(tt.action); got != tt.wantCosts {
+				t.Fatalf("actionRequiresCosts(%q) = %t, want %t", tt.action, got, tt.wantCosts)
+			}
+			if got := actionRequiresManualMarketObservation(tt.action); got != tt.wantManualObservation {
+				t.Fatalf("actionRequiresManualMarketObservation(%q) = %t, want %t", tt.action, got, tt.wantManualObservation)
+			}
+		})
+	}
+}
+
 func TestParsePaperExecutionDecimalTableDriven(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -19,22 +19,26 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
+const maxPaperExecutionCycleLimit = 1000
+
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
-	action := flag.String("action", "", "action: quote, pending, auto-enter, auto-exit, enter, fill, settle")
-	validationID := flag.String("validation-id", "", "paper validation id for action=pending, action=auto-enter, or action=auto-exit")
+	action := flag.String("action", "", "action: quote, pending, auto-enter, auto-exit, auto-cycle, enter, fill, settle")
+	validationID := flag.String("validation-id", "", "paper validation id for action=pending, action=auto-enter, action=auto-exit, or action=auto-cycle")
 	fillID := flag.String("fill-id", "", "stable paper fill id for action=auto-enter, action=enter, or action=fill")
 	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=auto-enter, action=enter, or action=fill")
 	eventID := flag.String("event-id", "", "stable paper equity event id for action=auto-exit or action=settle")
 	closeID := flag.String("close-id", "", "stable paper position close id for action=auto-exit or action=settle")
 	positionID := flag.String("position-id", "", "paper open position id for action=auto-enter, action=auto-exit, action=enter, or action=settle")
-	symbol := flag.String("symbol", "", "optional symbol filter for action=pending, action=auto-enter, or action=auto-exit")
-	interval := flag.String("interval", "", "optional interval filter for action=pending, action=auto-enter, or action=auto-exit")
+	symbol := flag.String("symbol", "", "optional symbol filter for action=pending, action=auto-enter, action=auto-exit, or action=auto-cycle")
+	interval := flag.String("interval", "", "optional interval filter for action=pending, action=auto-enter, action=auto-exit, or action=auto-cycle")
 	pendingLimit := flag.Int("pending-limit", 100, "maximum pending tickets returned by action=pending")
-	pendingScanLimit := flag.Int("pending-scan-limit", 1000, "maximum tickets scanned by action=pending or action=auto-enter")
-	positionScanLimit := flag.Int("position-scan-limit", 1000, "maximum open positions scanned by action=auto-exit")
-	quoteAsOfValue := flag.String("quote-as-of", "", "quote observation time in RFC3339 format; defaults to now for action=quote, action=auto-enter, or action=auto-exit")
-	quoteScanLimit := flag.Int("quote-scan-limit", 1000, "maximum orderbook snapshots scanned by action=quote, action=auto-enter, or action=auto-exit")
+	pendingScanLimit := flag.Int("pending-scan-limit", 1000, "maximum tickets scanned by action=pending, action=auto-enter, or action=auto-cycle")
+	positionScanLimit := flag.Int("position-scan-limit", 1000, "maximum open positions scanned by action=auto-exit or action=auto-cycle")
+	cycleLimit := flag.Int("cycle-limit", 1, "bounded execution cycles for action=auto-cycle")
+	cycleDelay := flag.Duration("cycle-delay", 0, "optional delay between action=auto-cycle iterations")
+	quoteAsOfValue := flag.String("quote-as-of", "", "quote observation time in RFC3339 format; defaults to now for action=quote, action=auto-enter, action=auto-exit, or action=auto-cycle")
+	quoteScanLimit := flag.Int("quote-scan-limit", 1000, "maximum orderbook snapshots scanned by action=quote, action=auto-enter, action=auto-exit, or action=auto-cycle")
 	midPriceValue := flag.String("mid-price", "", "observed market mid price used for conservative simulated execution")
 	liquidityValue := flag.String("liquidity", string(domainbacktest.LiquidityTaker), "simulated liquidity role: MAKER or TAKER")
 	closeReasonValue := flag.String("close-reason", string(domainpaper.PositionCloseReasonManual), "close reason for action=settle")
@@ -287,6 +291,43 @@ func main() {
 			"equity_inserted", result.EquityStats.Inserted,
 			"equity_skipped", result.EquityStats.Skipped,
 		)
+	case "auto-cycle":
+		if *cycleLimit <= 0 || *cycleLimit > maxPaperExecutionCycleLimit {
+			log.Error("invalid paper execution cycle limit", "cycle_limit", *cycleLimit, "max", maxPaperExecutionCycleLimit)
+			os.Exit(1)
+		}
+		if *cycleDelay < 0 {
+			log.Error("invalid paper execution cycle delay", "cycle_delay", cycleDelay.String())
+			os.Exit(1)
+		}
+		for cycle := 1; cycle <= *cycleLimit; cycle++ {
+			asOf, parseErr := parseOptionalTime("quote-as-of", *quoteAsOfValue, time.Now().UTC())
+			if parseErr != nil {
+				log.Error("invalid quote timestamp", "error", parseErr)
+				os.Exit(1)
+			}
+			result, cycleErr := service.RunPaperExecutionCycle(ctx, apppaper.RunPaperExecutionCycleRequest{
+				ValidationID:      *validationID,
+				Symbol:            *symbol,
+				Interval:          *interval,
+				Liquidity:         liquidity,
+				Costs:             costs,
+				AsOf:              asOf,
+				MaxStaleness:      time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
+				MaxSpreadBPS:      decimal.NewFromInt(int64(cfg.Risk.MaxSpreadBps)),
+				PendingScanLimit:  *pendingScanLimit,
+				PositionScanLimit: *positionScanLimit,
+				QuoteScanLimit:    *quoteScanLimit,
+			})
+			if cycleErr != nil {
+				log.Error("paper execution cycle failed", "cycle", cycle, "error", cycleErr)
+				os.Exit(1)
+			}
+			logPaperExecutionCycleResult(log, cycle, result)
+			if cycle < *cycleLimit && *cycleDelay > 0 {
+				time.Sleep(*cycleDelay)
+			}
+		}
 	case "enter":
 		result, enterErr := service.ReconcileTicketFillAtMarket(ctx, apppaper.ReconcileTicketFillAtMarketRequest{
 			FillID:     *fillID,
@@ -386,7 +427,7 @@ func main() {
 
 func actionRequiresCosts(action string) bool {
 	switch action {
-	case "auto-enter", "auto-exit", "enter", "fill", "settle":
+	case "auto-enter", "auto-exit", "auto-cycle", "enter", "fill", "settle":
 		return true
 	default:
 		return false
@@ -399,6 +440,70 @@ func actionRequiresManualMarketObservation(action string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+type paperExecutionLogger interface {
+	Info(msg string, keyValues ...any)
+}
+
+func logPaperExecutionCycleResult(log paperExecutionLogger, cycle int, result apppaper.RunPaperExecutionCycleResult) {
+	switch result.Action {
+	case apppaper.PaperExecutionCycleActionExit:
+		log.Info(
+			"paper execution cycle recorded exit",
+			"cycle", cycle,
+			"validation_id", result.Record.ValidationID,
+			"position_id", result.Exit.Position.PositionID,
+			"close_id", result.Exit.Close.CloseID,
+			"event_id", result.Exit.Event.EventID,
+			"close_reason", result.Exit.CloseReason,
+			"used_existing_close", result.Exit.UsedExistingClose,
+			"net_pnl", result.Exit.Close.NetPnL.String(),
+			"equity_after", result.Exit.Event.EquityAfter.String(),
+			"scanned_positions", result.Exit.ScannedPositions,
+			"closed_positions", result.Exit.ClosedPositions,
+			"checked_positions", result.Exit.CheckedPositions,
+			"close_inserted", result.Exit.CloseStats.Inserted,
+			"close_skipped", result.Exit.CloseStats.Skipped,
+			"equity_inserted", result.Exit.EquityStats.Inserted,
+			"equity_skipped", result.Exit.EquityStats.Skipped,
+		)
+	case apppaper.PaperExecutionCycleActionEntry:
+		log.Info(
+			"paper execution cycle recorded entry",
+			"cycle", cycle,
+			"validation_id", result.Record.ValidationID,
+			"ticket_id", result.Entry.Ticket.TicketID,
+			"fill_id", result.Entry.Fill.FillID,
+			"position_id", result.Entry.Position.PositionID,
+			"used_existing_fill", result.Entry.UsedExistingFill,
+			"mid_price", result.Entry.Fill.MidPrice.String(),
+			"executed_price", result.Entry.Fill.ExecutedPrice.String(),
+			"open_risk", result.Entry.Position.OpenRisk.String(),
+			"pending", result.PendingTickets,
+			"scanned_tickets", result.ScannedTickets,
+			"filled_tickets", result.FilledTickets,
+			"fill_inserted", result.Entry.FillStats.Inserted,
+			"fill_skipped", result.Entry.FillStats.Skipped,
+			"position_inserted", result.Entry.PositionStats.Inserted,
+			"position_skipped", result.Entry.PositionStats.Skipped,
+		)
+	default:
+		log.Info(
+			"paper execution cycle skipped",
+			"cycle", cycle,
+			"validation_id", result.Record.ValidationID,
+			"skip_reason", result.SkipReason,
+			"exit_position_found", result.Exit.PositionFound,
+			"exit_triggered", result.Exit.ExitTriggered,
+			"scanned_positions", result.Exit.ScannedPositions,
+			"closed_positions", result.Exit.ClosedPositions,
+			"checked_positions", result.Exit.CheckedPositions,
+			"pending", result.PendingTickets,
+			"scanned_tickets", result.ScannedTickets,
+			"filled_tickets", result.FilledTickets,
+		)
 	}
 }
 
