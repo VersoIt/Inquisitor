@@ -70,7 +70,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 equity-ledger performance report that summarizes live-paper accounting events and can persist UTC daily snapshots from the close/equity journal.
 - Initial Phase 7 paper position settlement use case that safely chains position close recording and equity accounting, allowing retries to continue after a close was already persisted.
 - Initial Phase 7 conservative paper market execution helpers that derive simulated entry/exit fills from mid price plus fee/spread/slippage assumptions before recording fills or settlements.
-- Initial Phase 7 automated paper entry/exit reconciliation, bounded execution-cycle CLI, app-layer explicit-scope guard, preflight guard, and Docker-backed smoke script that selects pending tickets/open positions, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, verifies duplicate-entry prevention, and settles triggered stop-loss/take-profit exits without sending exchange orders.
+- Initial Phase 7 automated paper entry/exit reconciliation, bounded execution-cycle CLI, app-layer explicit-scope guard, locked preflight guard, and Docker-backed smoke script that selects pending tickets/open positions, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, verifies duplicate-entry prevention, and settles triggered stop-loss/take-profit exits without sending exchange orders.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
 The next Phase 7 slices should add stronger operational guardrails around the bounded paper-only execution cycle. Exchange order placement remains intentionally absent.
@@ -422,13 +422,13 @@ Automatically reconcile open paper exits by sourcing a fresh orderbook quote and
 go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-exit -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER
 ```
 
-Run a bounded paper execution cycle. Each cycle checks exits first, records at most one exit or one entry, and skips entry while any active open position remains. The CLI and application use case require an explicit `-symbol` and `-interval` for this action and validate scan limits before storage work. The CLI also takes a PostgreSQL advisory lock for that validation/symbol/interval, so a deployment loop cannot accidentally scan a whole validation scope or run two competing workers for the same paper market:
+Run a bounded paper execution cycle. Each cycle checks exits first, records at most one exit or one entry, and skips entry while any active open position remains. The CLI and application use case require an explicit `-symbol` and `-interval` for this action and validate scan limits before storage work. The CLI also takes a PostgreSQL advisory lock for that validation/symbol/interval, shared with cycle preflight, so a deployment loop cannot accidentally scan a whole validation scope or run two competing workers for the same paper market:
 
 ```powershell
 go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-cycle -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER -cycle-limit 1
 ```
 
-Preflight the same paper execution-cycle scope without writing fills, positions, closes, or equity events. It checks paper safety config, RUNNING validation status, fresh quote availability, pending-ticket counts, and active/closed position counts:
+Preflight the same paper execution-cycle scope without writing fills, positions, closes, or equity events. It uses the same validation/symbol/interval advisory lock as `auto-cycle`, then checks paper safety config, RUNNING validation status, fresh quote availability, pending-ticket counts, and active/closed position counts:
 
 ```powershell
 go run ./cmd/paper-execute -config configs/config.example.yaml -action cycle-preflight -validation-id paper_validation_001 -symbol BTCUSDT -interval 1

@@ -200,13 +200,14 @@ func TestPaperExecutionActionClassificationTableDriven(t *testing.T) {
 		action                string
 		wantCosts             bool
 		wantManualObservation bool
+		wantCycleLock         bool
 	}{
 		{action: "quote"},
 		{action: "pending"},
 		{action: "auto-enter", wantCosts: true},
 		{action: "auto-exit", wantCosts: true},
-		{action: "cycle-preflight", wantCosts: true},
-		{action: "auto-cycle", wantCosts: true},
+		{action: "cycle-preflight", wantCosts: true, wantCycleLock: true},
+		{action: "auto-cycle", wantCosts: true, wantCycleLock: true},
 		{action: "enter", wantCosts: true, wantManualObservation: true},
 		{action: "fill", wantCosts: true, wantManualObservation: true},
 		{action: "settle", wantCosts: true, wantManualObservation: true},
@@ -219,6 +220,9 @@ func TestPaperExecutionActionClassificationTableDriven(t *testing.T) {
 			}
 			if got := actionRequiresManualMarketObservation(tt.action); got != tt.wantManualObservation {
 				t.Fatalf("actionRequiresManualMarketObservation(%q) = %t, want %t", tt.action, got, tt.wantManualObservation)
+			}
+			if got := actionRequiresPaperExecutionCycleLock(tt.action); got != tt.wantCycleLock {
+				t.Fatalf("actionRequiresPaperExecutionCycleLock(%q) = %t, want %t", tt.action, got, tt.wantCycleLock)
 			}
 		})
 	}
@@ -413,6 +417,62 @@ func TestAcquirePaperExecutionCycleLockTableDriven(t *testing.T) {
 				} else if err != nil {
 					t.Fatalf("unlock: %v", err)
 				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("sql expectations: %v", err)
+			}
+		})
+	}
+}
+
+func TestAcquireRequiredPaperExecutionCycleLockTableDriven(t *testing.T) {
+	ctx := context.Background()
+	scope := paperExecutionCycleScope{ValidationID: "paper_validation_001", Symbol: "BTCUSDT", Interval: "1"}
+	key := paperExecutionCycleLockKey(scope)
+
+	tests := []struct {
+		name       string
+		action     string
+		wantErrSub string
+	}{
+		{name: "cycle preflight uses cycle lock", action: "cycle-preflight"},
+		{name: "auto cycle uses cycle lock", action: "auto-cycle"},
+		{name: "non cycle action rejected", action: "quote", wantErrSub: "not required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sqlDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer sqlDB.Close()
+
+			if tt.wantErrSub == "" {
+				mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+				mock.ExpectQuery("SELECT pg_advisory_unlock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
+			}
+
+			unlock, lockErr := acquireRequiredPaperExecutionCycleLock(ctx, sqlDB, tt.action, scope)
+			if tt.wantErrSub != "" {
+				if lockErr == nil {
+					t.Fatal("expected error")
+				}
+				if !strings.Contains(lockErr.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, lockErr)
+				}
+				if unlock != nil {
+					t.Fatal("unlock must be nil for non-cycle action")
+				}
+				return
+			}
+			if lockErr != nil {
+				t.Fatalf("acquire required lock: %v", lockErr)
+			}
+			if err := unlock(ctx); err != nil {
+				t.Fatalf("unlock: %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("sql expectations: %v", err)

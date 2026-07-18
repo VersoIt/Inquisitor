@@ -23,6 +23,9 @@ import (
 
 const maxPaperExecutionCycleLimit = 1000
 
+// Keep the original namespace stable so rolling deploys share the same advisory lock key.
+const paperExecutionCycleLockNamespace = "paper-execute:auto-cycle"
+
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
 	action := flag.String("action", "", "action: quote, pending, auto-enter, auto-exit, cycle-preflight, auto-cycle, enter, fill, settle")
@@ -304,6 +307,16 @@ func main() {
 			log.Error("invalid quote timestamp", "error", parseErr)
 			os.Exit(1)
 		}
+		unlock, lockErr := acquireRequiredPaperExecutionCycleLock(ctx, db, actionName, scope)
+		if lockErr != nil {
+			log.Error("paper execution cycle lock failed", "error", lockErr)
+			os.Exit(1)
+		}
+		defer func() {
+			if unlockErr := unlock(context.Background()); unlockErr != nil {
+				log.Error("paper execution cycle lock release failed", "error", unlockErr)
+			}
+		}()
 		result, preflightErr := service.PreflightPaperExecutionCycle(ctx, apppaper.PreflightPaperExecutionCycleRequest{
 			ValidationID:      scope.ValidationID,
 			Exchange:          cfg.Exchange.Primary,
@@ -352,7 +365,7 @@ func main() {
 			log.Error("invalid paper execution cycle scope", "error", scopeErr)
 			os.Exit(1)
 		}
-		unlock, lockErr := acquirePaperExecutionCycleLock(ctx, db, scope)
+		unlock, lockErr := acquireRequiredPaperExecutionCycleLock(ctx, db, actionName, scope)
 		if lockErr != nil {
 			log.Error("paper execution cycle lock failed", "error", lockErr)
 			os.Exit(1)
@@ -505,6 +518,15 @@ func actionRequiresManualMarketObservation(action string) bool {
 	}
 }
 
+func actionRequiresPaperExecutionCycleLock(action string) bool {
+	switch action {
+	case "cycle-preflight", "auto-cycle":
+		return true
+	default:
+		return false
+	}
+}
+
 type paperExecutionLogger interface {
 	Info(msg string, keyValues ...any)
 }
@@ -570,9 +592,16 @@ func acquirePaperExecutionCycleLock(ctx context.Context, db *sql.DB, scope paper
 	}, nil
 }
 
+func acquireRequiredPaperExecutionCycleLock(ctx context.Context, db *sql.DB, action string, scope paperExecutionCycleScope) (paperExecutionCycleUnlock, error) {
+	if !actionRequiresPaperExecutionCycleLock(action) {
+		return nil, fmt.Errorf("paper execution cycle lock is not required for action=%q", action)
+	}
+	return acquirePaperExecutionCycleLock(ctx, db, scope)
+}
+
 func paperExecutionCycleLockKey(scope paperExecutionCycleScope) int64 {
 	hash := fnv.New64a()
-	_, _ = hash.Write([]byte("paper-execute:auto-cycle"))
+	_, _ = hash.Write([]byte(paperExecutionCycleLockNamespace))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(scope.ValidationID))
 	_, _ = hash.Write([]byte{0})
