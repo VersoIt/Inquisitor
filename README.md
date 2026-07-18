@@ -428,7 +428,7 @@ Run a bounded paper execution cycle. Each cycle checks exits first, records at m
 go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-cycle -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER -cycle-limit 1
 ```
 
-Run the Docker-backed smoke for the bounded cycle. It applies migrations, seeds a repeatable RUNNING paper validation with one approved paper ticket and one fresh orderbook snapshot, then runs two cycles: the first opens the position, the second proves the active-position guard prevents a duplicate entry. The script writes a temporary paper-enabled config and does not modify `configs/config.example.yaml`:
+Run the Docker-backed smoke for the bounded cycle. It applies migrations, seeds a repeatable RUNNING paper validation with one approved paper ticket and fresh orderbook snapshots, then verifies entry, duplicate-entry prevention while the position is active, take-profit close, and equity-ledger accounting. The script writes a temporary paper-enabled config and does not modify `configs/config.example.yaml`:
 
 ```powershell
 .\scripts\paper-cycle-smoke.ps1

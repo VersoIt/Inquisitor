@@ -117,6 +117,8 @@ if ($health -ne "healthy" -and $health -ne "running") {
 $smokeConfig = New-PaperEnabledConfig -SourceConfig $Config -ValidationID $ValidationID
 $quoteAsOfUtc = ([DateTimeOffset]::Parse($QuoteAsOf)).UtcDateTime
 $quoteAtUtc = $quoteAsOfUtc.AddSeconds(-1)
+$exitQuoteAsOfUtc = $quoteAsOfUtc.AddMinutes(1)
+$exitQuoteAtUtc = $exitQuoteAsOfUtc.AddSeconds(-1)
 $plannedAtUtc = $quoteAtUtc.AddDays(-7)
 $startedAtUtc = $plannedAtUtc.AddMinutes(1)
 $windowStartUtc = $plannedAtUtc.AddDays(-2)
@@ -133,6 +135,8 @@ $ticketIDSql = Escape-SqlLiteral "$($ValidationID)_ticket"
 $positionIDSql = Escape-SqlLiteral "$($ValidationID)_ticket_position"
 $quoteAsOfSql = Format-UtcTimestamp $quoteAsOfUtc
 $quoteAtSql = Format-UtcTimestamp $quoteAtUtc
+$exitQuoteAsOfSql = Format-UtcTimestamp $exitQuoteAsOfUtc
+$exitQuoteAtSql = Format-UtcTimestamp $exitQuoteAtUtc
 $plannedAtSql = Format-UtcTimestamp $plannedAtUtc
 $startedAtSql = Format-UtcTimestamp $startedAtUtc
 $windowStartSql = Format-UtcTimestamp $windowStartUtc
@@ -163,7 +167,7 @@ DELETE FROM orderbook_snapshots
 WHERE exchange = 'bybit'
   AND category = 'linear'
   AND symbol = '$symbolSql'
-  AND update_id = 970718001;
+  AND update_id IN (970718001, 970718002);
 
 INSERT INTO hypotheses (
     name, version, status, source_path, content_sha256, spec_json, raw_yaml, imported_at
@@ -344,5 +348,59 @@ Assert-Equal "open position count" $positionCount "1"
 Assert-Equal "close count" $closeCount "0"
 Assert-Equal "equity event count" $equityCount "0"
 Assert-Equal "pending ticket count after fill" $pendingCount "0"
+
+Write-Host "Seeding take-profit quote for the exit cycle"
+Invoke-PostgresScript @"
+INSERT INTO orderbook_snapshots (
+    exchange, category, symbol, depth, bids_json, asks_json,
+    best_bid, best_ask, spread, spread_bps, update_id, sequence,
+    exchange_time, matching_engine_time, created_at
+) VALUES (
+    'bybit',
+    'linear',
+    '$symbolSql',
+    1,
+    '[["102090","1"]]'::jsonb,
+    '[["102110","1"]]'::jsonb,
+    102090,
+    102110,
+    20,
+    1.95906758080313418217,
+    970718002,
+    970718002,
+    '$exitQuoteAtSql',
+    '$exitQuoteAtSql',
+    '$exitQuoteAtSql'
+);
+"@
+
+Write-Host "Running take-profit paper execution cycle"
+& go run ./cmd/paper-execute `
+    -config $smokeConfig `
+    -action auto-cycle `
+    -validation-id $ValidationID `
+    -symbol $Symbol `
+    -interval $Interval `
+    -liquidity TAKER `
+    -quote-as-of $exitQuoteAsOfSql `
+    -cycle-limit 1 `
+    -pending-scan-limit 10 `
+    -position-scan-limit 10 `
+    -quote-scan-limit 10
+if ($LASTEXITCODE -ne 0) {
+    throw "paper take-profit auto-cycle smoke failed with exit code $LASTEXITCODE"
+}
+
+$closeCount = Invoke-PostgresScalar "SELECT count(*) FROM paper_position_closes WHERE validation_id = '$validationIDSql' AND position_id = '$positionIDSql';"
+$equityCount = Invoke-PostgresScalar "SELECT count(*) FROM paper_equity_events WHERE validation_id = '$validationIDSql' AND position_id = '$positionIDSql';"
+$takeProfitCloseCount = Invoke-PostgresScalar "SELECT count(*) FROM paper_position_closes WHERE validation_id = '$validationIDSql' AND position_id = '$positionIDSql' AND close_reason = 'TAKE_PROFIT';"
+$equitySequence = Invoke-PostgresScalar "SELECT sequence_number FROM paper_equity_events WHERE validation_id = '$validationIDSql' AND position_id = '$positionIDSql';"
+$profitableCloseCount = Invoke-PostgresScalar "SELECT count(*) FROM paper_position_closes WHERE validation_id = '$validationIDSql' AND position_id = '$positionIDSql' AND net_pnl > 0;"
+
+Assert-Equal "close count after take profit" $closeCount "1"
+Assert-Equal "equity event count after take profit" $equityCount "1"
+Assert-Equal "take-profit close count" $takeProfitCloseCount "1"
+Assert-Equal "equity sequence" $equitySequence "1"
+Assert-Equal "profitable close count" $profitableCloseCount "1"
 
 Write-Host "Paper execution cycle smoke passed for $ValidationID"
