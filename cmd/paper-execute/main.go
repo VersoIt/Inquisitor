@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"strconv"
 	"strings"
@@ -300,11 +302,21 @@ func main() {
 			log.Error("invalid paper execution cycle delay", "cycle_delay", cycleDelay.String())
 			os.Exit(1)
 		}
-		scope, scopeErr := requirePaperExecutionCycleScope(*symbol, *interval)
+		scope, scopeErr := requirePaperExecutionCycleScope(*validationID, *symbol, *interval)
 		if scopeErr != nil {
 			log.Error("invalid paper execution cycle scope", "error", scopeErr)
 			os.Exit(1)
 		}
+		unlock, lockErr := acquirePaperExecutionCycleLock(ctx, db, scope)
+		if lockErr != nil {
+			log.Error("paper execution cycle lock failed", "error", lockErr)
+			os.Exit(1)
+		}
+		defer func() {
+			if unlockErr := unlock(context.Background()); unlockErr != nil {
+				log.Error("paper execution cycle lock release failed", "error", unlockErr)
+			}
+		}()
 		for cycle := 1; cycle <= *cycleLimit; cycle++ {
 			asOf, parseErr := parseOptionalTime("quote-as-of", *quoteAsOfValue, time.Now().UTC())
 			if parseErr != nil {
@@ -312,7 +324,7 @@ func main() {
 				os.Exit(1)
 			}
 			result, cycleErr := service.RunPaperExecutionCycle(ctx, apppaper.RunPaperExecutionCycleRequest{
-				ValidationID:      *validationID,
+				ValidationID:      scope.ValidationID,
 				Symbol:            scope.Symbol,
 				Interval:          scope.Interval,
 				Liquidity:         liquidity,
@@ -453,20 +465,76 @@ type paperExecutionLogger interface {
 }
 
 type paperExecutionCycleScope struct {
-	Symbol   string
-	Interval string
+	ValidationID string
+	Symbol       string
+	Interval     string
 }
 
-func requirePaperExecutionCycleScope(symbolValue string, intervalValue string) (paperExecutionCycleScope, error) {
+type paperExecutionCycleUnlock func(context.Context) error
+
+func requirePaperExecutionCycleScope(validationIDValue string, symbolValue string, intervalValue string) (paperExecutionCycleScope, error) {
+	validationID := strings.TrimSpace(validationIDValue)
 	symbol := strings.ToUpper(strings.TrimSpace(symbolValue))
 	interval := strings.TrimSpace(intervalValue)
+	if validationID == "" {
+		return paperExecutionCycleScope{}, fmt.Errorf("validation_id is required for action=auto-cycle")
+	}
 	if symbol == "" {
 		return paperExecutionCycleScope{}, fmt.Errorf("symbol is required for action=auto-cycle")
 	}
 	if interval == "" {
 		return paperExecutionCycleScope{}, fmt.Errorf("interval is required for action=auto-cycle")
 	}
-	return paperExecutionCycleScope{Symbol: symbol, Interval: interval}, nil
+	return paperExecutionCycleScope{ValidationID: validationID, Symbol: symbol, Interval: interval}, nil
+}
+
+func acquirePaperExecutionCycleLock(ctx context.Context, db *sql.DB, scope paperExecutionCycleScope) (paperExecutionCycleUnlock, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database is required")
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reserve advisory lock connection: %w", err)
+	}
+
+	key := paperExecutionCycleLockKey(scope)
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&acquired); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("acquire paper execution cycle advisory lock: %w", err)
+	}
+	if !acquired {
+		_ = conn.Close()
+		return nil, fmt.Errorf("paper execution cycle already running for validation_id=%q symbol=%q interval=%q", scope.ValidationID, scope.Symbol, scope.Interval)
+	}
+
+	return func(unlockCtx context.Context) error {
+		var released bool
+		err := conn.QueryRowContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, key).Scan(&released)
+		closeErr := conn.Close()
+		if err != nil {
+			return fmt.Errorf("release paper execution cycle advisory lock: %w", err)
+		}
+		if !released {
+			return fmt.Errorf("release paper execution cycle advisory lock: lock was not held")
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close advisory lock connection: %w", closeErr)
+		}
+		return nil
+	}, nil
+}
+
+func paperExecutionCycleLockKey(scope paperExecutionCycleScope) int64 {
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte("paper-execute:auto-cycle"))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(scope.ValidationID))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(scope.Symbol))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(scope.Interval))
+	return int64(hash.Sum64())
 }
 
 func logPaperExecutionCycleResult(log paperExecutionLogger, cycle int, result apppaper.RunPaperExecutionCycleResult) {

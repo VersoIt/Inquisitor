@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/shopspring/decimal"
 
 	"github.com/VersoIt/Inquisitor/internal/config"
@@ -223,44 +225,59 @@ func TestPaperExecutionActionClassificationTableDriven(t *testing.T) {
 
 func TestRequirePaperExecutionCycleScopeTableDriven(t *testing.T) {
 	tests := []struct {
-		name         string
-		symbol       string
-		interval     string
-		wantSymbol   string
-		wantInterval string
-		wantErrSub   string
+		name             string
+		validationID     string
+		symbol           string
+		interval         string
+		wantValidationID string
+		wantSymbol       string
+		wantInterval     string
+		wantErrSub       string
 	}{
 		{
-			name:         "explicit scope",
+			name:             "explicit scope",
+			validationID:     "paper_validation_001",
+			symbol:           "BTCUSDT",
+			interval:         "1",
+			wantValidationID: "paper_validation_001",
+			wantSymbol:       "BTCUSDT",
+			wantInterval:     "1",
+		},
+		{
+			name:             "trims validation id symbol and interval",
+			validationID:     " paper_validation_001 ",
+			symbol:           " btcusdt ",
+			interval:         " 5 ",
+			wantValidationID: "paper_validation_001",
+			wantSymbol:       "BTCUSDT",
+			wantInterval:     "5",
+		},
+		{
+			name:         "missing validation id",
+			validationID: " ",
 			symbol:       "BTCUSDT",
 			interval:     "1",
-			wantSymbol:   "BTCUSDT",
-			wantInterval: "1",
+			wantErrSub:   "validation_id",
 		},
 		{
-			name:         "normalizes symbol and trims interval",
-			symbol:       " btcusdt ",
-			interval:     " 5 ",
-			wantSymbol:   "BTCUSDT",
-			wantInterval: "5",
+			name:         "missing symbol",
+			validationID: "paper_validation_001",
+			symbol:       " ",
+			interval:     "1",
+			wantErrSub:   "symbol",
 		},
 		{
-			name:       "missing symbol",
-			symbol:     " ",
-			interval:   "1",
-			wantErrSub: "symbol",
-		},
-		{
-			name:       "missing interval",
-			symbol:     "BTCUSDT",
-			interval:   " ",
-			wantErrSub: "interval",
+			name:         "missing interval",
+			validationID: "paper_validation_001",
+			symbol:       "BTCUSDT",
+			interval:     " ",
+			wantErrSub:   "interval",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := requirePaperExecutionCycleScope(tt.symbol, tt.interval)
+			got, err := requirePaperExecutionCycleScope(tt.validationID, tt.symbol, tt.interval)
 			if tt.wantErrSub != "" {
 				if err == nil {
 					t.Fatal("expected error")
@@ -273,8 +290,131 @@ func TestRequirePaperExecutionCycleScopeTableDriven(t *testing.T) {
 			if err != nil {
 				t.Fatalf("require cycle scope: %v", err)
 			}
-			if got.Symbol != tt.wantSymbol || got.Interval != tt.wantInterval {
-				t.Fatalf("scope mismatch: got %#v, want symbol=%q interval=%q", got, tt.wantSymbol, tt.wantInterval)
+			if got.ValidationID != tt.wantValidationID || got.Symbol != tt.wantSymbol || got.Interval != tt.wantInterval {
+				t.Fatalf("scope mismatch: got %#v, want validation_id=%q symbol=%q interval=%q", got, tt.wantValidationID, tt.wantSymbol, tt.wantInterval)
+			}
+		})
+	}
+}
+
+func TestPaperExecutionCycleLockKeyIsStableAndScoped(t *testing.T) {
+	base := paperExecutionCycleScope{ValidationID: "paper_validation_001", Symbol: "BTCUSDT", Interval: "1"}
+
+	if got, again := paperExecutionCycleLockKey(base), paperExecutionCycleLockKey(base); got != again {
+		t.Fatalf("lock key must be stable: got %d then %d", got, again)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(paperExecutionCycleScope) paperExecutionCycleScope
+	}{
+		{name: "validation id", mutate: func(scope paperExecutionCycleScope) paperExecutionCycleScope {
+			scope.ValidationID = "paper_validation_002"
+			return scope
+		}},
+		{name: "symbol", mutate: func(scope paperExecutionCycleScope) paperExecutionCycleScope {
+			scope.Symbol = "ETHUSDT"
+			return scope
+		}},
+		{name: "interval", mutate: func(scope paperExecutionCycleScope) paperExecutionCycleScope {
+			scope.Interval = "5"
+			return scope
+		}},
+	}
+
+	baseKey := paperExecutionCycleLockKey(base)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := paperExecutionCycleLockKey(tt.mutate(base)); got == baseKey {
+				t.Fatalf("lock key should change when %s changes", tt.name)
+			}
+		})
+	}
+}
+
+func TestAcquirePaperExecutionCycleLockTableDriven(t *testing.T) {
+	ctx := context.Background()
+	scope := paperExecutionCycleScope{ValidationID: "paper_validation_001", Symbol: "BTCUSDT", Interval: "1"}
+	key := paperExecutionCycleLockKey(scope)
+
+	tests := []struct {
+		name       string
+		mock       func(sqlmock.Sqlmock)
+		wantErrSub string
+		unlock     bool
+	}{
+		{
+			name: "acquires and releases lock",
+			mock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+				mock.ExpectQuery("SELECT pg_advisory_unlock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
+			},
+			unlock: true,
+		},
+		{
+			name: "rejects when lock is already held",
+			mock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(false))
+			},
+			wantErrSub: "already running",
+		},
+		{
+			name: "reports unlock mismatch",
+			mock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+				mock.ExpectQuery("SELECT pg_advisory_unlock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(false))
+			},
+			wantErrSub: "not held",
+			unlock:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
+			tt.mock(mock)
+
+			unlock, err := acquirePaperExecutionCycleLock(ctx, db, scope)
+			if tt.wantErrSub != "" && !tt.unlock {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				if unlock != nil {
+					t.Fatal("unlock must be nil when lock acquisition fails")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("acquire lock: %v", err)
+				}
+				if unlock == nil {
+					t.Fatal("unlock is required after successful acquisition")
+				}
+				err = unlock(ctx)
+				if tt.wantErrSub != "" {
+					if err == nil {
+						t.Fatal("expected unlock error")
+					}
+					if !strings.Contains(err.Error(), tt.wantErrSub) {
+						t.Fatalf("expected unlock error containing %q, got %v", tt.wantErrSub, err)
+					}
+				} else if err != nil {
+					t.Fatalf("unlock: %v", err)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("sql expectations: %v", err)
 			}
 		})
 	}

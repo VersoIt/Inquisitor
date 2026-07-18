@@ -422,7 +422,7 @@ Automatically reconcile open paper exits by sourcing a fresh orderbook quote and
 go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-exit -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER
 ```
 
-Run a bounded paper execution cycle. Each cycle checks exits first, records at most one exit or one entry, and skips entry while any active open position remains. The CLI requires an explicit `-symbol` and `-interval` for this action so a deployment loop cannot accidentally scan a whole validation scope:
+Run a bounded paper execution cycle. Each cycle checks exits first, records at most one exit or one entry, and skips entry while any active open position remains. The CLI requires an explicit `-symbol` and `-interval` for this action and takes a PostgreSQL advisory lock for that validation/symbol/interval, so a deployment loop cannot accidentally scan a whole validation scope or run two competing workers for the same paper market:
 
 ```powershell
 go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-cycle -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER -cycle-limit 1
