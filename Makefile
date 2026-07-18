@@ -51,8 +51,9 @@ PAPER_SMOKE_DATABASE ?= inquisitor
 PAPER_SMOKE_DATABASE_USER ?= inquisitor
 PAPER_SMOKE_VALIDATION_ID ?= paper_cycle_smoke_001
 PAPER_SMOKE_QUOTE_AS_OF ?= 2026-07-18T12:00:01Z
+PAPER_SMOKE_EXIT_QUOTE_AS_OF ?= 2026-07-18T12:01:01Z
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-auto-cycle paper-cycle-smoke paper-enter paper-fill paper-settle docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -136,6 +137,9 @@ paper-auto-cycle:
 
 paper-cycle-smoke:
 	powershell -ExecutionPolicy Bypass -File scripts/paper-cycle-smoke.ps1 -Config $(CONFIG) -Migrations $(MIGRATIONS) -Container $(PAPER_SMOKE_CONTAINER) -DatabaseName $(PAPER_SMOKE_DATABASE) -DatabaseUser $(PAPER_SMOKE_DATABASE_USER) -ValidationID $(PAPER_SMOKE_VALIDATION_ID) -Symbol $(if $(PAPER_SYMBOL),$(PAPER_SYMBOL),BTCUSDT) -Interval $(if $(PAPER_INTERVAL),$(PAPER_INTERVAL),1) -QuoteAsOf $(PAPER_SMOKE_QUOTE_AS_OF)
+
+paper-cycle-smoke-sh:
+	CONFIG="$(CONFIG)" MIGRATIONS="$(MIGRATIONS)" PAPER_SMOKE_CONTAINER="$(PAPER_SMOKE_CONTAINER)" PAPER_SMOKE_DATABASE="$(PAPER_SMOKE_DATABASE)" PAPER_SMOKE_DATABASE_USER="$(PAPER_SMOKE_DATABASE_USER)" PAPER_SMOKE_VALIDATION_ID="$(PAPER_SMOKE_VALIDATION_ID)" PAPER_SYMBOL="$(if $(PAPER_SYMBOL),$(PAPER_SYMBOL),BTCUSDT)" PAPER_INTERVAL="$(if $(PAPER_INTERVAL),$(PAPER_INTERVAL),1)" PAPER_SMOKE_QUOTE_AS_OF="$(PAPER_SMOKE_QUOTE_AS_OF)" PAPER_SMOKE_EXIT_QUOTE_AS_OF="$(PAPER_SMOKE_EXIT_QUOTE_AS_OF)" sh scripts/paper-cycle-smoke.sh
 
 paper-enter:
 	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action enter $(if $(PAPER_FILL_ID),-fill-id $(PAPER_FILL_ID),) $(if $(PAPER_POSITION_ID),-position-id $(PAPER_POSITION_ID),) $(if $(PAPER_TICKET_ID),-ticket-id $(PAPER_TICKET_ID),) $(if $(PAPER_MID_PRICE),-mid-price $(PAPER_MID_PRICE),) $(if $(PAPER_LIQUIDITY),-liquidity $(PAPER_LIQUIDITY),) $(if $(PAPER_EXECUTION_AT),-at $(PAPER_EXECUTION_AT),)

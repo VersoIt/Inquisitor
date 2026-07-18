@@ -428,10 +428,14 @@ Run a bounded paper execution cycle. Each cycle checks exits first, records at m
 go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-cycle -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER -cycle-limit 1
 ```
 
-Run the Docker-backed smoke for the bounded cycle. It applies migrations, seeds a repeatable RUNNING paper validation with one approved paper ticket and fresh orderbook snapshots, then verifies entry, duplicate-entry prevention while the position is active, take-profit close, and equity-ledger accounting. The script writes a temporary paper-enabled config and does not modify `configs/config.example.yaml`:
+Run the Docker-backed smoke for the bounded cycle. It applies migrations, seeds a repeatable RUNNING paper validation with one approved paper ticket and fresh orderbook snapshots, then verifies entry, duplicate-entry prevention while the position is active, take-profit close, and equity-ledger accounting. The scripts write a temporary paper-enabled config and do not modify `configs/config.example.yaml`:
 
 ```powershell
 .\scripts\paper-cycle-smoke.ps1
+```
+
+```sh
+sh scripts/paper-cycle-smoke.sh
 ```
 
 Reconcile a conservative paper entry from an existing immutable paper order ticket and an observed market mid price. This writes the fill journal and opens the corresponding paper position idempotently; it does not send an exchange order:
@@ -502,6 +506,7 @@ make paper-auto-enter VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PA
 make paper-auto-exit VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-auto-cycle VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1 PAPER_CYCLE_LIMIT=1
 make paper-cycle-smoke
+make paper-cycle-smoke-sh
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-settle PAPER_EVENT_ID=paper_equity_001 PAPER_CLOSE_ID=paper_close_001 PAPER_POSITION_ID=paper_position_001 PAPER_MID_PRICE=101000 PAPER_CLOSE_REASON=TAKE_PROFIT PAPER_EXECUTION_AT=2026-07-16T13:00:00Z
