@@ -418,4 +418,19 @@ Assert-Equal "take-profit close count" $takeProfitCloseCount "1"
 Assert-Equal "equity sequence" $equitySequence "1"
 Assert-Equal "profitable close count" $profitableCloseCount "1"
 
+Write-Host "Running post-close paper execution cycle preflight"
+& go run ./cmd/paper-execute `
+    -config $smokeConfig `
+    -action cycle-preflight `
+    -validation-id $ValidationID `
+    -symbol $Symbol `
+    -interval $Interval `
+    -quote-as-of $exitQuoteAsOfSql `
+    -pending-scan-limit 10 `
+    -position-scan-limit 10 `
+    -quote-scan-limit 10
+if ($LASTEXITCODE -ne 0) {
+    throw "post-close paper execution cycle preflight smoke failed with exit code $LASTEXITCODE"
+}
+
 Write-Host "Paper execution cycle smoke passed for $ValidationID"

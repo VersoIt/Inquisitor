@@ -364,4 +364,16 @@ assert_equal "take-profit close count" "$take_profit_close_count" "1"
 assert_equal "equity sequence" "$equity_sequence" "1"
 assert_equal "profitable close count" "$profitable_close_count" "1"
 
+printf 'Running post-close paper execution cycle preflight\n'
+go run ./cmd/paper-execute \
+    -config "$smoke_config" \
+    -action cycle-preflight \
+    -validation-id "$VALIDATION_ID" \
+    -symbol "$SYMBOL" \
+    -interval "$INTERVAL" \
+    -quote-as-of "$EXIT_QUOTE_AS_OF" \
+    -pending-scan-limit 10 \
+    -position-scan-limit 10 \
+    -quote-scan-limit 10
+
 printf 'Paper execution cycle smoke passed for %s\n' "$VALIDATION_ID"

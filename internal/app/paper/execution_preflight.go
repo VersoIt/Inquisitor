@@ -26,15 +26,17 @@ type PreflightPaperExecutionCycleRequest struct {
 }
 
 type PreflightPaperExecutionCycleResult struct {
-	Record           domainpaper.ValidationRecord
-	Quote            SourceOrderbookQuoteResult
-	QuoteSourced     bool
-	PendingTickets   int
-	ScannedTickets   int
-	FilledTickets    int
-	ScannedPositions int
-	ActivePositions  int
-	ClosedPositions  int
+	Record                     domainpaper.ValidationRecord
+	Quote                      SourceOrderbookQuoteResult
+	QuoteSourced               bool
+	PendingTickets             int
+	ScannedTickets             int
+	FilledTickets              int
+	ScannedPositions           int
+	ActivePositions            int
+	ClosedPositions            int
+	AccountedClosedPositions   int
+	UnaccountedClosedPositions int
 }
 
 func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req PreflightPaperExecutionCycleRequest) (PreflightPaperExecutionCycleResult, error) {
@@ -55,6 +57,9 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 	}
 	if s.closes == nil {
 		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("paper execution cycle preflight requires position close repository")
+	}
+	if s.equity == nil {
+		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("paper execution cycle preflight requires equity event repository")
 	}
 	if s.orderbooks == nil {
 		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("paper execution cycle preflight requires orderbook snapshot repository")
@@ -144,6 +149,15 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 		}
 		if len(closes) == 1 {
 			result.ClosedPositions++
+			accounted, err := s.paperExitCloseHasEquityEvent(ctx, closes[0].CloseID)
+			if err != nil {
+				return PreflightPaperExecutionCycleResult{}, fmt.Errorf("check paper close %q equity status for execution preflight: %w", closes[0].CloseID, err)
+			}
+			if accounted {
+				result.AccountedClosedPositions++
+				continue
+			}
+			result.UnaccountedClosedPositions++
 			continue
 		}
 		result.ActivePositions++

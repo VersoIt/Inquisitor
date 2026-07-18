@@ -52,10 +52,12 @@ func TestServicePreflightPaperExecutionCycleSummarizesScopeWithoutWrites(t *test
 	existingClose.DecisionID = closedPosition.DecisionID
 	existingClose.IntentID = closedPosition.IntentID
 	existingClose.ValidationID = record.ValidationID
+	existingEvent := appEquityEventForClose(now, existingClose, "paper_equity_app_0002")
 
 	fills := &fakeOrderFillRepository{fills: []domainpaper.OrderFill{existingFill}}
 	positions := &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{activePosition, closedPosition}}
 	closes := &fakePositionCloseRepository{closes: []domainpaper.PositionClose{existingClose}}
+	equity := &fakeEquityEventRepository{events: []domainpaper.EquityEvent{existingEvent}}
 	orderbooks := &fakeOrderbookSnapshotRepository{
 		snapshots: []marketdata.OrderbookSnapshot{appOrderbookSnapshot(quoteTime, "100000", "100200")},
 	}
@@ -66,6 +68,7 @@ func TestServicePreflightPaperExecutionCycleSummarizesScopeWithoutWrites(t *test
 		fills,
 		positions,
 		closes,
+		equity,
 		orderbooks,
 	)
 
@@ -95,11 +98,113 @@ func TestServicePreflightPaperExecutionCycleSummarizesScopeWithoutWrites(t *test
 	if got.ScannedPositions != 2 || got.ActivePositions != 1 || got.ClosedPositions != 1 {
 		t.Fatalf("position counters mismatch: %#v", got)
 	}
-	if fills.calls != 0 || positions.calls != 0 || closes.calls != 0 {
-		t.Fatalf("preflight must not write: fill_calls=%d position_calls=%d close_calls=%d", fills.calls, positions.calls, closes.calls)
+	if got.AccountedClosedPositions != 1 || got.UnaccountedClosedPositions != 0 {
+		t.Fatalf("equity ledger counters mismatch: %#v", got)
 	}
-	if len(orderbooks.queries) != 1 || len(fills.queries) != 2 || len(positions.queries) != 1 || len(closes.queries) != 2 {
-		t.Fatalf("query counters mismatch: orderbooks=%#v fills=%#v positions=%#v closes=%#v", orderbooks.queries, fills.queries, positions.queries, closes.queries)
+	if fills.calls != 0 || positions.calls != 0 || closes.calls != 0 || equity.calls != 0 {
+		t.Fatalf("preflight must not write: fill_calls=%d position_calls=%d close_calls=%d equity_calls=%d", fills.calls, positions.calls, closes.calls, equity.calls)
+	}
+	if len(orderbooks.queries) != 1 || len(fills.queries) != 2 || len(positions.queries) != 1 ||
+		len(closes.queries) != 2 || len(equity.queries) != 1 {
+		t.Fatalf("query counters mismatch: orderbooks=%#v fills=%#v positions=%#v closes=%#v equity=%#v", orderbooks.queries, fills.queries, positions.queries, closes.queries, equity.queries)
+	}
+}
+
+func TestServicePreflightPaperExecutionCycleChecksClosedPositionEquityLedgerTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	quoteTime := now.Add(time.Minute)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	position := appOpenPosition(now)
+	position.ValidationID = record.ValidationID
+	close := appPositionClose(now)
+	close.ValidationID = record.ValidationID
+	close.PositionID = position.PositionID
+	repositoryErr := errors.New("postgres unavailable")
+	validReq := apppaper.PreflightPaperExecutionCycleRequest{
+		ValidationID:      record.ValidationID,
+		Exchange:          "bybit",
+		Category:          "linear",
+		Symbol:            "BTCUSDT",
+		Interval:          "1",
+		AsOf:              quoteTime.Add(time.Second),
+		MaxStaleness:      30 * time.Second,
+		MaxSpreadBPS:      decimal.RequireFromString("250"),
+		PendingScanLimit:  10,
+		PositionScanLimit: 10,
+		QuoteScanLimit:    10,
+	}
+
+	tests := []struct {
+		name              string
+		equity            *fakeEquityEventRepository
+		wantAccounted     int
+		wantUnaccounted   int
+		wantErrSub        string
+		wantEquityQueries int
+	}{
+		{
+			name:              "accounted close is reported",
+			equity:            &fakeEquityEventRepository{events: []domainpaper.EquityEvent{appEquityEventForClose(now, close, "paper_equity_app_0001")}},
+			wantAccounted:     1,
+			wantEquityQueries: 1,
+		},
+		{
+			name:              "unaccounted close is reported without writing",
+			equity:            &fakeEquityEventRepository{},
+			wantUnaccounted:   1,
+			wantEquityQueries: 1,
+		},
+		{
+			name:              "equity list failure is reported",
+			equity:            &fakeEquityEventRepository{listErr: repositoryErr},
+			wantErrSub:        repositoryErr.Error(),
+			wantEquityQueries: 1,
+		},
+		{
+			name: "duplicate equity events fail closed",
+			equity: &fakeEquityEventRepository{events: []domainpaper.EquityEvent{
+				appEquityEventForClose(now, close, "paper_equity_app_0001"),
+				appEquityEventForClose(now, close, "paper_equity_app_0002"),
+			}},
+			wantErrSub:        "inconsistent equity ledger",
+			wantEquityQueries: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fills := &fakeOrderFillRepository{}
+			positions := &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{position}}
+			closes := &fakePositionCloseRepository{closes: []domainpaper.PositionClose{close}}
+			service := preflightService(
+				now,
+				record,
+				nil,
+				fills,
+				positions,
+				closes,
+				tt.equity,
+				&fakeOrderbookSnapshotRepository{snapshots: []marketdata.OrderbookSnapshot{appOrderbookSnapshot(quoteTime, "100000", "100200")}},
+			)
+
+			got, err := service.PreflightPaperExecutionCycle(context.Background(), validReq)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+			} else if err != nil {
+				t.Fatalf("preflight paper execution cycle: %v", err)
+			}
+			if got.AccountedClosedPositions != tt.wantAccounted || got.UnaccountedClosedPositions != tt.wantUnaccounted {
+				t.Fatalf("equity counters mismatch: got=%#v want_accounted=%d want_unaccounted=%d", got, tt.wantAccounted, tt.wantUnaccounted)
+			}
+			if len(tt.equity.queries) != tt.wantEquityQueries {
+				t.Fatalf("equity query count mismatch: got %d want %d queries=%#v", len(tt.equity.queries), tt.wantEquityQueries, tt.equity.queries)
+			}
+			if fills.calls != 0 || positions.calls != 0 || closes.calls != 0 || tt.equity.calls != 0 {
+				t.Fatalf("preflight must not write: fill_calls=%d position_calls=%d close_calls=%d equity_calls=%d", fills.calls, positions.calls, closes.calls, tt.equity.calls)
+			}
+		})
 	}
 }
 
@@ -242,6 +347,7 @@ func TestServicePreflightPaperExecutionCycleRejectsUnsafeInputsTableDriven(t *te
 				fills,
 				tt.positions,
 				&fakePositionCloseRepository{},
+				&fakeEquityEventRepository{},
 				tt.orderbooks,
 			)
 
@@ -262,6 +368,38 @@ func TestServicePreflightPaperExecutionCycleRejectsUnsafeInputsTableDriven(t *te
 	}
 }
 
+func TestServicePreflightPaperExecutionCycleRequiresEquityRepository(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	service := preflightService(
+		now,
+		record,
+		nil,
+		&fakeOrderFillRepository{},
+		&fakeOpenPositionRepository{},
+		&fakePositionCloseRepository{},
+		nil,
+		&fakeOrderbookSnapshotRepository{},
+	)
+
+	_, err := service.PreflightPaperExecutionCycle(context.Background(), apppaper.PreflightPaperExecutionCycleRequest{
+		ValidationID:      record.ValidationID,
+		Exchange:          "bybit",
+		Category:          "linear",
+		Symbol:            "BTCUSDT",
+		Interval:          "1",
+		AsOf:              now.Add(time.Minute),
+		MaxStaleness:      30 * time.Second,
+		MaxSpreadBPS:      decimal.RequireFromString("250"),
+		PendingScanLimit:  10,
+		PositionScanLimit: 10,
+		QuoteScanLimit:    10,
+	})
+	if err == nil || !strings.Contains(err.Error(), "equity event repository") {
+		t.Fatalf("expected missing equity repository error, got %v", err)
+	}
+}
+
 func preflightService(
 	now time.Time,
 	record domainpaper.ValidationRecord,
@@ -269,11 +407,10 @@ func preflightService(
 	fills *fakeOrderFillRepository,
 	positions *fakeOpenPositionRepository,
 	closes *fakePositionCloseRepository,
+	equity *fakeEquityEventRepository,
 	orderbooks *fakeOrderbookSnapshotRepository,
 ) *apppaper.Service {
-	return apppaper.NewService(
-		&fakeRunRepository{},
-		&fakeResultRepository{},
+	options := []apppaper.Option{
 		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
 		apppaper.WithOrderTicketRepository(&fakeOrderTicketRepository{tickets: tickets}),
 		apppaper.WithOrderFillRepository(fills),
@@ -281,5 +418,26 @@ func preflightService(
 		apppaper.WithPositionCloseRepository(closes),
 		apppaper.WithOrderbookSnapshotRepository(orderbooks),
 		apppaper.WithClock(clock.FixedClock{Time: now.Add(5 * time.Minute)}),
-	)
+	}
+	if equity != nil {
+		options = append(options, apppaper.WithEquityEventRepository(equity))
+	}
+	return apppaper.NewService(&fakeRunRepository{}, &fakeResultRepository{}, options...)
+}
+
+func appEquityEventForClose(now time.Time, close domainpaper.PositionClose, eventID string) domainpaper.EquityEvent {
+	event := appEquityEvent(now)
+	event.EventID = eventID
+	event.ValidationID = close.ValidationID
+	event.CloseID = close.CloseID
+	event.PositionID = close.PositionID
+	event.Exchange = close.Exchange
+	event.Category = close.Category
+	event.Symbol = close.Symbol
+	event.Interval = close.Interval
+	event.NetPnL = close.NetPnL
+	event.Fees = close.Fees
+	event.EquityAfter = event.EquityBefore.Add(close.NetPnL)
+	event.OccurredAt = close.ClosedAt
+	return event
 }

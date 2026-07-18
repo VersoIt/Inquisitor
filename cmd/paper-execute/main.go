@@ -349,6 +349,8 @@ func main() {
 			"filled_tickets", result.FilledTickets,
 			"active_positions", result.ActivePositions,
 			"closed_positions", result.ClosedPositions,
+			"accounted_closed_positions", result.AccountedClosedPositions,
+			"unaccounted_closed_positions", result.UnaccountedClosedPositions,
 			"scanned_positions", result.ScannedPositions,
 		)
 	case "auto-cycle":
