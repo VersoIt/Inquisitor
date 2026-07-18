@@ -210,13 +210,28 @@ func (r *fakeOpenPositionRepository) ListOpenPositions(_ context.Context, query 
 	}
 	var out []domainpaper.OpenPosition
 	for _, position := range r.positions {
+		if query.ValidationID != "" && position.ValidationID != query.ValidationID {
+			continue
+		}
+		if query.TicketID != "" && position.TicketID != query.TicketID {
+			continue
+		}
 		if query.FillID != "" && position.FillID != query.FillID {
 			continue
 		}
 		if query.PositionID != "" && position.PositionID != query.PositionID {
 			continue
 		}
+		if query.Symbol != "" && position.Symbol != query.Symbol {
+			continue
+		}
+		if query.Interval != "" && position.Interval != query.Interval {
+			continue
+		}
 		out = append(out, position)
+		if query.Limit > 0 && len(out) == query.Limit {
+			break
+		}
 	}
 	return out, nil
 }

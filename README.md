@@ -70,10 +70,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 equity-ledger performance report that summarizes live-paper accounting events and can persist UTC daily snapshots from the close/equity journal.
 - Initial Phase 7 paper position settlement use case that safely chains position close recording and equity accounting, allowing retries to continue after a close was already persisted.
 - Initial Phase 7 conservative paper market execution helpers that derive simulated entry/exit fills from mid price plus fee/spread/slippage assumptions before recording fills or settlements.
-- Initial Phase 7 automated paper entry reconciliation and execution CLI that selects pending tickets, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, and settles positions without sending exchange orders.
+- Initial Phase 7 automated paper entry/exit reconciliation and execution CLI that selects pending tickets/open positions, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, and settles triggered stop-loss/take-profit exits without sending exchange orders.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should automate paper position exit monitoring and settlement on top of immutable tickets/fills/open/close/equity journals. Exchange order placement remains intentionally absent.
+The next Phase 7 slices should wire the paper-only entry/exit actions into a bounded execution loop with smoke checks and operational guardrails. Exchange order placement remains intentionally absent.
 
 ## What This Is Not
 
@@ -416,6 +416,12 @@ Automatically reconcile the first pending paper entry by sourcing a fresh orderb
 go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-enter -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER
 ```
 
+Automatically reconcile open paper exits by sourcing a fresh orderbook quote and settling only positions whose mid price has crossed stop-loss or take-profit. If no position is open or no exit trigger is hit, the command logs a skipped result and exits successfully:
+
+```powershell
+go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-exit -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER
+```
+
 Reconcile a conservative paper entry from an existing immutable paper order ticket and an observed market mid price. This writes the fill journal and opens the corresponding paper position idempotently; it does not send an exchange order:
 
 ```powershell
@@ -481,6 +487,7 @@ make paper-cancel VALIDATION_ID=paper_validation_001 PAPER_CANCEL_REASON="operat
 make paper-quote PAPER_SYMBOL=BTCUSDT
 make paper-pending VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-auto-enter VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
+make paper-auto-exit VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-settle PAPER_EVENT_ID=paper_equity_001 PAPER_CLOSE_ID=paper_close_001 PAPER_POSITION_ID=paper_position_001 PAPER_MID_PRICE=101000 PAPER_CLOSE_REASON=TAKE_PROFIT PAPER_EXECUTION_AT=2026-07-16T13:00:00Z

@@ -21,19 +21,20 @@ import (
 
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
-	action := flag.String("action", "", "action: quote, pending, auto-enter, enter, fill, settle")
-	validationID := flag.String("validation-id", "", "paper validation id for action=pending or action=auto-enter")
+	action := flag.String("action", "", "action: quote, pending, auto-enter, auto-exit, enter, fill, settle")
+	validationID := flag.String("validation-id", "", "paper validation id for action=pending, action=auto-enter, or action=auto-exit")
 	fillID := flag.String("fill-id", "", "stable paper fill id for action=auto-enter, action=enter, or action=fill")
 	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=auto-enter, action=enter, or action=fill")
-	eventID := flag.String("event-id", "", "stable paper equity event id for action=settle")
-	closeID := flag.String("close-id", "", "stable paper position close id for action=settle")
-	positionID := flag.String("position-id", "", "paper open position id for action=auto-enter, action=enter, or action=settle")
-	symbol := flag.String("symbol", "", "optional symbol filter for action=pending or action=auto-enter")
-	interval := flag.String("interval", "", "optional interval filter for action=pending or action=auto-enter")
+	eventID := flag.String("event-id", "", "stable paper equity event id for action=auto-exit or action=settle")
+	closeID := flag.String("close-id", "", "stable paper position close id for action=auto-exit or action=settle")
+	positionID := flag.String("position-id", "", "paper open position id for action=auto-enter, action=auto-exit, action=enter, or action=settle")
+	symbol := flag.String("symbol", "", "optional symbol filter for action=pending, action=auto-enter, or action=auto-exit")
+	interval := flag.String("interval", "", "optional interval filter for action=pending, action=auto-enter, or action=auto-exit")
 	pendingLimit := flag.Int("pending-limit", 100, "maximum pending tickets returned by action=pending")
 	pendingScanLimit := flag.Int("pending-scan-limit", 1000, "maximum tickets scanned by action=pending or action=auto-enter")
-	quoteAsOfValue := flag.String("quote-as-of", "", "quote observation time in RFC3339 format; defaults to now for action=quote or action=auto-enter")
-	quoteScanLimit := flag.Int("quote-scan-limit", 1000, "maximum orderbook snapshots scanned by action=quote or action=auto-enter")
+	positionScanLimit := flag.Int("position-scan-limit", 1000, "maximum open positions scanned by action=auto-exit")
+	quoteAsOfValue := flag.String("quote-as-of", "", "quote observation time in RFC3339 format; defaults to now for action=quote, action=auto-enter, or action=auto-exit")
+	quoteScanLimit := flag.Int("quote-scan-limit", 1000, "maximum orderbook snapshots scanned by action=quote, action=auto-enter, or action=auto-exit")
 	midPriceValue := flag.String("mid-price", "", "observed market mid price used for conservative simulated execution")
 	liquidityValue := flag.String("liquidity", string(domainbacktest.LiquidityTaker), "simulated liquidity role: MAKER or TAKER")
 	closeReasonValue := flag.String("close-reason", string(domainpaper.PositionCloseReasonManual), "close reason for action=settle")
@@ -213,6 +214,79 @@ func main() {
 			"position_inserted", result.PositionStats.Inserted,
 			"position_skipped", result.PositionStats.Skipped,
 		)
+	case "auto-exit":
+		asOf, parseErr := parseOptionalTime("quote-as-of", *quoteAsOfValue, time.Now().UTC())
+		if parseErr != nil {
+			log.Error("invalid quote timestamp", "error", parseErr)
+			os.Exit(1)
+		}
+		result, exitErr := service.ReconcilePaperExitWithQuote(ctx, apppaper.ReconcilePaperExitWithQuoteRequest{
+			ValidationID:      *validationID,
+			PositionID:        *positionID,
+			CloseID:           *closeID,
+			EventID:           *eventID,
+			Symbol:            *symbol,
+			Interval:          *interval,
+			Liquidity:         liquidity,
+			Costs:             costs,
+			AsOf:              asOf,
+			MaxStaleness:      time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
+			MaxSpreadBPS:      decimal.NewFromInt(int64(cfg.Risk.MaxSpreadBps)),
+			PositionScanLimit: *positionScanLimit,
+			QuoteScanLimit:    *quoteScanLimit,
+		})
+		if exitErr != nil {
+			log.Error("paper auto exit reconciliation failed", "error", exitErr)
+			os.Exit(1)
+		}
+		if !result.PositionFound {
+			log.Info(
+				"paper auto exit reconciliation skipped",
+				"validation_id", result.Record.ValidationID,
+				"reason", "no_open_position",
+				"scanned", result.ScannedPositions,
+				"closed", result.ClosedPositions,
+			)
+			return
+		}
+		if !result.ExitTriggered {
+			log.Info(
+				"paper auto exit reconciliation skipped",
+				"validation_id", result.Record.ValidationID,
+				"position_id", result.Position.PositionID,
+				"reason", "no_exit_trigger",
+				"mid_price", result.Quote.MidPrice.String(),
+				"stop_loss", result.Position.StopLoss.String(),
+				"take_profit", result.Position.TakeProfit.String(),
+				"scanned", result.ScannedPositions,
+				"closed", result.ClosedPositions,
+				"checked", result.CheckedPositions,
+			)
+			return
+		}
+		log.Info(
+			"paper auto exit reconciliation recorded",
+			"validation_id", result.Record.ValidationID,
+			"position_id", result.Position.PositionID,
+			"close_id", result.Close.CloseID,
+			"event_id", result.Event.EventID,
+			"quote_sourced", result.QuoteSourced,
+			"used_existing_close", result.UsedExistingClose,
+			"close_reason", result.CloseReason,
+			"liquidity", result.Close.Liquidity,
+			"exit_mid_price", result.Close.ExitMidPrice.String(),
+			"exit_price", result.Close.ExitPrice.String(),
+			"exit_fee", result.Close.ExitFee.String(),
+			"net_pnl", result.Close.NetPnL.String(),
+			"equity_after", result.Event.EquityAfter.String(),
+			"scanned", result.ScannedPositions,
+			"closed", result.ClosedPositions,
+			"checked", result.CheckedPositions,
+			"close_inserted", result.CloseStats.Inserted,
+			"close_skipped", result.CloseStats.Skipped,
+			"equity_inserted", result.EquityStats.Inserted,
+			"equity_skipped", result.EquityStats.Skipped,
+		)
 	case "enter":
 		result, enterErr := service.ReconcileTicketFillAtMarket(ctx, apppaper.ReconcileTicketFillAtMarketRequest{
 			FillID:     *fillID,
@@ -312,7 +386,7 @@ func main() {
 
 func actionRequiresCosts(action string) bool {
 	switch action {
-	case "auto-enter", "enter", "fill", "settle":
+	case "auto-enter", "auto-exit", "enter", "fill", "settle":
 		return true
 	default:
 		return false

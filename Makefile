@@ -32,6 +32,7 @@ PAPER_INTERVAL ?=
 PAPER_CANCEL_REASON ?=
 PAPER_PENDING_LIMIT ?= 100
 PAPER_PENDING_SCAN_LIMIT ?= 1000
+PAPER_POSITION_SCAN_LIMIT ?= 1000
 PAPER_QUOTE_AS_OF ?=
 PAPER_QUOTE_SCAN_LIMIT ?= 1000
 PAPER_FILL_ID ?=
@@ -44,7 +45,7 @@ PAPER_EXECUTION_AT ?=
 PAPER_LIQUIDITY ?= TAKER
 PAPER_CLOSE_REASON ?= MANUAL
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-enter paper-fill paper-settle docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-enter paper-fill paper-settle docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -119,6 +120,9 @@ paper-pending:
 
 paper-auto-enter:
 	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action auto-enter $(if $(VALIDATION_ID),-validation-id $(VALIDATION_ID),) $(if $(PAPER_FILL_ID),-fill-id $(PAPER_FILL_ID),) $(if $(PAPER_POSITION_ID),-position-id $(PAPER_POSITION_ID),) $(if $(PAPER_TICKET_ID),-ticket-id $(PAPER_TICKET_ID),) $(if $(PAPER_SYMBOL),-symbol $(PAPER_SYMBOL),) $(if $(PAPER_INTERVAL),-interval $(PAPER_INTERVAL),) $(if $(PAPER_LIQUIDITY),-liquidity $(PAPER_LIQUIDITY),) $(if $(PAPER_QUOTE_AS_OF),-quote-as-of $(PAPER_QUOTE_AS_OF),) -pending-scan-limit $(PAPER_PENDING_SCAN_LIMIT) -quote-scan-limit $(PAPER_QUOTE_SCAN_LIMIT)
+
+paper-auto-exit:
+	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action auto-exit $(if $(VALIDATION_ID),-validation-id $(VALIDATION_ID),) $(if $(PAPER_POSITION_ID),-position-id $(PAPER_POSITION_ID),) $(if $(PAPER_CLOSE_ID),-close-id $(PAPER_CLOSE_ID),) $(if $(PAPER_EVENT_ID),-event-id $(PAPER_EVENT_ID),) $(if $(PAPER_SYMBOL),-symbol $(PAPER_SYMBOL),) $(if $(PAPER_INTERVAL),-interval $(PAPER_INTERVAL),) $(if $(PAPER_LIQUIDITY),-liquidity $(PAPER_LIQUIDITY),) $(if $(PAPER_QUOTE_AS_OF),-quote-as-of $(PAPER_QUOTE_AS_OF),) -position-scan-limit $(PAPER_POSITION_SCAN_LIMIT) -quote-scan-limit $(PAPER_QUOTE_SCAN_LIMIT)
 
 paper-enter:
 	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action enter $(if $(PAPER_FILL_ID),-fill-id $(PAPER_FILL_ID),) $(if $(PAPER_POSITION_ID),-position-id $(PAPER_POSITION_ID),) $(if $(PAPER_TICKET_ID),-ticket-id $(PAPER_TICKET_ID),) $(if $(PAPER_MID_PRICE),-mid-price $(PAPER_MID_PRICE),) $(if $(PAPER_LIQUIDITY),-liquidity $(PAPER_LIQUIDITY),) $(if $(PAPER_EXECUTION_AT),-at $(PAPER_EXECUTION_AT),)

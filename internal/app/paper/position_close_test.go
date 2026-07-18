@@ -239,13 +239,25 @@ func (r *fakePositionCloseRepository) ListPositionCloses(_ context.Context, quer
 	}
 	var out []domainpaper.PositionClose
 	for _, close := range r.closes {
+		if query.ValidationID != "" && close.ValidationID != query.ValidationID {
+			continue
+		}
 		if query.PositionID != "" && close.PositionID != query.PositionID {
 			continue
 		}
 		if query.CloseID != "" && close.CloseID != query.CloseID {
 			continue
 		}
+		if query.Symbol != "" && close.Symbol != query.Symbol {
+			continue
+		}
+		if query.Interval != "" && close.Interval != query.Interval {
+			continue
+		}
 		out = append(out, close)
+		if query.Limit > 0 && len(out) == query.Limit {
+			break
+		}
 	}
 	return out, nil
 }
