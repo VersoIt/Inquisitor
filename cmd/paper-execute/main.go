@@ -25,22 +25,22 @@ const maxPaperExecutionCycleLimit = 1000
 
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
-	action := flag.String("action", "", "action: quote, pending, auto-enter, auto-exit, auto-cycle, enter, fill, settle")
-	validationID := flag.String("validation-id", "", "paper validation id for action=pending, action=auto-enter, action=auto-exit, or action=auto-cycle")
+	action := flag.String("action", "", "action: quote, pending, auto-enter, auto-exit, cycle-preflight, auto-cycle, enter, fill, settle")
+	validationID := flag.String("validation-id", "", "paper validation id for action=pending, action=auto-enter, action=auto-exit, action=cycle-preflight, or action=auto-cycle")
 	fillID := flag.String("fill-id", "", "stable paper fill id for action=auto-enter, action=enter, or action=fill")
 	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=auto-enter, action=enter, or action=fill")
 	eventID := flag.String("event-id", "", "stable paper equity event id for action=auto-exit or action=settle")
 	closeID := flag.String("close-id", "", "stable paper position close id for action=auto-exit or action=settle")
 	positionID := flag.String("position-id", "", "paper open position id for action=auto-enter, action=auto-exit, action=enter, or action=settle")
-	symbol := flag.String("symbol", "", "optional symbol filter for action=pending, action=auto-enter, or action=auto-exit; required for action=auto-cycle")
-	interval := flag.String("interval", "", "optional interval filter for action=pending, action=auto-enter, or action=auto-exit; required for action=auto-cycle")
+	symbol := flag.String("symbol", "", "optional symbol filter for action=pending, action=auto-enter, or action=auto-exit; required for action=cycle-preflight or action=auto-cycle")
+	interval := flag.String("interval", "", "optional interval filter for action=pending, action=auto-enter, or action=auto-exit; required for action=cycle-preflight or action=auto-cycle")
 	pendingLimit := flag.Int("pending-limit", 100, "maximum pending tickets returned by action=pending")
-	pendingScanLimit := flag.Int("pending-scan-limit", 1000, "maximum tickets scanned by action=pending, action=auto-enter, or action=auto-cycle")
-	positionScanLimit := flag.Int("position-scan-limit", 1000, "maximum open positions scanned by action=auto-exit or action=auto-cycle")
+	pendingScanLimit := flag.Int("pending-scan-limit", 1000, "maximum tickets scanned by action=pending, action=auto-enter, action=cycle-preflight, or action=auto-cycle")
+	positionScanLimit := flag.Int("position-scan-limit", 1000, "maximum open positions scanned by action=auto-exit, action=cycle-preflight, or action=auto-cycle")
 	cycleLimit := flag.Int("cycle-limit", 1, "bounded execution cycles for action=auto-cycle")
 	cycleDelay := flag.Duration("cycle-delay", 0, "optional delay between action=auto-cycle iterations")
-	quoteAsOfValue := flag.String("quote-as-of", "", "quote observation time in RFC3339 format; defaults to now for action=quote, action=auto-enter, action=auto-exit, or action=auto-cycle")
-	quoteScanLimit := flag.Int("quote-scan-limit", 1000, "maximum orderbook snapshots scanned by action=quote, action=auto-enter, action=auto-exit, or action=auto-cycle")
+	quoteAsOfValue := flag.String("quote-as-of", "", "quote observation time in RFC3339 format; defaults to now for action=quote, action=auto-enter, action=auto-exit, action=cycle-preflight, or action=auto-cycle")
+	quoteScanLimit := flag.Int("quote-scan-limit", 1000, "maximum orderbook snapshots scanned by action=quote, action=auto-enter, action=auto-exit, action=cycle-preflight, or action=auto-cycle")
 	midPriceValue := flag.String("mid-price", "", "observed market mid price used for conservative simulated execution")
 	liquidityValue := flag.String("liquidity", string(domainbacktest.LiquidityTaker), "simulated liquidity role: MAKER or TAKER")
 	closeReasonValue := flag.String("close-reason", string(domainpaper.PositionCloseReasonManual), "close reason for action=settle")
@@ -293,6 +293,51 @@ func main() {
 			"equity_inserted", result.EquityStats.Inserted,
 			"equity_skipped", result.EquityStats.Skipped,
 		)
+	case "cycle-preflight":
+		scope, scopeErr := requirePaperExecutionCycleScope(*validationID, *symbol, *interval)
+		if scopeErr != nil {
+			log.Error("invalid paper execution cycle scope", "error", scopeErr)
+			os.Exit(1)
+		}
+		asOf, parseErr := parseOptionalTime("quote-as-of", *quoteAsOfValue, time.Now().UTC())
+		if parseErr != nil {
+			log.Error("invalid quote timestamp", "error", parseErr)
+			os.Exit(1)
+		}
+		result, preflightErr := service.PreflightPaperExecutionCycle(ctx, apppaper.PreflightPaperExecutionCycleRequest{
+			ValidationID:      scope.ValidationID,
+			Exchange:          cfg.Exchange.Primary,
+			Category:          cfg.Exchange.Category,
+			Symbol:            scope.Symbol,
+			Interval:          scope.Interval,
+			AsOf:              asOf,
+			MaxStaleness:      time.Duration(cfg.MarketData.MaxDataStalenessMs) * time.Millisecond,
+			MaxSpreadBPS:      decimal.NewFromInt(int64(cfg.Risk.MaxSpreadBps)),
+			PendingScanLimit:  *pendingScanLimit,
+			PositionScanLimit: *positionScanLimit,
+			QuoteScanLimit:    *quoteScanLimit,
+		})
+		if preflightErr != nil {
+			log.Error("paper execution cycle preflight failed", "error", preflightErr)
+			os.Exit(1)
+		}
+		log.Info(
+			"paper execution cycle preflight completed",
+			"validation_id", result.Record.ValidationID,
+			"status", result.Record.Status,
+			"symbol", scope.Symbol,
+			"interval", scope.Interval,
+			"quote_sourced", result.QuoteSourced,
+			"mid_price", result.Quote.MidPrice.String(),
+			"spread_bps", result.Quote.SpreadBPS.String(),
+			"quote_age_ms", result.Quote.Age.Milliseconds(),
+			"pending", result.PendingTickets,
+			"scanned_tickets", result.ScannedTickets,
+			"filled_tickets", result.FilledTickets,
+			"active_positions", result.ActivePositions,
+			"closed_positions", result.ClosedPositions,
+			"scanned_positions", result.ScannedPositions,
+		)
 	case "auto-cycle":
 		if *cycleLimit <= 0 || *cycleLimit > maxPaperExecutionCycleLimit {
 			log.Error("invalid paper execution cycle limit", "cycle_limit", *cycleLimit, "max", maxPaperExecutionCycleLimit)
@@ -444,7 +489,7 @@ func main() {
 
 func actionRequiresCosts(action string) bool {
 	switch action {
-	case "auto-enter", "auto-exit", "auto-cycle", "enter", "fill", "settle":
+	case "auto-enter", "auto-exit", "cycle-preflight", "auto-cycle", "enter", "fill", "settle":
 		return true
 	default:
 		return false
@@ -477,13 +522,13 @@ func requirePaperExecutionCycleScope(validationIDValue string, symbolValue strin
 	symbol := strings.ToUpper(strings.TrimSpace(symbolValue))
 	interval := strings.TrimSpace(intervalValue)
 	if validationID == "" {
-		return paperExecutionCycleScope{}, fmt.Errorf("validation_id is required for action=auto-cycle")
+		return paperExecutionCycleScope{}, fmt.Errorf("validation_id is required for paper execution cycle")
 	}
 	if symbol == "" {
-		return paperExecutionCycleScope{}, fmt.Errorf("symbol is required for action=auto-cycle")
+		return paperExecutionCycleScope{}, fmt.Errorf("symbol is required for paper execution cycle")
 	}
 	if interval == "" {
-		return paperExecutionCycleScope{}, fmt.Errorf("interval is required for action=auto-cycle")
+		return paperExecutionCycleScope{}, fmt.Errorf("interval is required for paper execution cycle")
 	}
 	return paperExecutionCycleScope{ValidationID: validationID, Symbol: symbol, Interval: interval}, nil
 }

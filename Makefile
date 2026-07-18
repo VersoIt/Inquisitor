@@ -53,7 +53,7 @@ PAPER_SMOKE_VALIDATION_ID ?= paper_cycle_smoke_001
 PAPER_SMOKE_QUOTE_AS_OF ?= 2026-07-18T12:00:01Z
 PAPER_SMOKE_EXIT_QUOTE_AS_OF ?= 2026-07-18T12:01:01Z
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -131,6 +131,9 @@ paper-auto-enter:
 
 paper-auto-exit:
 	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action auto-exit $(if $(VALIDATION_ID),-validation-id $(VALIDATION_ID),) $(if $(PAPER_POSITION_ID),-position-id $(PAPER_POSITION_ID),) $(if $(PAPER_CLOSE_ID),-close-id $(PAPER_CLOSE_ID),) $(if $(PAPER_EVENT_ID),-event-id $(PAPER_EVENT_ID),) $(if $(PAPER_SYMBOL),-symbol $(PAPER_SYMBOL),) $(if $(PAPER_INTERVAL),-interval $(PAPER_INTERVAL),) $(if $(PAPER_LIQUIDITY),-liquidity $(PAPER_LIQUIDITY),) $(if $(PAPER_QUOTE_AS_OF),-quote-as-of $(PAPER_QUOTE_AS_OF),) -position-scan-limit $(PAPER_POSITION_SCAN_LIMIT) -quote-scan-limit $(PAPER_QUOTE_SCAN_LIMIT)
+
+paper-cycle-preflight:
+	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action cycle-preflight $(if $(VALIDATION_ID),-validation-id $(VALIDATION_ID),) $(if $(PAPER_SYMBOL),-symbol $(PAPER_SYMBOL),) $(if $(PAPER_INTERVAL),-interval $(PAPER_INTERVAL),) $(if $(PAPER_QUOTE_AS_OF),-quote-as-of $(PAPER_QUOTE_AS_OF),) -pending-scan-limit $(PAPER_PENDING_SCAN_LIMIT) -position-scan-limit $(PAPER_POSITION_SCAN_LIMIT) -quote-scan-limit $(PAPER_QUOTE_SCAN_LIMIT)
 
 paper-auto-cycle:
 	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action auto-cycle $(if $(VALIDATION_ID),-validation-id $(VALIDATION_ID),) $(if $(PAPER_SYMBOL),-symbol $(PAPER_SYMBOL),) $(if $(PAPER_INTERVAL),-interval $(PAPER_INTERVAL),) $(if $(PAPER_LIQUIDITY),-liquidity $(PAPER_LIQUIDITY),) $(if $(PAPER_QUOTE_AS_OF),-quote-as-of $(PAPER_QUOTE_AS_OF),) -cycle-limit $(PAPER_CYCLE_LIMIT) -cycle-delay $(PAPER_CYCLE_DELAY) -pending-scan-limit $(PAPER_PENDING_SCAN_LIMIT) -position-scan-limit $(PAPER_POSITION_SCAN_LIMIT) -quote-scan-limit $(PAPER_QUOTE_SCAN_LIMIT)

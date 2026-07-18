@@ -205,6 +205,7 @@ func TestPaperExecutionActionClassificationTableDriven(t *testing.T) {
 		{action: "pending"},
 		{action: "auto-enter", wantCosts: true},
 		{action: "auto-exit", wantCosts: true},
+		{action: "cycle-preflight", wantCosts: true},
 		{action: "auto-cycle", wantCosts: true},
 		{action: "enter", wantCosts: true, wantManualObservation: true},
 		{action: "fill", wantCosts: true, wantManualObservation: true},

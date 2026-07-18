@@ -314,6 +314,21 @@ COMMIT;
 Write-Host "Seeding repeatable smoke data for $ValidationID"
 Invoke-PostgresScript $seedSql
 
+Write-Host "Running paper execution cycle preflight"
+& go run ./cmd/paper-execute `
+    -config $smokeConfig `
+    -action cycle-preflight `
+    -validation-id $ValidationID `
+    -symbol $Symbol `
+    -interval $Interval `
+    -quote-as-of $quoteAsOfSql `
+    -pending-scan-limit 10 `
+    -position-scan-limit 10 `
+    -quote-scan-limit 10
+if ($LASTEXITCODE -ne 0) {
+    throw "paper execution cycle preflight smoke failed with exit code $LASTEXITCODE"
+}
+
 Write-Host "Running two bounded paper execution cycles"
 & go run ./cmd/paper-execute `
     -config $smokeConfig `

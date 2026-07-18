@@ -267,6 +267,18 @@ COMMIT;
 printf 'Seeding repeatable smoke data for %s\n' "$VALIDATION_ID"
 postgres_script "$seed_sql"
 
+printf 'Running paper execution cycle preflight\n'
+go run ./cmd/paper-execute \
+    -config "$smoke_config" \
+    -action cycle-preflight \
+    -validation-id "$VALIDATION_ID" \
+    -symbol "$SYMBOL" \
+    -interval "$INTERVAL" \
+    -quote-as-of "$QUOTE_AS_OF" \
+    -pending-scan-limit 10 \
+    -position-scan-limit 10 \
+    -quote-scan-limit 10
+
 printf 'Running two bounded paper execution cycles\n'
 go run ./cmd/paper-execute \
     -config "$smoke_config" \
