@@ -60,37 +60,23 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("paper execution cycle preflight requires orderbook snapshot repository")
 	}
 
-	validationID := strings.TrimSpace(req.ValidationID)
 	exchange := strings.ToLower(strings.TrimSpace(req.Exchange))
 	category := strings.ToLower(strings.TrimSpace(req.Category))
-	symbol := strings.ToUpper(strings.TrimSpace(req.Symbol))
-	interval := strings.TrimSpace(req.Interval)
-	if validationID == "" {
-		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("validation_id is required")
-	}
 	if exchange == "" {
 		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("exchange is required")
 	}
 	if category == "" {
 		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("category is required")
 	}
-	if symbol == "" {
-		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("symbol is required")
+	scope, err := requirePaperExecutionCycleScope(req.ValidationID, req.Symbol, req.Interval)
+	if err != nil {
+		return PreflightPaperExecutionCycleResult{}, err
 	}
-	if interval == "" {
-		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("interval is required")
-	}
-	if req.PendingScanLimit < 0 {
-		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("pending_scan_limit must be greater than or equal to zero")
-	}
-	if req.PositionScanLimit < 0 {
-		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("position_scan_limit must be greater than or equal to zero")
-	}
-	if req.QuoteScanLimit < 0 {
-		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("quote_scan_limit must be greater than or equal to zero")
+	if err := validatePaperExecutionCycleScanLimits(req.PendingScanLimit, req.PositionScanLimit, req.QuoteScanLimit); err != nil {
+		return PreflightPaperExecutionCycleResult{}, err
 	}
 
-	record, err := s.loadValidationRecord(ctx, validationID)
+	record, err := s.loadValidationRecord(ctx, scope.ValidationID)
 	if err != nil {
 		return PreflightPaperExecutionCycleResult{}, err
 	}
@@ -101,7 +87,7 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 	quote, err := s.SourceOrderbookQuote(ctx, SourceOrderbookQuoteRequest{
 		Exchange:     exchange,
 		Category:     category,
-		Symbol:       symbol,
+		Symbol:       scope.Symbol,
 		AsOf:         req.AsOf,
 		MaxStaleness: req.MaxStaleness,
 		MaxSpreadBPS: req.MaxSpreadBPS,
@@ -112,9 +98,9 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 	}
 
 	pending, err := s.ListPendingOrderTickets(ctx, ListPendingOrderTicketsRequest{
-		ValidationID: validationID,
-		Symbol:       symbol,
-		Interval:     interval,
+		ValidationID: scope.ValidationID,
+		Symbol:       scope.Symbol,
+		Interval:     scope.Interval,
 		Limit:        preflightResultLimit(req.PendingScanLimit),
 		ScanLimit:    req.PendingScanLimit,
 	})
@@ -127,9 +113,9 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 		positionScanLimit = defaultExitPositionScanLimit
 	}
 	positions, err := s.positions.ListOpenPositions(ctx, domainpaper.OpenPositionQuery{
-		ValidationID: validationID,
-		Symbol:       symbol,
-		Interval:     interval,
+		ValidationID: scope.ValidationID,
+		Symbol:       scope.Symbol,
+		Interval:     scope.Interval,
 		Limit:        positionScanLimit,
 	})
 	if err != nil {

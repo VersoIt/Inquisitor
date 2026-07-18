@@ -78,6 +78,8 @@ func TestServiceRunPaperExecutionCycleSkipsEntryWhenActivePositionHasNoExitTrigg
 
 	got, err := service.RunPaperExecutionCycle(context.Background(), apppaper.RunPaperExecutionCycleRequest{
 		ValidationID:      record.ValidationID,
+		Symbol:            "BTCUSDT",
+		Interval:          "1",
 		Liquidity:         backtest.LiquidityTaker,
 		Costs:             marketExecutionCosts(t),
 		AsOf:              quoteTime.Add(time.Second),
@@ -168,6 +170,8 @@ func TestServiceRunPaperExecutionCycleSkipsWhenNoOpenOrPending(t *testing.T) {
 
 	got, err := service.RunPaperExecutionCycle(context.Background(), apppaper.RunPaperExecutionCycleRequest{
 		ValidationID:      record.ValidationID,
+		Symbol:            "BTCUSDT",
+		Interval:          "1",
 		Liquidity:         backtest.LiquidityTaker,
 		Costs:             marketExecutionCosts(t),
 		AsOf:              now.Add(time.Minute),
@@ -209,6 +213,8 @@ func TestServiceRunPaperExecutionCycleRecoversExistingCloseAccountingBeforeEntry
 
 	got, err := service.RunPaperExecutionCycle(context.Background(), apppaper.RunPaperExecutionCycleRequest{
 		ValidationID:      record.ValidationID,
+		Symbol:            "BTCUSDT",
+		Interval:          "1",
 		Liquidity:         backtest.LiquidityTaker,
 		Costs:             marketExecutionCosts(t),
 		AsOf:              now.Add(4 * time.Minute),
@@ -229,6 +235,57 @@ func TestServiceRunPaperExecutionCycleRecoversExistingCloseAccountingBeforeEntry
 	}
 }
 
+func TestServiceRunPaperExecutionCycleNormalizesExplicitScopeBeforeScanning(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	fills := &fakeOrderFillRepository{}
+	positions := &fakeOpenPositionRepository{}
+	tickets := &fakeOrderTicketRepository{}
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOrderTicketRepository(tickets),
+		apppaper.WithOrderFillRepository(fills),
+		apppaper.WithOpenPositionRepository(positions),
+		apppaper.WithPositionCloseRepository(&fakePositionCloseRepository{}),
+		apppaper.WithEquityEventRepository(&fakeEquityEventRepository{}),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(5 * time.Minute)}),
+	)
+
+	got, err := service.RunPaperExecutionCycle(context.Background(), apppaper.RunPaperExecutionCycleRequest{
+		ValidationID:      " " + record.ValidationID + " ",
+		Symbol:            " btcusdt ",
+		Interval:          " 1 ",
+		Liquidity:         backtest.LiquidityTaker,
+		Costs:             marketExecutionCosts(t),
+		AsOf:              now.Add(time.Minute),
+		MaxStaleness:      30 * time.Second,
+		MaxSpreadBPS:      decimal.RequireFromString("250"),
+		PendingScanLimit:  10,
+		PositionScanLimit: 10,
+		QuoteScanLimit:    10,
+	})
+	if err != nil {
+		t.Fatalf("run normalized paper cycle: %v", err)
+	}
+
+	if got.Action != apppaper.PaperExecutionCycleActionNone || got.SkipReason != apppaper.PaperExecutionCycleSkipNoOpenOrPending {
+		t.Fatalf("normalized empty cycle mismatch: %#v", got)
+	}
+	if len(positions.queries) != 1 || positions.queries[0].ValidationID != record.ValidationID ||
+		positions.queries[0].Symbol != "BTCUSDT" || positions.queries[0].Interval != "1" {
+		t.Fatalf("position query scope mismatch: %#v", positions.queries)
+	}
+	if len(tickets.queries) != 1 || tickets.queries[0].ValidationID != record.ValidationID ||
+		tickets.queries[0].Symbol != "BTCUSDT" || tickets.queries[0].Interval != "1" {
+		t.Fatalf("ticket query scope mismatch: %#v", tickets.queries)
+	}
+	if fills.calls != 0 {
+		t.Fatalf("empty normalized cycle must not write fills: calls=%d", fills.calls)
+	}
+}
+
 func TestServiceRunPaperExecutionCycleRejectsUnsafeInputsTableDriven(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	position := appOpenPosition(now)
@@ -238,6 +295,8 @@ func TestServiceRunPaperExecutionCycleRejectsUnsafeInputsTableDriven(t *testing.
 	repositoryErr := errors.New("postgres unavailable")
 	validReq := apppaper.RunPaperExecutionCycleRequest{
 		ValidationID:      record.ValidationID,
+		Symbol:            "BTCUSDT",
+		Interval:          "1",
 		Liquidity:         backtest.LiquidityTaker,
 		Costs:             marketExecutionCosts(t),
 		AsOf:              now.Add(2 * time.Minute),
@@ -262,6 +321,7 @@ func TestServiceRunPaperExecutionCycleRejectsUnsafeInputsTableDriven(t *testing.
 		wantCloseCalls   int
 		wantEquityCalls  int
 		wantQuoteQueries int
+		wantNoQueries    bool
 	}{
 		{
 			name:       "missing validation id",
@@ -276,7 +336,88 @@ func TestServiceRunPaperExecutionCycleRejectsUnsafeInputsTableDriven(t *testing.
 				req.ValidationID = ""
 				return req
 			}(),
-			wantErrSub: "validation_id",
+			wantErrSub:    "validation_id",
+			wantNoQueries: true,
+		},
+		{
+			name:       "missing symbol",
+			tickets:    []domainpaper.OrderTicket{ticket},
+			fills:      &fakeOrderFillRepository{},
+			positions:  &fakeOpenPositionRepository{},
+			closes:     &fakePositionCloseRepository{},
+			equity:     &fakeEquityEventRepository{},
+			orderbooks: &fakeOrderbookSnapshotRepository{},
+			req: func() apppaper.RunPaperExecutionCycleRequest {
+				req := validReq
+				req.Symbol = ""
+				return req
+			}(),
+			wantErrSub:    "symbol",
+			wantNoQueries: true,
+		},
+		{
+			name:       "missing interval",
+			tickets:    []domainpaper.OrderTicket{ticket},
+			fills:      &fakeOrderFillRepository{},
+			positions:  &fakeOpenPositionRepository{},
+			closes:     &fakePositionCloseRepository{},
+			equity:     &fakeEquityEventRepository{},
+			orderbooks: &fakeOrderbookSnapshotRepository{},
+			req: func() apppaper.RunPaperExecutionCycleRequest {
+				req := validReq
+				req.Interval = ""
+				return req
+			}(),
+			wantErrSub:    "interval",
+			wantNoQueries: true,
+		},
+		{
+			name:       "negative pending scan limit",
+			tickets:    []domainpaper.OrderTicket{ticket},
+			fills:      &fakeOrderFillRepository{},
+			positions:  &fakeOpenPositionRepository{},
+			closes:     &fakePositionCloseRepository{},
+			equity:     &fakeEquityEventRepository{},
+			orderbooks: &fakeOrderbookSnapshotRepository{},
+			req: func() apppaper.RunPaperExecutionCycleRequest {
+				req := validReq
+				req.PendingScanLimit = -1
+				return req
+			}(),
+			wantErrSub:    "pending_scan_limit",
+			wantNoQueries: true,
+		},
+		{
+			name:       "negative position scan limit",
+			tickets:    []domainpaper.OrderTicket{ticket},
+			fills:      &fakeOrderFillRepository{},
+			positions:  &fakeOpenPositionRepository{},
+			closes:     &fakePositionCloseRepository{},
+			equity:     &fakeEquityEventRepository{},
+			orderbooks: &fakeOrderbookSnapshotRepository{},
+			req: func() apppaper.RunPaperExecutionCycleRequest {
+				req := validReq
+				req.PositionScanLimit = -1
+				return req
+			}(),
+			wantErrSub:    "position_scan_limit",
+			wantNoQueries: true,
+		},
+		{
+			name:       "negative quote scan limit",
+			tickets:    []domainpaper.OrderTicket{ticket},
+			fills:      &fakeOrderFillRepository{},
+			positions:  &fakeOpenPositionRepository{},
+			closes:     &fakePositionCloseRepository{},
+			equity:     &fakeEquityEventRepository{},
+			orderbooks: &fakeOrderbookSnapshotRepository{},
+			req: func() apppaper.RunPaperExecutionCycleRequest {
+				req := validReq
+				req.QuoteScanLimit = -1
+				return req
+			}(),
+			wantErrSub:    "quote_scan_limit",
+			wantNoQueries: true,
 		},
 		{
 			name:             "exit quote failure stops before entry",
@@ -340,6 +481,17 @@ func TestServiceRunPaperExecutionCycleRejectsUnsafeInputsTableDriven(t *testing.
 			}
 			if len(tt.orderbooks.queries) != tt.wantQuoteQueries {
 				t.Fatalf("quote query count mismatch: got %d want %d queries=%#v", len(tt.orderbooks.queries), tt.wantQuoteQueries, tt.orderbooks.queries)
+			}
+			if tt.wantNoQueries && (len(tt.positions.queries) != 0 || len(tt.orderbooks.queries) != 0 ||
+				len(tt.fills.queries) != 0 || len(tt.closes.queries) != 0 || len(tt.equity.queries) != 0) {
+				t.Fatalf(
+					"expected fail-fast before repository queries: positions=%#v orderbooks=%#v fills=%#v closes=%#v equity=%#v",
+					tt.positions.queries,
+					tt.orderbooks.queries,
+					tt.fills.queries,
+					tt.closes.queries,
+					tt.equity.queries,
+				)
 			}
 		})
 	}

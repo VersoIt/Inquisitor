@@ -2,8 +2,6 @@ package paper
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -62,15 +60,18 @@ func (s *Service) RunPaperExecutionCycle(ctx context.Context, req RunPaperExecut
 	if err := ctx.Err(); err != nil {
 		return RunPaperExecutionCycleResult{}, err
 	}
-	validationID := strings.TrimSpace(req.ValidationID)
-	if validationID == "" {
-		return RunPaperExecutionCycleResult{}, fmt.Errorf("validation_id is required")
+	scope, err := requirePaperExecutionCycleScope(req.ValidationID, req.Symbol, req.Interval)
+	if err != nil {
+		return RunPaperExecutionCycleResult{}, err
+	}
+	if err := validatePaperExecutionCycleScanLimits(req.PendingScanLimit, req.PositionScanLimit, req.QuoteScanLimit); err != nil {
+		return RunPaperExecutionCycleResult{}, err
 	}
 
 	exit, err := s.ReconcilePaperExitWithQuote(ctx, ReconcilePaperExitWithQuoteRequest{
-		ValidationID:      validationID,
-		Symbol:            req.Symbol,
-		Interval:          req.Interval,
+		ValidationID:      scope.ValidationID,
+		Symbol:            scope.Symbol,
+		Interval:          scope.Interval,
 		Liquidity:         req.Liquidity,
 		Costs:             req.Costs,
 		AsOf:              req.AsOf,
@@ -101,9 +102,9 @@ func (s *Service) RunPaperExecutionCycle(ctx context.Context, req RunPaperExecut
 	}
 
 	pending, err := s.ListPendingOrderTickets(ctx, ListPendingOrderTicketsRequest{
-		ValidationID: validationID,
-		Symbol:       req.Symbol,
-		Interval:     req.Interval,
+		ValidationID: scope.ValidationID,
+		Symbol:       scope.Symbol,
+		Interval:     scope.Interval,
 		Limit:        1,
 		ScanLimit:    req.PendingScanLimit,
 	})
@@ -128,10 +129,10 @@ func (s *Service) RunPaperExecutionCycle(ctx context.Context, req RunPaperExecut
 	}
 
 	entry, err := s.ReconcilePaperEntryWithQuote(ctx, ReconcilePaperEntryWithQuoteRequest{
-		ValidationID:     validationID,
+		ValidationID:     scope.ValidationID,
 		TicketID:         pending.Tickets[0].TicketID,
-		Symbol:           req.Symbol,
-		Interval:         req.Interval,
+		Symbol:           scope.Symbol,
+		Interval:         scope.Interval,
 		Liquidity:        req.Liquidity,
 		Costs:            req.Costs,
 		AsOf:             req.AsOf,
