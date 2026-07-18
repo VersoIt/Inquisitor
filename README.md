@@ -70,10 +70,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 equity-ledger performance report that summarizes live-paper accounting events and can persist UTC daily snapshots from the close/equity journal.
 - Initial Phase 7 paper position settlement use case that safely chains position close recording and equity accounting, allowing retries to continue after a close was already persisted.
 - Initial Phase 7 conservative paper market execution helpers that derive simulated entry/exit fills from mid price plus fee/spread/slippage assumptions before recording fills or settlements.
-- Initial Phase 7 automated paper entry/exit reconciliation and bounded execution-cycle CLI that selects pending tickets/open positions, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, and settles triggered stop-loss/take-profit exits without sending exchange orders.
+- Initial Phase 7 automated paper entry/exit reconciliation, bounded execution-cycle CLI, and Docker-backed smoke script that selects pending tickets/open positions, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, verifies duplicate-entry prevention, and settles triggered stop-loss/take-profit exits without sending exchange orders.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add smoke scripts and operational guardrails around the bounded paper-only execution cycle. Exchange order placement remains intentionally absent.
+The next Phase 7 slices should add stronger operational guardrails around the bounded paper-only execution cycle. Exchange order placement remains intentionally absent.
 
 ## What This Is Not
 
@@ -428,6 +428,12 @@ Run a bounded paper execution cycle. Each cycle checks exits first, records at m
 go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-cycle -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER -cycle-limit 1
 ```
 
+Run the Docker-backed smoke for the bounded cycle. It applies migrations, seeds a repeatable RUNNING paper validation with one approved paper ticket and one fresh orderbook snapshot, then runs two cycles: the first opens the position, the second proves the active-position guard prevents a duplicate entry. The script writes a temporary paper-enabled config and does not modify `configs/config.example.yaml`:
+
+```powershell
+.\scripts\paper-cycle-smoke.ps1
+```
+
 Reconcile a conservative paper entry from an existing immutable paper order ticket and an observed market mid price. This writes the fill journal and opens the corresponding paper position idempotently; it does not send an exchange order:
 
 ```powershell
@@ -495,6 +501,7 @@ make paper-pending VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER
 make paper-auto-enter VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-auto-exit VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1
 make paper-auto-cycle VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1 PAPER_CYCLE_LIMIT=1
+make paper-cycle-smoke
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-settle PAPER_EVENT_ID=paper_equity_001 PAPER_CLOSE_ID=paper_close_001 PAPER_POSITION_ID=paper_position_001 PAPER_MID_PRICE=101000 PAPER_CLOSE_REASON=TAKE_PROFIT PAPER_EXECUTION_AT=2026-07-16T13:00:00Z
