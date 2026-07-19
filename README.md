@@ -428,7 +428,7 @@ Run a bounded paper execution cycle. Each cycle checks exits first, records at m
 go run ./cmd/paper-execute -config configs/config.example.yaml -action auto-cycle -validation-id paper_validation_001 -symbol BTCUSDT -interval 1 -liquidity TAKER -cycle-limit 1
 ```
 
-Preflight the same paper execution-cycle scope without writing fills, positions, closes, or equity events. It uses the same validation/symbol/interval advisory lock as `auto-cycle`, then checks paper safety config, RUNNING validation status, fresh quote availability, pending-ticket counts, active/closed position counts, and whether closed positions already have equity ledger events:
+Preflight the same paper execution-cycle scope without writing fills, positions, closes, or equity events. It uses the same validation/symbol/interval advisory lock as `auto-cycle`, then checks paper safety config, RUNNING validation status, active Kill Switch entry blocking, fresh quote availability, pending-ticket counts, active/closed position counts, and whether closed positions already have equity ledger events:
 
 ```powershell
 go run ./cmd/paper-execute -config configs/config.example.yaml -action cycle-preflight -validation-id paper_validation_001 -symbol BTCUSDT -interval 1

@@ -29,6 +29,10 @@ type PreflightPaperExecutionCycleResult struct {
 	Record                     domainpaper.ValidationRecord
 	Quote                      SourceOrderbookQuoteResult
 	QuoteSourced               bool
+	KillSwitchActive           bool
+	KillSwitchReason           string
+	KillSwitchSource           string
+	EntryBlockedByKillSwitch   bool
 	PendingTickets             int
 	ScannedTickets             int
 	FilledTickets              int
@@ -61,6 +65,9 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 	if s.equity == nil {
 		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("paper execution cycle preflight requires equity event repository")
 	}
+	if s.killSwitch == nil {
+		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("paper execution cycle preflight requires kill switch repository")
+	}
 	if s.orderbooks == nil {
 		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("paper execution cycle preflight requires orderbook snapshot repository")
 	}
@@ -87,6 +94,10 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 	}
 	if record.Status != domainpaper.ValidationStatusRunning {
 		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("paper execution cycle preflight requires RUNNING validation status")
+	}
+	killSwitch, err := s.killSwitch.CurrentKillSwitchState(ctx)
+	if err != nil {
+		return PreflightPaperExecutionCycleResult{}, fmt.Errorf("load kill switch before execution preflight: %w", err)
 	}
 
 	quote, err := s.SourceOrderbookQuote(ctx, SourceOrderbookQuoteRequest{
@@ -131,6 +142,9 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 		Record:           record,
 		Quote:            quote,
 		QuoteSourced:     true,
+		KillSwitchActive: killSwitch.Active,
+		KillSwitchReason: killSwitch.Reason,
+		KillSwitchSource: killSwitch.Source,
 		PendingTickets:   len(pending.Tickets),
 		ScannedTickets:   pending.ScannedTickets,
 		FilledTickets:    pending.FilledTickets,
@@ -138,8 +152,9 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 	}
 	for _, position := range positions {
 		closes, err := s.closes.ListPositionCloses(ctx, domainpaper.PositionCloseQuery{
-			PositionID: position.PositionID,
-			Limit:      2,
+			ValidationID: record.ValidationID,
+			PositionID:   position.PositionID,
+			Limit:        2,
 		})
 		if err != nil {
 			return PreflightPaperExecutionCycleResult{}, fmt.Errorf("check paper position %q close status for execution preflight: %w", position.PositionID, err)
@@ -161,6 +176,11 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 			continue
 		}
 		result.ActivePositions++
+	}
+	if result.KillSwitchActive && result.PendingTickets > 0 &&
+		result.ActivePositions == 0 && result.UnaccountedClosedPositions == 0 {
+		result.EntryBlockedByKillSwitch = true
+		return result, fmt.Errorf("paper execution cycle preflight requires inactive kill switch before pending entry: reason=%q source=%q", result.KillSwitchReason, result.KillSwitchSource)
 	}
 	return result, nil
 }

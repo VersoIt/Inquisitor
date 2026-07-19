@@ -295,6 +295,27 @@ INSERT INTO risk_kill_switch_events (
 );
 "
 
+printf 'Verifying paper execution cycle preflight reports kill switch entry block\n'
+set +e
+kill_switch_preflight_output="$(go run ./cmd/paper-execute \
+    -config "$smoke_config" \
+    -action cycle-preflight \
+    -validation-id "$VALIDATION_ID" \
+    -symbol "$SYMBOL" \
+    -interval "$INTERVAL" \
+    -quote-as-of "$QUOTE_AS_OF" \
+    -pending-scan-limit 10 \
+    -position-scan-limit 10 \
+    -quote-scan-limit 10 2>&1)"
+kill_switch_preflight_status="$?"
+set -e
+if [ "$kill_switch_preflight_status" -eq 0 ]; then
+    fail "paper execution cycle preflight unexpectedly passed while kill switch blocked pending entry"
+fi
+printf '%s\n' "$kill_switch_preflight_output" | grep -q "kill switch" \
+    || fail "paper execution cycle preflight kill-switch guard mismatch: $kill_switch_preflight_output"
+
+printf 'Verifying paper execution cycle blocks kill switch entry\n'
 set +e
 kill_switch_output="$(go run ./cmd/paper-execute \
     -config "$smoke_config" \

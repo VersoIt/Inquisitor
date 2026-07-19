@@ -13,6 +13,7 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/clock"
 	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
 
 func TestServicePreflightPaperExecutionCycleSummarizesScopeWithoutWrites(t *testing.T) {
@@ -101,12 +102,148 @@ func TestServicePreflightPaperExecutionCycleSummarizesScopeWithoutWrites(t *test
 	if got.AccountedClosedPositions != 1 || got.UnaccountedClosedPositions != 0 {
 		t.Fatalf("equity ledger counters mismatch: %#v", got)
 	}
+	if got.KillSwitchActive || got.EntryBlockedByKillSwitch || got.KillSwitchReason != "" || got.KillSwitchSource != "" {
+		t.Fatalf("inactive kill switch preflight mismatch: %#v", got)
+	}
 	if fills.calls != 0 || positions.calls != 0 || closes.calls != 0 || equity.calls != 0 {
 		t.Fatalf("preflight must not write: fill_calls=%d position_calls=%d close_calls=%d equity_calls=%d", fills.calls, positions.calls, closes.calls, equity.calls)
 	}
 	if len(orderbooks.queries) != 1 || len(fills.queries) != 2 || len(positions.queries) != 1 ||
 		len(closes.queries) != 2 || len(equity.queries) != 1 {
 		t.Fatalf("query counters mismatch: orderbooks=%#v fills=%#v positions=%#v closes=%#v equity=%#v", orderbooks.queries, fills.queries, positions.queries, closes.queries, equity.queries)
+	}
+}
+
+func TestServicePreflightPaperExecutionCycleChecksKillSwitchBeforePendingEntryTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	quoteTime := now.Add(time.Minute)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	ticket := appOrderTicket(now)
+	ticket.ValidationID = record.ValidationID
+	position := appOpenPosition(now)
+	position.ValidationID = record.ValidationID
+	close := appPositionClose(now)
+	close.ValidationID = record.ValidationID
+	close.PositionID = position.PositionID
+	repositoryErr := errors.New("postgres unavailable")
+	activeKillSwitch := domainrisk.KillSwitchState{
+		Active:    true,
+		Reason:    "operator emergency stop",
+		Source:    "operator",
+		UpdatedAt: now.Add(time.Minute),
+	}
+	validReq := apppaper.PreflightPaperExecutionCycleRequest{
+		ValidationID:      record.ValidationID,
+		Exchange:          "bybit",
+		Category:          "linear",
+		Symbol:            "BTCUSDT",
+		Interval:          "1",
+		AsOf:              quoteTime.Add(time.Second),
+		MaxStaleness:      30 * time.Second,
+		MaxSpreadBPS:      decimal.RequireFromString("250"),
+		PendingScanLimit:  10,
+		PositionScanLimit: 10,
+		QuoteScanLimit:    10,
+	}
+
+	tests := []struct {
+		name              string
+		tickets           []domainpaper.OrderTicket
+		positions         []domainpaper.OpenPosition
+		closes            []domainpaper.PositionClose
+		equity            []domainpaper.EquityEvent
+		killSwitchState   domainrisk.KillSwitchState
+		killSwitchErr     error
+		wantErrSub        string
+		wantBlocked       bool
+		wantActive        bool
+		wantUnaccounted   int
+		wantQuoteQueries  int
+		wantKillSwitchHit int
+	}{
+		{
+			name:              "active kill switch blocks pending entry",
+			tickets:           []domainpaper.OrderTicket{ticket},
+			killSwitchState:   activeKillSwitch,
+			wantErrSub:        "kill switch",
+			wantBlocked:       true,
+			wantActive:        true,
+			wantQuoteQueries:  1,
+			wantKillSwitchHit: 1,
+		},
+		{
+			name:              "active kill switch does not block active position inspection",
+			tickets:           []domainpaper.OrderTicket{ticket},
+			positions:         []domainpaper.OpenPosition{position},
+			killSwitchState:   activeKillSwitch,
+			wantActive:        true,
+			wantQuoteQueries:  1,
+			wantKillSwitchHit: 1,
+		},
+		{
+			name:              "active kill switch does not block unaccounted close recovery",
+			tickets:           []domainpaper.OrderTicket{ticket},
+			positions:         []domainpaper.OpenPosition{position},
+			closes:            []domainpaper.PositionClose{close},
+			killSwitchState:   activeKillSwitch,
+			wantActive:        true,
+			wantUnaccounted:   1,
+			wantQuoteQueries:  1,
+			wantKillSwitchHit: 1,
+		},
+		{
+			name:              "inactive kill switch allows pending entry preflight",
+			tickets:           []domainpaper.OrderTicket{ticket},
+			wantQuoteQueries:  1,
+			wantKillSwitchHit: 1,
+		},
+		{
+			name:              "kill switch lookup failure fails closed",
+			tickets:           []domainpaper.OrderTicket{ticket},
+			killSwitchErr:     repositoryErr,
+			wantErrSub:        repositoryErr.Error(),
+			wantKillSwitchHit: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			killSwitch := &fakePaperKillSwitchRepository{state: tt.killSwitchState, err: tt.killSwitchErr}
+			orderbooks := &fakeOrderbookSnapshotRepository{snapshots: []marketdata.OrderbookSnapshot{appOrderbookSnapshot(quoteTime, "100000", "100200")}}
+			service := preflightService(
+				now,
+				record,
+				tt.tickets,
+				&fakeOrderFillRepository{},
+				&fakeOpenPositionRepository{positions: tt.positions},
+				&fakePositionCloseRepository{closes: tt.closes},
+				&fakeEquityEventRepository{events: tt.equity},
+				orderbooks,
+				killSwitch,
+			)
+
+			got, err := service.PreflightPaperExecutionCycle(context.Background(), validReq)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+			} else if err != nil {
+				t.Fatalf("preflight paper execution cycle: %v", err)
+			}
+			if got.KillSwitchActive != tt.wantActive || got.EntryBlockedByKillSwitch != tt.wantBlocked ||
+				got.UnaccountedClosedPositions != tt.wantUnaccounted {
+				t.Fatalf("kill-switch preflight result mismatch: %#v", got)
+			}
+			if tt.wantActive && (got.KillSwitchReason != "operator emergency stop" || got.KillSwitchSource != "operator") {
+				t.Fatalf("kill-switch metadata mismatch: %#v", got)
+			}
+			if len(orderbooks.queries) != tt.wantQuoteQueries {
+				t.Fatalf("quote query count mismatch: got %d want %d queries=%#v", len(orderbooks.queries), tt.wantQuoteQueries, orderbooks.queries)
+			}
+			if killSwitch.currentCalls != tt.wantKillSwitchHit {
+				t.Fatalf("kill switch query count mismatch: got %d want %d", killSwitch.currentCalls, tt.wantKillSwitchHit)
+			}
+		})
 	}
 }
 
@@ -400,6 +537,39 @@ func TestServicePreflightPaperExecutionCycleRequiresEquityRepository(t *testing.
 	}
 }
 
+func TestServicePreflightPaperExecutionCycleRequiresKillSwitchRepository(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	service := preflightService(
+		now,
+		record,
+		nil,
+		&fakeOrderFillRepository{},
+		&fakeOpenPositionRepository{},
+		&fakePositionCloseRepository{},
+		&fakeEquityEventRepository{},
+		&fakeOrderbookSnapshotRepository{},
+		nil,
+	)
+
+	_, err := service.PreflightPaperExecutionCycle(context.Background(), apppaper.PreflightPaperExecutionCycleRequest{
+		ValidationID:      record.ValidationID,
+		Exchange:          "bybit",
+		Category:          "linear",
+		Symbol:            "BTCUSDT",
+		Interval:          "1",
+		AsOf:              now.Add(time.Minute),
+		MaxStaleness:      30 * time.Second,
+		MaxSpreadBPS:      decimal.RequireFromString("250"),
+		PendingScanLimit:  10,
+		PositionScanLimit: 10,
+		QuoteScanLimit:    10,
+	})
+	if err == nil || !strings.Contains(err.Error(), "kill switch repository") {
+		t.Fatalf("expected missing kill switch repository error, got %v", err)
+	}
+}
+
 func preflightService(
 	now time.Time,
 	record domainpaper.ValidationRecord,
@@ -409,6 +579,7 @@ func preflightService(
 	closes *fakePositionCloseRepository,
 	equity *fakeEquityEventRepository,
 	orderbooks *fakeOrderbookSnapshotRepository,
+	killSwitches ...*fakePaperKillSwitchRepository,
 ) *apppaper.Service {
 	options := []apppaper.Option{
 		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
@@ -421,6 +592,13 @@ func preflightService(
 	}
 	if equity != nil {
 		options = append(options, apppaper.WithEquityEventRepository(equity))
+	}
+	killSwitch := &fakePaperKillSwitchRepository{}
+	if len(killSwitches) > 0 {
+		killSwitch = killSwitches[0]
+	}
+	if killSwitch != nil {
+		options = append(options, apppaper.WithKillSwitchRepository(killSwitch))
 	}
 	return apppaper.NewService(&fakeRunRepository{}, &fakeResultRepository{}, options...)
 }

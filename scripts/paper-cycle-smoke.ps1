@@ -345,6 +345,34 @@ INSERT INTO risk_kill_switch_events (
 );
 "@
 
+Write-Host "Verifying paper execution cycle preflight reports kill switch entry block"
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$killSwitchPreflightOutput = @()
+$killSwitchPreflightExitCode = 0
+try {
+    $killSwitchPreflightOutput = & go run ./cmd/paper-execute `
+        -config $smokeConfig `
+        -action cycle-preflight `
+        -validation-id $ValidationID `
+        -symbol $Symbol `
+        -interval $Interval `
+        -quote-as-of $quoteAsOfSql `
+        -pending-scan-limit 10 `
+        -position-scan-limit 10 `
+        -quote-scan-limit 10 2>&1
+    $killSwitchPreflightExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if ($killSwitchPreflightExitCode -eq 0) {
+    throw "paper execution cycle preflight unexpectedly passed while kill switch blocked pending entry"
+}
+if (($killSwitchPreflightOutput -join "`n") -notmatch "kill switch") {
+    throw "paper execution cycle preflight kill-switch guard mismatch: $($killSwitchPreflightOutput -join "`n")"
+}
+
+Write-Host "Verifying paper execution cycle blocks kill switch entry"
 $previousErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 $killSwitchOutput = @()
