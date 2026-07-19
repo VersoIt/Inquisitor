@@ -139,6 +139,10 @@ func TestServiceReconcilePaperExitWithQuoteSkipsWhenNoExitTrigger(t *testing.T) 
 	if closes.calls != 0 || equity.calls != 0 {
 		t.Fatalf("no trigger must not write close/equity: close_calls=%d equity_calls=%d", closes.calls, equity.calls)
 	}
+	if len(closes.queries) != 1 || closes.queries[0].ValidationID != record.ValidationID ||
+		closes.queries[0].PositionID != position.PositionID || closes.queries[0].Limit != 2 {
+		t.Fatalf("explicit exit close lookup must be scoped to validation: %#v", closes.queries)
+	}
 }
 
 func TestServiceReconcilePaperExitWithQuoteSkipsClosedPositionsAndSettlesNextOpen(t *testing.T) {
@@ -183,6 +187,57 @@ func TestServiceReconcilePaperExitWithQuoteSkipsClosedPositionsAndSettlesNextOpe
 	if !got.ExitTriggered || got.Position.PositionID != openPosition.PositionID ||
 		got.ScannedPositions != 2 || got.ClosedPositions != 1 || got.CheckedPositions != 1 {
 		t.Fatalf("scanned exit mismatch: %#v", got)
+	}
+}
+
+func TestServiceReconcilePaperExitWithQuoteScopesExistingCloseLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	position := appOpenPosition(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = position.ValidationID
+	foreignClose := appPositionClose(now)
+	foreignClose.CloseID = "paper_close_foreign_0001"
+	foreignClose.ValidationID = "paper_validation_foreign_0001"
+	foreignClose.PositionID = position.PositionID
+	quoteTime := now.Add(4 * time.Minute)
+	closes := &fakePositionCloseRepository{
+		closes: []domainpaper.PositionClose{foreignClose},
+		stats:  domainpaper.PositionCloseStats{Inserted: 1},
+	}
+	equity := &fakeEquityEventRepository{stats: domainpaper.EquityEventStats{Inserted: 1}}
+	orderbooks := &fakeOrderbookSnapshotRepository{
+		snapshots: []marketdata.OrderbookSnapshot{appOrderbookSnapshot(quoteTime, "101900", "102100")},
+	}
+	service := autoExitReconciliationService(now, record, []domainpaper.OpenPosition{position}, closes, equity, orderbooks)
+
+	got, err := service.ReconcilePaperExitWithQuote(context.Background(), apppaper.ReconcilePaperExitWithQuoteRequest{
+		ValidationID:      position.ValidationID,
+		Liquidity:         backtest.LiquidityTaker,
+		Costs:             marketExecutionCosts(t),
+		AsOf:              quoteTime.Add(time.Second),
+		MaxStaleness:      30 * time.Second,
+		MaxSpreadBPS:      decimal.RequireFromString("250"),
+		PositionScanLimit: 10,
+		QuoteScanLimit:    10,
+	})
+	if err != nil {
+		t.Fatalf("reconcile paper exit with foreign close present: %v", err)
+	}
+
+	if !got.ExitTriggered || got.UsedExistingClose || got.Close.ValidationID != record.ValidationID ||
+		got.Close.CloseID == foreignClose.CloseID {
+		t.Fatalf("scoped exit result mismatch: %#v", got)
+	}
+	if got.ScannedPositions != 1 || got.CheckedPositions != 1 || got.ClosedPositions != 0 {
+		t.Fatalf("scoped exit counters mismatch: %#v", got)
+	}
+	if len(closes.queries) < 2 {
+		t.Fatalf("expected existing-close and close-position lookups, got %#v", closes.queries)
+	}
+	for index, query := range closes.queries[:2] {
+		if query.ValidationID != record.ValidationID || query.PositionID != position.PositionID || query.Limit != 2 {
+			t.Fatalf("close lookup[%d] must be scoped to validation: %#v", index, query)
+		}
 	}
 }
 

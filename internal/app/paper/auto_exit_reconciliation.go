@@ -109,7 +109,7 @@ func (s *Service) reconcileExplicitPaperExit(
 		ScannedPositions: 1,
 		PositionFound:    true,
 	}
-	existingClose, ok, err := s.findExistingCloseForPaperExit(ctx, position.PositionID)
+	existingClose, ok, err := s.findExistingCloseForPaperExit(ctx, record.ValidationID, position.PositionID)
 	if err != nil {
 		return ReconcilePaperExitWithQuoteResult{}, err
 	}
@@ -140,7 +140,7 @@ func (s *Service) reconcileScannedPaperExit(
 		ScannedPositions: len(positions),
 	}
 	for _, position := range positions {
-		existingClose, ok, err := s.findExistingCloseForPaperExit(ctx, position.PositionID)
+		existingClose, ok, err := s.findExistingCloseForPaperExit(ctx, record.ValidationID, position.PositionID)
 		if err != nil {
 			return ReconcilePaperExitWithQuoteResult{}, err
 		}
@@ -290,10 +290,11 @@ func (s *Service) paperExitEventIDForExistingClose(ctx context.Context, closeID 
 	return defaultPaperExitEventID(closeID, ""), nil
 }
 
-func (s *Service) findExistingCloseForPaperExit(ctx context.Context, positionID string) (domainpaper.PositionClose, bool, error) {
+func (s *Service) findExistingCloseForPaperExit(ctx context.Context, validationID string, positionID string) (domainpaper.PositionClose, bool, error) {
 	closes, err := s.closes.ListPositionCloses(ctx, domainpaper.PositionCloseQuery{
-		PositionID: positionID,
-		Limit:      2,
+		ValidationID: validationID,
+		PositionID:   positionID,
+		Limit:        2,
 	})
 	if err != nil {
 		return domainpaper.PositionClose{}, false, fmt.Errorf("check paper position %q close journal: %w", positionID, err)

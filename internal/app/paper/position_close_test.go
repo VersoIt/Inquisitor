@@ -55,8 +55,40 @@ func TestServiceClosePositionFromOpenPosition(t *testing.T) {
 	if closes.calls != 1 || closes.close.CloseID != got.Close.CloseID || got.Stats.Inserted != 1 {
 		t.Fatalf("close repository mismatch: calls=%d close=%#v stats=%#v", closes.calls, closes.close, got.Stats)
 	}
-	if len(closes.queries) != 1 || closes.queries[0].PositionID != position.PositionID || closes.queries[0].Limit != 2 {
+	if len(closes.queries) != 1 || closes.queries[0].ValidationID != record.ValidationID ||
+		closes.queries[0].PositionID != position.PositionID || closes.queries[0].Limit != 2 {
 		t.Fatalf("expected position close lookup before write, got %#v", closes.queries)
+	}
+}
+
+func TestServiceClosePositionScopesExistingCloseLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	position := appOpenPosition(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = position.ValidationID
+	foreignClose := appPositionClose(now)
+	foreignClose.CloseID = "paper_close_foreign_0001"
+	foreignClose.ValidationID = "paper_validation_foreign_0001"
+	foreignClose.PositionID = position.PositionID
+	closes := &fakePositionCloseRepository{
+		closes: []domainpaper.PositionClose{foreignClose},
+		stats:  domainpaper.PositionCloseStats{Inserted: 1},
+	}
+	service := closePositionService(now, record, []domainpaper.OpenPosition{position}, closes)
+
+	got, err := service.ClosePosition(context.Background(), appClosePositionRequest(now))
+	if err != nil {
+		t.Fatalf("close position with foreign close present: %v", err)
+	}
+
+	if got.Close.ValidationID != record.ValidationID || got.Close.PositionID != position.PositionID || got.Stats.Inserted != 1 {
+		t.Fatalf("scoped close result mismatch: %#v", got)
+	}
+	if closes.calls != 1 || len(closes.queries) != 1 {
+		t.Fatalf("close repository call mismatch: calls=%d queries=%#v", closes.calls, closes.queries)
+	}
+	if closes.queries[0].ValidationID != record.ValidationID || closes.queries[0].PositionID != position.PositionID || closes.queries[0].Limit != 2 {
+		t.Fatalf("close lookup must be scoped to validation: %#v", closes.queries[0])
 	}
 }
 

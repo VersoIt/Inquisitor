@@ -61,7 +61,7 @@ func (s *Service) ClosePosition(ctx context.Context, req ClosePositionRequest) (
 	if record.Status != domainpaper.ValidationStatusRunning {
 		return ClosePositionResult{}, fmt.Errorf("paper close position requires RUNNING validation status")
 	}
-	if err := s.ensurePositionNotClosedByAnotherClose(ctx, position.PositionID, req.CloseID); err != nil {
+	if err := s.ensurePositionNotClosedByAnotherClose(ctx, position.ValidationID, position.PositionID, req.CloseID); err != nil {
 		return ClosePositionResult{}, err
 	}
 
@@ -115,10 +115,11 @@ func (s *Service) loadOpenPosition(ctx context.Context, positionID string) (doma
 	return positions[0], nil
 }
 
-func (s *Service) ensurePositionNotClosedByAnotherClose(ctx context.Context, positionID string, closeID string) error {
+func (s *Service) ensurePositionNotClosedByAnotherClose(ctx context.Context, validationID string, positionID string, closeID string) error {
 	existing, err := s.closes.ListPositionCloses(ctx, domainpaper.PositionCloseQuery{
-		PositionID: positionID,
-		Limit:      2,
+		ValidationID: validationID,
+		PositionID:   positionID,
+		Limit:        2,
 	})
 	if err != nil {
 		return fmt.Errorf("check paper position %q close journal: %w", positionID, err)
