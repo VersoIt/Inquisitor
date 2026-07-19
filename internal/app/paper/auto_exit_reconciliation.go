@@ -240,8 +240,9 @@ func (s *Service) accountExistingPaperExit(
 		return ReconcilePaperExitWithQuoteResult{}, err
 	}
 	accounted, err := s.AccountPositionClose(ctx, AccountPositionCloseRequest{
-		EventID: eventID,
-		CloseID: existingClose.CloseID,
+		ValidationID: existingClose.ValidationID,
+		EventID:      eventID,
+		CloseID:      existingClose.CloseID,
 	})
 	if err != nil {
 		return ReconcilePaperExitWithQuoteResult{}, err

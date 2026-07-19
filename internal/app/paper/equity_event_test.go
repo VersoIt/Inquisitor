@@ -89,6 +89,46 @@ func TestServiceAccountPositionCloseScopesExistingEventLookupToValidation(t *tes
 	}
 }
 
+func TestServiceAccountPositionCloseScopesCloseLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	close := appPositionClose(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = close.ValidationID
+	foreignClose := close
+	foreignClose.ValidationID = "paper_validation_foreign_0001"
+	foreignClose.PositionID = "paper_position_foreign_0001"
+	foreignClose.TicketID = "paper_ticket_foreign_0001"
+	foreignClose.EntryFillID = "paper_fill_foreign_0001"
+	closes := &fakePositionCloseRepository{closes: []domainpaper.PositionClose{foreignClose, close}}
+	equity := &fakeEquityEventRepository{stats: domainpaper.EquityEventStats{Inserted: 1}}
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithPositionCloseRepository(closes),
+		apppaper.WithEquityEventRepository(equity),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(5 * time.Minute)}),
+	)
+
+	got, err := service.AccountPositionClose(context.Background(), apppaper.AccountPositionCloseRequest{
+		ValidationID: record.ValidationID,
+		EventID:      "paper_equity_app_0001",
+		CloseID:      close.CloseID,
+	})
+	if err != nil {
+		t.Fatalf("account scoped position close: %v", err)
+	}
+
+	if got.Close.ValidationID != record.ValidationID || got.Close.PositionID != close.PositionID ||
+		got.Event.ValidationID != record.ValidationID {
+		t.Fatalf("scoped close lookup result mismatch: %#v", got)
+	}
+	if len(closes.queries) != 1 || closes.queries[0].ValidationID != record.ValidationID ||
+		closes.queries[0].CloseID != close.CloseID || closes.queries[0].Limit != 2 {
+		t.Fatalf("close lookup must be scoped to validation: %#v", closes.queries)
+	}
+}
+
 func TestServiceAccountPositionCloseContinuesExistingEquityLedger(t *testing.T) {
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	firstClose := appPositionClose(now)

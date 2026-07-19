@@ -14,8 +14,9 @@ import (
 const maxEquityLedgerEvents = 100_000
 
 type AccountPositionCloseRequest struct {
-	EventID string
-	CloseID string
+	ValidationID string
+	EventID      string
+	CloseID      string
 }
 
 type AccountPositionCloseResult struct {
@@ -42,9 +43,13 @@ func (s *Service) AccountPositionClose(ctx context.Context, req AccountPositionC
 		return AccountPositionCloseResult{}, fmt.Errorf("paper equity accounting service requires clock")
 	}
 
-	close, err := s.loadPositionClose(ctx, req.CloseID)
+	validationID := strings.TrimSpace(req.ValidationID)
+	close, err := s.loadPositionClose(ctx, validationID, req.CloseID)
 	if err != nil {
 		return AccountPositionCloseResult{}, err
+	}
+	if validationID != "" && close.ValidationID != validationID {
+		return AccountPositionCloseResult{}, fmt.Errorf("paper position close %q belongs to validation %q, not %q", close.CloseID, close.ValidationID, validationID)
 	}
 	record, err := s.loadValidationRecord(ctx, close.ValidationID)
 	if err != nil {
@@ -98,14 +103,15 @@ func (s *Service) AccountPositionClose(ctx context.Context, req AccountPositionC
 	return AccountPositionCloseResult{Record: record, Close: close, Event: event, Stats: stats}, nil
 }
 
-func (s *Service) loadPositionClose(ctx context.Context, closeID string) (domainpaper.PositionClose, error) {
+func (s *Service) loadPositionClose(ctx context.Context, validationID string, closeID string) (domainpaper.PositionClose, error) {
 	closeID = strings.TrimSpace(closeID)
 	if closeID == "" {
 		return domainpaper.PositionClose{}, fmt.Errorf("close_id is required")
 	}
 	closes, err := s.closes.ListPositionCloses(ctx, domainpaper.PositionCloseQuery{
-		CloseID: closeID,
-		Limit:   2,
+		ValidationID: validationID,
+		CloseID:      closeID,
+		Limit:        2,
 	})
 	if err != nil {
 		return domainpaper.PositionClose{}, fmt.Errorf("load paper position close %q: %w", closeID, err)

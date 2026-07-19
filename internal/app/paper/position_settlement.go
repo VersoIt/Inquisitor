@@ -35,8 +35,9 @@ func (s *Service) SettlePositionClose(ctx context.Context, req SettlePositionClo
 		return SettlePositionCloseResult{}, err
 	}
 	accounted, err := s.AccountPositionClose(ctx, AccountPositionCloseRequest{
-		EventID: req.EventID,
-		CloseID: closed.Close.CloseID,
+		ValidationID: closed.Record.ValidationID,
+		EventID:      req.EventID,
+		CloseID:      closed.Close.CloseID,
 	})
 	if err != nil {
 		return SettlePositionCloseResult{}, err
