@@ -96,7 +96,7 @@ func (s *Service) reconcileExplicitPaperExit(
 	req ReconcilePaperExitWithQuoteRequest,
 	positionID string,
 ) (ReconcilePaperExitWithQuoteResult, error) {
-	position, err := s.loadOpenPosition(ctx, positionID)
+	position, err := s.loadOpenPosition(ctx, record.ValidationID, positionID)
 	if err != nil {
 		return ReconcilePaperExitWithQuoteResult{}, err
 	}
@@ -206,6 +206,7 @@ func (s *Service) evaluateAndSettlePaperExit(
 		EventID:      eventID,
 		CloseID:      closeID,
 		PositionID:   result.Position.PositionID,
+		ValidationID: result.Position.ValidationID,
 		Liquidity:    req.Liquidity,
 		ExitMidPrice: quote.MidPrice,
 		Costs:        req.Costs,

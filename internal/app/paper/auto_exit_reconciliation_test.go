@@ -145,6 +145,59 @@ func TestServiceReconcilePaperExitWithQuoteSkipsWhenNoExitTrigger(t *testing.T) 
 	}
 }
 
+func TestServiceReconcilePaperExitWithQuoteScopesExplicitPositionLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	position := appOpenPosition(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = position.ValidationID
+	foreignPosition := position
+	foreignPosition.ValidationID = "paper_validation_foreign_0001"
+	positions := &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{foreignPosition, position}}
+	closes := &fakePositionCloseRepository{}
+	equity := &fakeEquityEventRepository{}
+	quoteTime := now.Add(2 * time.Minute)
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOpenPositionRepository(positions),
+		apppaper.WithPositionCloseRepository(closes),
+		apppaper.WithEquityEventRepository(equity),
+		apppaper.WithOrderbookSnapshotRepository(&fakeOrderbookSnapshotRepository{
+			snapshots: []marketdata.OrderbookSnapshot{appOrderbookSnapshot(quoteTime, "100400", "100600")},
+		}),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(5 * time.Minute)}),
+	)
+
+	got, err := service.ReconcilePaperExitWithQuote(context.Background(), apppaper.ReconcilePaperExitWithQuoteRequest{
+		ValidationID:      " " + record.ValidationID + " ",
+		PositionID:        position.PositionID,
+		Liquidity:         backtest.LiquidityTaker,
+		Costs:             marketExecutionCosts(t),
+		AsOf:              quoteTime.Add(time.Second),
+		MaxStaleness:      30 * time.Second,
+		MaxSpreadBPS:      decimal.RequireFromString("250"),
+		PositionScanLimit: 10,
+		QuoteScanLimit:    10,
+	})
+	if err != nil {
+		t.Fatalf("reconcile explicit exit with foreign position present: %v", err)
+	}
+
+	if !got.PositionFound || got.Position.ValidationID != record.ValidationID || got.ExitTriggered {
+		t.Fatalf("scoped explicit exit result mismatch: %#v", got)
+	}
+	if len(positions.queries) != 1 {
+		t.Fatalf("expected one explicit position lookup, got %#v", positions.queries)
+	}
+	if positions.queries[0].ValidationID != record.ValidationID || positions.queries[0].PositionID != position.PositionID || positions.queries[0].Limit != 2 {
+		t.Fatalf("position lookup must be scoped to validation: %#v", positions.queries[0])
+	}
+	if closes.calls != 0 || equity.calls != 0 {
+		t.Fatalf("no trigger must not write close/equity: close_calls=%d equity_calls=%d", closes.calls, equity.calls)
+	}
+}
+
 func TestServiceReconcilePaperExitWithQuoteSkipsClosedPositionsAndSettlesNextOpen(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	closedPosition := appOpenPosition(now)
@@ -440,7 +493,7 @@ func TestServiceReconcilePaperExitWithQuoteRejectsUnsafeInputsTableDriven(t *tes
 			wantErrSub: "RUNNING",
 		},
 		{
-			name:   "explicit position validation mismatch",
+			name:   "explicit position outside validation is not found",
 			record: record,
 			positions: []domainpaper.OpenPosition{func() domainpaper.OpenPosition {
 				other := position
@@ -455,7 +508,7 @@ func TestServiceReconcilePaperExitWithQuoteRejectsUnsafeInputsTableDriven(t *tes
 				req.PositionID = position.PositionID
 				return req
 			}(),
-			wantErrSub: "belongs to validation",
+			wantErrSub: "not found",
 		},
 		{
 			name:      "existing close id mismatch",

@@ -157,6 +157,55 @@ func TestServiceSettlePositionAtMarketComputesExitAndAccountsEquity(t *testing.T
 	}
 }
 
+func TestServiceSettlePositionAtMarketScopesPositionLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	position := appOpenPosition(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = position.ValidationID
+	foreignPosition := position
+	foreignPosition.ValidationID = "paper_validation_foreign_0001"
+	positions := &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{foreignPosition, position}}
+	closes := &fakePositionCloseRepository{stats: domainpaper.PositionCloseStats{Inserted: 1}}
+	equity := &fakeEquityEventRepository{stats: domainpaper.EquityEventStats{Inserted: 1}}
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOpenPositionRepository(positions),
+		apppaper.WithPositionCloseRepository(closes),
+		apppaper.WithEquityEventRepository(equity),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(5 * time.Minute)}),
+	)
+
+	got, err := service.SettlePositionAtMarket(context.Background(), apppaper.SettlePositionAtMarketRequest{
+		EventID:      "paper_equity_app_0001",
+		CloseID:      "paper_close_app_0001",
+		PositionID:   position.PositionID,
+		ValidationID: " " + record.ValidationID + " ",
+		Liquidity:    backtest.LiquidityTaker,
+		ExitMidPrice: decimal.RequireFromString("101000"),
+		Costs:        marketExecutionCosts(t),
+		CloseReason:  domainpaper.PositionCloseReasonTakeProfit,
+		ClosedAt:     position.OpenedAt.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("settle position at market with foreign position present: %v", err)
+	}
+
+	if got.Position.ValidationID != record.ValidationID || got.Close.ValidationID != record.ValidationID ||
+		got.Event.ValidationID != record.ValidationID {
+		t.Fatalf("scoped settlement result mismatch: %#v", got)
+	}
+	if len(positions.queries) != 2 {
+		t.Fatalf("expected market and close position lookups, got %#v", positions.queries)
+	}
+	for index, query := range positions.queries {
+		if query.ValidationID != record.ValidationID || query.PositionID != position.PositionID || query.Limit != 2 {
+			t.Fatalf("position lookup[%d] must be scoped to validation: %#v", index, query)
+		}
+	}
+}
+
 func TestMarketExecutionRejectsUnsafeInputsTableDriven(t *testing.T) {
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	ticket := appOrderTicket(now)

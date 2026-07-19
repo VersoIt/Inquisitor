@@ -92,6 +92,42 @@ func TestServiceClosePositionScopesExistingCloseLookupToValidation(t *testing.T)
 	}
 }
 
+func TestServiceClosePositionScopesPositionLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	position := appOpenPosition(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = position.ValidationID
+	foreignPosition := position
+	foreignPosition.ValidationID = "paper_validation_foreign_0001"
+	positions := &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{foreignPosition, position}}
+	closes := &fakePositionCloseRepository{stats: domainpaper.PositionCloseStats{Inserted: 1}}
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOpenPositionRepository(positions),
+		apppaper.WithPositionCloseRepository(closes),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(4 * time.Minute)}),
+	)
+	req := appClosePositionRequest(now)
+	req.ValidationID = " " + record.ValidationID + " "
+
+	got, err := service.ClosePosition(context.Background(), req)
+	if err != nil {
+		t.Fatalf("close position with foreign position present: %v", err)
+	}
+
+	if got.Position.ValidationID != record.ValidationID || got.Close.ValidationID != record.ValidationID || got.Stats.Inserted != 1 {
+		t.Fatalf("scoped position result mismatch: %#v", got)
+	}
+	if len(positions.queries) != 1 {
+		t.Fatalf("expected one position lookup, got %#v", positions.queries)
+	}
+	if positions.queries[0].ValidationID != record.ValidationID || positions.queries[0].PositionID != position.PositionID || positions.queries[0].Limit != 2 {
+		t.Fatalf("position lookup must be scoped to validation: %#v", positions.queries[0])
+	}
+}
+
 func TestServiceClosePositionAllowsExactCloseRerun(t *testing.T) {
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	position := appOpenPosition(now)

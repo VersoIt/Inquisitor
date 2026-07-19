@@ -15,6 +15,7 @@ import (
 type ClosePositionRequest struct {
 	CloseID      string
 	PositionID   string
+	ValidationID string
 	Liquidity    backtest.LiquidityRole
 	ExitMidPrice decimal.Decimal
 	ExitPrice    decimal.Decimal
@@ -50,9 +51,13 @@ func (s *Service) ClosePosition(ctx context.Context, req ClosePositionRequest) (
 		return ClosePositionResult{}, fmt.Errorf("paper close position service requires clock")
 	}
 
-	position, err := s.loadOpenPosition(ctx, req.PositionID)
+	validationID := strings.TrimSpace(req.ValidationID)
+	position, err := s.loadOpenPosition(ctx, validationID, req.PositionID)
 	if err != nil {
 		return ClosePositionResult{}, err
+	}
+	if validationID != "" && position.ValidationID != validationID {
+		return ClosePositionResult{}, fmt.Errorf("paper open position %q belongs to validation %q, not %q", position.PositionID, position.ValidationID, validationID)
 	}
 	record, err := s.loadValidationRecord(ctx, position.ValidationID)
 	if err != nil {
@@ -94,14 +99,16 @@ func (s *Service) ClosePosition(ctx context.Context, req ClosePositionRequest) (
 	}, nil
 }
 
-func (s *Service) loadOpenPosition(ctx context.Context, positionID string) (domainpaper.OpenPosition, error) {
+func (s *Service) loadOpenPosition(ctx context.Context, validationID string, positionID string) (domainpaper.OpenPosition, error) {
 	positionID = strings.TrimSpace(positionID)
 	if positionID == "" {
 		return domainpaper.OpenPosition{}, fmt.Errorf("position_id is required")
 	}
+	validationID = strings.TrimSpace(validationID)
 	positions, err := s.positions.ListOpenPositions(ctx, domainpaper.OpenPositionQuery{
-		PositionID: positionID,
-		Limit:      2,
+		ValidationID: validationID,
+		PositionID:   positionID,
+		Limit:        2,
 	})
 	if err != nil {
 		return domainpaper.OpenPosition{}, fmt.Errorf("load paper open position %q: %w", positionID, err)

@@ -29,7 +29,7 @@ const paperExecutionCycleLockNamespace = "paper-execute:auto-cycle"
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
 	action := flag.String("action", "", "action: quote, pending, auto-enter, auto-exit, cycle-preflight, auto-cycle, enter, fill, settle")
-	validationID := flag.String("validation-id", "", "paper validation id for action=pending, action=auto-enter, action=auto-exit, action=cycle-preflight, action=auto-cycle, action=enter, or action=fill")
+	validationID := flag.String("validation-id", "", "paper validation id for action=pending, action=auto-enter, action=auto-exit, action=cycle-preflight, action=auto-cycle, action=enter, action=fill, or action=settle")
 	fillID := flag.String("fill-id", "", "stable paper fill id for action=auto-enter, action=enter, or action=fill")
 	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=auto-enter, action=enter, or action=fill")
 	eventID := flag.String("event-id", "", "stable paper equity event id for action=auto-exit or action=settle")
@@ -476,6 +476,7 @@ func main() {
 			EventID:      *eventID,
 			CloseID:      *closeID,
 			PositionID:   *positionID,
+			ValidationID: *validationID,
 			Liquidity:    liquidity,
 			ExitMidPrice: midPrice,
 			Costs:        costs,

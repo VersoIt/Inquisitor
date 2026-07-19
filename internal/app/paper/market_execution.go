@@ -26,6 +26,7 @@ type SettlePositionAtMarketRequest struct {
 	EventID      string
 	CloseID      string
 	PositionID   string
+	ValidationID string
 	Liquidity    backtest.LiquidityRole
 	ExitMidPrice decimal.Decimal
 	Costs        backtest.CostModel
@@ -82,9 +83,13 @@ func (s *Service) SettlePositionAtMarket(ctx context.Context, req SettlePosition
 	if s == nil || s.positions == nil {
 		return SettlePositionCloseResult{}, fmt.Errorf("paper market settlement requires open position repository")
 	}
-	position, err := s.loadOpenPosition(ctx, req.PositionID)
+	validationID := strings.TrimSpace(req.ValidationID)
+	position, err := s.loadOpenPosition(ctx, validationID, req.PositionID)
 	if err != nil {
 		return SettlePositionCloseResult{}, err
+	}
+	if validationID != "" && position.ValidationID != validationID {
+		return SettlePositionCloseResult{}, fmt.Errorf("paper open position %q belongs to validation %q, not %q", position.PositionID, position.ValidationID, validationID)
 	}
 	fill, err := backtest.EvaluateFill(backtest.FillInput{
 		Direction: orderSideDirection(position.Side),
@@ -103,6 +108,7 @@ func (s *Service) SettlePositionAtMarket(ctx context.Context, req SettlePosition
 		Close: ClosePositionRequest{
 			CloseID:      req.CloseID,
 			PositionID:   req.PositionID,
+			ValidationID: validationID,
 			Liquidity:    req.Liquidity,
 			ExitMidPrice: fill.MidPrice,
 			ExitPrice:    fill.ExecutedPrice,
