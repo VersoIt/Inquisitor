@@ -44,8 +44,48 @@ func TestServiceAccountPositionCloseRecordsFirstEquityEvent(t *testing.T) {
 	if equity.calls != 1 || equity.event.EventID != got.Event.EventID || got.Stats.Inserted != 1 {
 		t.Fatalf("equity repository mismatch: calls=%d event=%#v stats=%#v", equity.calls, equity.event, got.Stats)
 	}
-	if len(equity.queries) != 2 || equity.queries[0].CloseID != close.CloseID || equity.queries[1].ValidationID != close.ValidationID {
+	if len(equity.queries) != 2 || equity.queries[0].ValidationID != close.ValidationID ||
+		equity.queries[0].CloseID != close.CloseID || equity.queries[0].Limit != 2 ||
+		equity.queries[1].ValidationID != close.ValidationID {
 		t.Fatalf("expected close lookup then validation ledger lookup, got %#v", equity.queries)
+	}
+}
+
+func TestServiceAccountPositionCloseScopesExistingEventLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	close := appPositionClose(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = close.ValidationID
+	foreignEvent := appEquityEvent(now)
+	foreignEvent.EventID = "paper_equity_foreign_0001"
+	foreignEvent.ValidationID = "paper_validation_foreign_0001"
+	foreignEvent.CloseID = close.CloseID
+	foreignEvent.PositionID = close.PositionID
+	equity := &fakeEquityEventRepository{
+		events: []domainpaper.EquityEvent{foreignEvent},
+		stats:  domainpaper.EquityEventStats{Inserted: 1},
+	}
+	service := accountPositionCloseService(now, record, []domainpaper.PositionClose{close}, equity)
+
+	got, err := service.AccountPositionClose(context.Background(), apppaper.AccountPositionCloseRequest{
+		EventID: "paper_equity_app_0001",
+		CloseID: close.CloseID,
+	})
+	if err != nil {
+		t.Fatalf("account position close with foreign event present: %v", err)
+	}
+
+	if got.Event.ValidationID != record.ValidationID || got.Event.EventID != "paper_equity_app_0001" || got.Stats.Inserted != 1 {
+		t.Fatalf("scoped equity event result mismatch: %#v", got)
+	}
+	if equity.calls != 1 || len(equity.queries) != 2 {
+		t.Fatalf("equity repository call mismatch: calls=%d queries=%#v", equity.calls, equity.queries)
+	}
+	if equity.queries[0].ValidationID != record.ValidationID || equity.queries[0].CloseID != close.CloseID || equity.queries[0].Limit != 2 {
+		t.Fatalf("existing event lookup must be scoped to validation: %#v", equity.queries[0])
+	}
+	if equity.queries[1].ValidationID != record.ValidationID || equity.queries[1].CloseID != "" {
+		t.Fatalf("ledger lookup must stay scoped to validation only: %#v", equity.queries[1])
 	}
 }
 
@@ -309,6 +349,9 @@ func (r *fakeEquityEventRepository) ListEquityEvents(_ context.Context, query do
 			continue
 		}
 		out = append(out, event)
+		if query.Limit > 0 && len(out) == query.Limit {
+			break
+		}
 	}
 	return out, nil
 }

@@ -620,7 +620,8 @@ func TestServiceCompleteValidationRequiresSettledPositionJournalTableDriven(t *t
 			if tt.equity != nil && len(tt.equity.queries) != tt.wantEquityQueries {
 				t.Fatalf("equity query count mismatch: got %d want %d queries=%#v", len(tt.equity.queries), tt.wantEquityQueries, tt.equity.queries)
 			}
-			if tt.wantEquityQueries > 0 && (tt.equity.queries[0].CloseID != close.CloseID || tt.equity.queries[0].Limit != 2) {
+			if tt.wantEquityQueries > 0 && (tt.equity.queries[0].ValidationID != record.ValidationID ||
+				tt.equity.queries[0].CloseID != close.CloseID || tt.equity.queries[0].Limit != 2) {
 				t.Fatalf("equity query scope mismatch: %#v", tt.equity.queries[0])
 			}
 		})

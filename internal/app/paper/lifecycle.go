@@ -144,7 +144,7 @@ func (s *Service) validateCompletionPositionJournal(ctx context.Context, validat
 			continue
 		}
 
-		accounted, err := s.paperExitCloseHasEquityEvent(ctx, closes[0].CloseID)
+		accounted, err := s.paperExitCloseHasEquityEvent(ctx, validationID, closes[0].CloseID)
 		if err != nil {
 			return fmt.Errorf("check paper close %q equity status before validation completion: %w", closes[0].CloseID, err)
 		}

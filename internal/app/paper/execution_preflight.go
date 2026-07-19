@@ -164,7 +164,7 @@ func (s *Service) PreflightPaperExecutionCycle(ctx context.Context, req Prefligh
 		}
 		if len(closes) == 1 {
 			result.ClosedPositions++
-			accounted, err := s.paperExitCloseHasEquityEvent(ctx, closes[0].CloseID)
+			accounted, err := s.paperExitCloseHasEquityEvent(ctx, record.ValidationID, closes[0].CloseID)
 			if err != nil {
 				return PreflightPaperExecutionCycleResult{}, fmt.Errorf("check paper close %q equity status for execution preflight: %w", closes[0].CloseID, err)
 			}

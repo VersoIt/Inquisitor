@@ -112,6 +112,9 @@ func TestServicePreflightPaperExecutionCycleSummarizesScopeWithoutWrites(t *test
 		len(closes.queries) != 2 || len(equity.queries) != 1 {
 		t.Fatalf("query counters mismatch: orderbooks=%#v fills=%#v positions=%#v closes=%#v equity=%#v", orderbooks.queries, fills.queries, positions.queries, closes.queries, equity.queries)
 	}
+	if equity.queries[0].ValidationID != record.ValidationID || equity.queries[0].CloseID != existingClose.CloseID || equity.queries[0].Limit != 2 {
+		t.Fatalf("equity query scope mismatch: %#v", equity.queries[0])
+	}
 }
 
 func TestServicePreflightPaperExecutionCycleChecksKillSwitchBeforePendingEntryTableDriven(t *testing.T) {
@@ -337,6 +340,10 @@ func TestServicePreflightPaperExecutionCycleChecksClosedPositionEquityLedgerTabl
 			}
 			if len(tt.equity.queries) != tt.wantEquityQueries {
 				t.Fatalf("equity query count mismatch: got %d want %d queries=%#v", len(tt.equity.queries), tt.wantEquityQueries, tt.equity.queries)
+			}
+			if tt.wantEquityQueries > 0 && (tt.equity.queries[0].ValidationID != record.ValidationID ||
+				tt.equity.queries[0].CloseID != close.CloseID || tt.equity.queries[0].Limit != 2) {
+				t.Fatalf("equity query scope mismatch: %#v", tt.equity.queries[0])
 			}
 			if fills.calls != 0 || positions.calls != 0 || closes.calls != 0 || tt.equity.calls != 0 {
 				t.Fatalf("preflight must not write: fill_calls=%d position_calls=%d close_calls=%d equity_calls=%d", fills.calls, positions.calls, closes.calls, tt.equity.calls)

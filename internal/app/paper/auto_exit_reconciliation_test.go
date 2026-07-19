@@ -285,6 +285,59 @@ func TestServiceReconcilePaperExitWithQuoteAccountsScannedExistingCloseWithoutQu
 	}
 }
 
+func TestServiceReconcilePaperExitWithQuoteScopesDefaultEventIDLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	position := appOpenPosition(now)
+	close := appPositionClose(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = position.ValidationID
+	foreignEvent := appEquityEvent(now)
+	foreignEvent.EventID = "paper_equity_foreign_0001"
+	foreignEvent.ValidationID = "paper_validation_foreign_0001"
+	foreignEvent.CloseID = close.CloseID
+	foreignEvent.PositionID = close.PositionID
+	equity := &fakeEquityEventRepository{
+		events: []domainpaper.EquityEvent{foreignEvent},
+		stats:  domainpaper.EquityEventStats{Inserted: 1},
+	}
+	service := autoExitReconciliationService(
+		now,
+		record,
+		[]domainpaper.OpenPosition{position},
+		&fakePositionCloseRepository{closes: []domainpaper.PositionClose{close}},
+		equity,
+		&fakeOrderbookSnapshotRepository{err: errors.New("must not be called")},
+	)
+
+	got, err := service.ReconcilePaperExitWithQuote(context.Background(), apppaper.ReconcilePaperExitWithQuoteRequest{
+		ValidationID: position.ValidationID,
+		CloseID:      close.CloseID,
+		Liquidity:    backtest.LiquidityTaker,
+		Costs:        marketExecutionCosts(t),
+		AsOf:         now.Add(3 * time.Minute),
+		MaxStaleness: 30 * time.Second,
+		MaxSpreadBPS: decimal.RequireFromString("250"),
+	})
+	if err != nil {
+		t.Fatalf("account existing close with foreign equity event present: %v", err)
+	}
+
+	if !got.UsedExistingClose || got.Event.EventID != close.CloseID+"_equity" || got.Event.ValidationID != record.ValidationID {
+		t.Fatalf("default event id must be scoped to validation: %#v", got)
+	}
+	if equity.calls != 1 || len(equity.queries) != 4 {
+		t.Fatalf("equity repository call mismatch: calls=%d queries=%#v", equity.calls, equity.queries)
+	}
+	for index, query := range equity.queries[:3] {
+		if query.ValidationID != record.ValidationID || query.CloseID != close.CloseID || query.Limit != 2 {
+			t.Fatalf("existing event lookup[%d] must be scoped to validation: %#v", index, query)
+		}
+	}
+	if equity.queries[3].ValidationID != record.ValidationID || equity.queries[3].CloseID != "" {
+		t.Fatalf("ledger lookup must stay scoped to validation only: %#v", equity.queries[3])
+	}
+}
+
 func TestServiceReconcilePaperExitWithQuoteSkipsWhenNoOpenPositions(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)

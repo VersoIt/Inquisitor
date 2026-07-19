@@ -53,7 +53,7 @@ func (s *Service) AccountPositionClose(ctx context.Context, req AccountPositionC
 	if record.Status != domainpaper.ValidationStatusRunning {
 		return AccountPositionCloseResult{}, fmt.Errorf("paper equity accounting requires RUNNING validation status")
 	}
-	if existing, ok, err := s.loadExistingEquityEventForClose(ctx, close.CloseID, req.EventID); err != nil {
+	if existing, ok, err := s.loadExistingEquityEventForClose(ctx, close.ValidationID, close.CloseID, req.EventID); err != nil {
 		return AccountPositionCloseResult{}, err
 	} else if ok {
 		stats, err := s.equity.RecordEquityEvent(ctx, existing)
@@ -119,10 +119,11 @@ func (s *Service) loadPositionClose(ctx context.Context, closeID string) (domain
 	return closes[0], nil
 }
 
-func (s *Service) loadExistingEquityEventForClose(ctx context.Context, closeID string, eventID string) (domainpaper.EquityEvent, bool, error) {
+func (s *Service) loadExistingEquityEventForClose(ctx context.Context, validationID string, closeID string, eventID string) (domainpaper.EquityEvent, bool, error) {
 	existing, err := s.equity.ListEquityEvents(ctx, domainpaper.EquityEventQuery{
-		CloseID: closeID,
-		Limit:   2,
+		ValidationID: validationID,
+		CloseID:      closeID,
+		Limit:        2,
 	})
 	if err != nil {
 		return domainpaper.EquityEvent{}, false, fmt.Errorf("check paper close %q equity ledger: %w", closeID, err)

@@ -146,7 +146,7 @@ func (s *Service) reconcileScannedPaperExit(
 		}
 		if ok {
 			result.ClosedPositions++
-			accounted, accountErr := s.paperExitCloseHasEquityEvent(ctx, existingClose.CloseID)
+			accounted, accountErr := s.paperExitCloseHasEquityEvent(ctx, existingClose.ValidationID, existingClose.CloseID)
 			if accountErr != nil {
 				return ReconcilePaperExitWithQuoteResult{}, accountErr
 			}
@@ -235,7 +235,7 @@ func (s *Service) accountExistingPaperExit(
 	if requestedCloseID := strings.TrimSpace(req.CloseID); requestedCloseID != "" && requestedCloseID != existingClose.CloseID {
 		return ReconcilePaperExitWithQuoteResult{}, fmt.Errorf("paper open position %q already has close %q, not requested close %q", result.Position.PositionID, existingClose.CloseID, requestedCloseID)
 	}
-	eventID, err := s.paperExitEventIDForExistingClose(ctx, existingClose.CloseID, req.EventID)
+	eventID, err := s.paperExitEventIDForExistingClose(ctx, existingClose.ValidationID, existingClose.CloseID, req.EventID)
 	if err != nil {
 		return ReconcilePaperExitWithQuoteResult{}, err
 	}
@@ -256,10 +256,11 @@ func (s *Service) accountExistingPaperExit(
 	return result, nil
 }
 
-func (s *Service) paperExitCloseHasEquityEvent(ctx context.Context, closeID string) (bool, error) {
+func (s *Service) paperExitCloseHasEquityEvent(ctx context.Context, validationID string, closeID string) (bool, error) {
 	events, err := s.equity.ListEquityEvents(ctx, domainpaper.EquityEventQuery{
-		CloseID: closeID,
-		Limit:   2,
+		ValidationID: validationID,
+		CloseID:      closeID,
+		Limit:        2,
 	})
 	if err != nil {
 		return false, fmt.Errorf("check paper close %q equity ledger: %w", closeID, err)
@@ -270,13 +271,14 @@ func (s *Service) paperExitCloseHasEquityEvent(ctx context.Context, closeID stri
 	return len(events) == 1, nil
 }
 
-func (s *Service) paperExitEventIDForExistingClose(ctx context.Context, closeID string, requested string) (string, error) {
+func (s *Service) paperExitEventIDForExistingClose(ctx context.Context, validationID string, closeID string, requested string) (string, error) {
 	if trimmed := strings.TrimSpace(requested); trimmed != "" {
 		return trimmed, nil
 	}
 	events, err := s.equity.ListEquityEvents(ctx, domainpaper.EquityEventQuery{
-		CloseID: closeID,
-		Limit:   2,
+		ValidationID: validationID,
+		CloseID:      closeID,
+		Limit:        2,
 	})
 	if err != nil {
 		return "", fmt.Errorf("check paper close %q equity ledger: %w", closeID, err)
