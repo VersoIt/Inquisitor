@@ -60,8 +60,14 @@ func (s *Service) RecordOrderFill(ctx context.Context, req RecordOrderFillReques
 	if record.Status != domainpaper.ValidationStatusRunning {
 		return RecordOrderFillResult{}, fmt.Errorf("paper order fill requires RUNNING validation status")
 	}
-	if err := s.ensureOrderTicketNotFilledByAnotherFill(ctx, ticket.TicketID, req.FillID); err != nil {
+	existingFill, err := s.ensureOrderTicketNotFilledByAnotherFill(ctx, ticket.TicketID, req.FillID)
+	if err != nil {
 		return RecordOrderFillResult{}, err
+	}
+	if !existingFill {
+		if err := s.requireInactiveKillSwitchForPaperOrderFill(ctx); err != nil {
+			return RecordOrderFillResult{}, err
+		}
 	}
 
 	fill, err := domainpaper.NewOrderFill(domainpaper.OrderFillInput{
@@ -113,22 +119,36 @@ func (s *Service) loadOrderTicket(ctx context.Context, ticketID string) (domainp
 	return tickets[0], nil
 }
 
-func (s *Service) ensureOrderTicketNotFilledByAnotherFill(ctx context.Context, ticketID string, fillID string) error {
+func (s *Service) ensureOrderTicketNotFilledByAnotherFill(ctx context.Context, ticketID string, fillID string) (bool, error) {
 	existing, err := s.fills.ListOrderFills(ctx, domainpaper.OrderFillQuery{
 		TicketID: ticketID,
 		Limit:    2,
 	})
 	if err != nil {
-		return fmt.Errorf("check paper order ticket %q fill journal: %w", ticketID, err)
+		return false, fmt.Errorf("check paper order ticket %q fill journal: %w", ticketID, err)
 	}
 	if len(existing) == 0 {
-		return nil
+		return false, nil
 	}
 	if len(existing) > 1 {
-		return fmt.Errorf("paper order ticket %q has an inconsistent fill journal", ticketID)
+		return false, fmt.Errorf("paper order ticket %q has an inconsistent fill journal", ticketID)
 	}
 	if existing[0].FillID != strings.TrimSpace(fillID) {
-		return fmt.Errorf("paper order ticket %q already has fill %q", ticketID, existing[0].FillID)
+		return false, fmt.Errorf("paper order ticket %q already has fill %q", ticketID, existing[0].FillID)
+	}
+	return true, nil
+}
+
+func (s *Service) requireInactiveKillSwitchForPaperOrderFill(ctx context.Context) error {
+	if s.killSwitch == nil {
+		return fmt.Errorf("paper order fill requires kill switch repository")
+	}
+	state, err := s.killSwitch.CurrentKillSwitchState(ctx)
+	if err != nil {
+		return fmt.Errorf("load kill switch before paper order fill: %w", err)
+	}
+	if state.Active {
+		return fmt.Errorf("paper order fill requires inactive kill switch: reason=%q source=%q", state.Reason, state.Source)
 	}
 	return nil
 }

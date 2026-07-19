@@ -11,6 +11,7 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
 	domainresearch "github.com/VersoIt/Inquisitor/internal/research"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
 
 type RunRepository interface {
@@ -31,6 +32,7 @@ type Service struct {
 	positions   domainpaper.OpenPositionRepository
 	closes      domainpaper.PositionCloseRepository
 	equity      domainpaper.EquityEventRepository
+	killSwitch  domainrisk.KillSwitchRepository
 	performance domainpaper.DailyPerformanceRepository
 	orderbooks  marketdata.OrderbookSnapshotRepository
 	generator   SimulationTradeGenerator
@@ -127,6 +129,12 @@ func WithPositionCloseRepository(closes domainpaper.PositionCloseRepository) Opt
 func WithEquityEventRepository(equity domainpaper.EquityEventRepository) Option {
 	return func(service *Service) {
 		service.equity = equity
+	}
+}
+
+func WithKillSwitchRepository(killSwitch domainrisk.KillSwitchRepository) Option {
+	return func(service *Service) {
+		service.killSwitch = killSwitch
 	}
 }
 

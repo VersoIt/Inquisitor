@@ -95,6 +95,9 @@ func (s *Service) ReconcilePaperEntryWithQuote(ctx context.Context, req Reconcil
 			UsedExistingFill: true,
 		}, nil
 	}
+	if err := s.requireInactiveKillSwitchForPaperOrderFill(ctx); err != nil {
+		return ReconcilePaperEntryWithQuoteResult{}, err
+	}
 	if s.orderbooks == nil {
 		return ReconcilePaperEntryWithQuoteResult{}, fmt.Errorf("paper auto entry reconciliation requires orderbook snapshot repository")
 	}

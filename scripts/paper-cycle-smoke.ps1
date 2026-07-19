@@ -133,6 +133,8 @@ $decisionIDSql = Escape-SqlLiteral "$($ValidationID)_decision"
 $intentIDSql = Escape-SqlLiteral "$($ValidationID)_intent"
 $ticketIDSql = Escape-SqlLiteral "$($ValidationID)_ticket"
 $positionIDSql = Escape-SqlLiteral "$($ValidationID)_ticket_position"
+$killSwitchActiveIDSql = Escape-SqlLiteral "$($ValidationID)_kill_switch_active"
+$killSwitchReleaseIDSql = Escape-SqlLiteral "$($ValidationID)_kill_switch_release"
 $quoteAsOfSql = Format-UtcTimestamp $quoteAsOfUtc
 $quoteAtSql = Format-UtcTimestamp $quoteAtUtc
 $exitQuoteAsOfSql = Format-UtcTimestamp $exitQuoteAsOfUtc
@@ -163,6 +165,7 @@ DELETE FROM risk_decisions WHERE decision_id = '$decisionIDSql';
 DELETE FROM research_results WHERE run_id = '$runIDSql';
 DELETE FROM research_runs WHERE run_id = '$runIDSql';
 DELETE FROM hypotheses WHERE name = '$hypothesisNameSql' AND version = 'v1';
+DELETE FROM risk_kill_switch_events WHERE event_id IN ('$killSwitchActiveIDSql', '$killSwitchReleaseIDSql');
 DELETE FROM orderbook_snapshots
 WHERE exchange = 'bybit'
   AND category = 'linear'
@@ -326,8 +329,67 @@ Write-Host "Running paper execution cycle preflight"
     -position-scan-limit 10 `
     -quote-scan-limit 10
 if ($LASTEXITCODE -ne 0) {
-    throw "paper execution cycle preflight smoke failed with exit code $LASTEXITCODE"
+	throw "paper execution cycle preflight smoke failed with exit code $LASTEXITCODE"
 }
+
+Write-Host "Activating kill switch and verifying paper entry is blocked"
+Invoke-PostgresScript @"
+INSERT INTO risk_kill_switch_events (
+    event_id, active, reason, source, created_at
+) VALUES (
+    '$killSwitchActiveIDSql',
+    TRUE,
+    'paper cycle smoke guard',
+    'smoke',
+    now() + interval '1 second'
+);
+"@
+
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$killSwitchOutput = @()
+$killSwitchExitCode = 0
+try {
+    $killSwitchOutput = & go run ./cmd/paper-execute `
+        -config $smokeConfig `
+        -action auto-cycle `
+        -validation-id $ValidationID `
+        -symbol $Symbol `
+        -interval $Interval `
+        -liquidity TAKER `
+        -quote-as-of $quoteAsOfSql `
+        -cycle-limit 1 `
+        -pending-scan-limit 10 `
+        -position-scan-limit 10 `
+        -quote-scan-limit 10 2>&1
+    $killSwitchExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if ($killSwitchExitCode -eq 0) {
+    throw "paper execution cycle unexpectedly entered while kill switch was active"
+}
+if (($killSwitchOutput -join "`n") -notmatch "kill switch") {
+    throw "paper execution cycle kill-switch guard mismatch: $($killSwitchOutput -join "`n")"
+}
+
+$fillCount = Invoke-PostgresScalar "SELECT count(*) FROM paper_order_fills WHERE validation_id = '$validationIDSql';"
+$positionCount = Invoke-PostgresScalar "SELECT count(*) FROM paper_open_positions WHERE validation_id = '$validationIDSql';"
+Assert-Equal "fill count after kill-switch blocked entry" $fillCount "0"
+Assert-Equal "open position count after kill-switch blocked entry" $positionCount "0"
+
+Write-Host "Releasing kill switch for the rest of the paper cycle smoke"
+Invoke-PostgresScript @"
+INSERT INTO risk_kill_switch_events (
+    event_id, active, reason, source, created_at
+) VALUES (
+    '$killSwitchReleaseIDSql',
+    FALSE,
+    'paper cycle smoke release',
+    'smoke',
+    now() + interval '2 seconds'
+);
+"@
 
 Write-Host "Running two bounded paper execution cycles"
 & go run ./cmd/paper-execute `

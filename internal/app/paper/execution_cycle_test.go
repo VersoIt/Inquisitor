@@ -14,6 +14,7 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/clock"
 	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
 
 func TestServiceRunPaperExecutionCycleSettlesExitBeforeEntry(t *testing.T) {
@@ -149,6 +150,61 @@ func TestServiceRunPaperExecutionCycleEntersWhenNoActivePositionAndPendingTicket
 	}
 	if len(orderbooks.queries) != 1 {
 		t.Fatalf("entry-only cycle should source one quote, got %#v", orderbooks.queries)
+	}
+}
+
+func TestServiceRunPaperExecutionCycleRejectsEntryWhenKillSwitchActive(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	fills := &fakeOrderFillRepository{}
+	positions := &fakeOpenPositionRepository{}
+	orderbooks := &fakeOrderbookSnapshotRepository{snapshots: []marketdata.OrderbookSnapshot{appOrderbookSnapshot(now.Add(time.Minute), "100000", "100200")}}
+	killSwitch := &fakePaperKillSwitchRepository{state: domainrisk.KillSwitchState{
+		Active:    true,
+		Reason:    "operator emergency stop",
+		Source:    "operator",
+		UpdatedAt: now.Add(time.Minute),
+	}}
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOrderTicketRepository(&fakeOrderTicketRepository{tickets: []domainpaper.OrderTicket{ticket}}),
+		apppaper.WithOrderFillRepository(fills),
+		apppaper.WithOpenPositionRepository(positions),
+		apppaper.WithPositionCloseRepository(&fakePositionCloseRepository{}),
+		apppaper.WithEquityEventRepository(&fakeEquityEventRepository{}),
+		apppaper.WithKillSwitchRepository(killSwitch),
+		apppaper.WithOrderbookSnapshotRepository(orderbooks),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(5 * time.Minute)}),
+	)
+
+	_, err := service.RunPaperExecutionCycle(context.Background(), apppaper.RunPaperExecutionCycleRequest{
+		ValidationID:      record.ValidationID,
+		Symbol:            "BTCUSDT",
+		Interval:          "1",
+		Liquidity:         backtest.LiquidityTaker,
+		Costs:             marketExecutionCosts(t),
+		AsOf:              now.Add(time.Minute + time.Second),
+		MaxStaleness:      30 * time.Second,
+		MaxSpreadBPS:      decimal.RequireFromString("250"),
+		PendingScanLimit:  10,
+		PositionScanLimit: 10,
+		QuoteScanLimit:    10,
+	})
+	if err == nil || !strings.Contains(err.Error(), "kill switch") {
+		t.Fatalf("expected active kill switch error, got %v", err)
+	}
+	if fills.calls != 0 || positions.calls != 0 {
+		t.Fatalf("active kill switch must block entry writes: fill_calls=%d position_calls=%d", fills.calls, positions.calls)
+	}
+	if len(orderbooks.queries) != 0 {
+		t.Fatalf("active kill switch should stop entry before quote sourcing, got %#v", orderbooks.queries)
+	}
+	if killSwitch.currentCalls != 1 {
+		t.Fatalf("kill switch query count mismatch: got %d want 1", killSwitch.currentCalls)
 	}
 }
 
@@ -514,6 +570,7 @@ func executionCycleService(
 		apppaper.WithOpenPositionRepository(positions),
 		apppaper.WithPositionCloseRepository(closes),
 		apppaper.WithEquityEventRepository(equity),
+		apppaper.WithKillSwitchRepository(&fakePaperKillSwitchRepository{}),
 		apppaper.WithClock(clock.FixedClock{Time: now.Add(5 * time.Minute)}),
 	}
 	if orderbooks != nil {

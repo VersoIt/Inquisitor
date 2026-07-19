@@ -108,6 +108,7 @@ func main() {
 		apppaper.WithOpenPositionRepository(postgres.NewPaperOpenPositionRepository(db)),
 		apppaper.WithPositionCloseRepository(postgres.NewPaperPositionCloseRepository(db)),
 		apppaper.WithEquityEventRepository(postgres.NewPaperEquityEventRepository(db)),
+		apppaper.WithKillSwitchRepository(postgres.NewRiskKillSwitchRepository(db)),
 		apppaper.WithOrderbookSnapshotRepository(postgres.NewOrderbookSnapshotRepository(db)),
 	)
 

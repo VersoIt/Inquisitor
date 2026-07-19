@@ -95,6 +95,8 @@ decision_id_sql="$(sql_literal "${VALIDATION_ID}_decision")"
 intent_id_sql="$(sql_literal "${VALIDATION_ID}_intent")"
 ticket_id_sql="$(sql_literal "${VALIDATION_ID}_ticket")"
 position_id_sql="$(sql_literal "${VALIDATION_ID}_ticket_position")"
+kill_switch_active_id_sql="$(sql_literal "${VALIDATION_ID}_kill_switch_active")"
+kill_switch_release_id_sql="$(sql_literal "${VALIDATION_ID}_kill_switch_release")"
 quote_as_of_sql="$(sql_literal "$QUOTE_AS_OF")"
 exit_quote_as_of_sql="$(sql_literal "$EXIT_QUOTE_AS_OF")"
 
@@ -116,6 +118,7 @@ DELETE FROM risk_decisions WHERE decision_id = '$decision_id_sql';
 DELETE FROM research_results WHERE run_id = '$run_id_sql';
 DELETE FROM research_runs WHERE run_id = '$run_id_sql';
 DELETE FROM hypotheses WHERE name = '$hypothesis_name_sql' AND version = 'v1';
+DELETE FROM risk_kill_switch_events WHERE event_id IN ('$kill_switch_active_id_sql', '$kill_switch_release_id_sql');
 DELETE FROM orderbook_snapshots
 WHERE exchange = 'bybit'
   AND category = 'linear'
@@ -278,6 +281,58 @@ go run ./cmd/paper-execute \
     -pending-scan-limit 10 \
     -position-scan-limit 10 \
     -quote-scan-limit 10
+
+printf 'Activating kill switch and verifying paper entry is blocked\n'
+postgres_script "
+INSERT INTO risk_kill_switch_events (
+    event_id, active, reason, source, created_at
+) VALUES (
+    '$kill_switch_active_id_sql',
+    TRUE,
+    'paper cycle smoke guard',
+    'smoke',
+    now() + interval '1 second'
+);
+"
+
+set +e
+kill_switch_output="$(go run ./cmd/paper-execute \
+    -config "$smoke_config" \
+    -action auto-cycle \
+    -validation-id "$VALIDATION_ID" \
+    -symbol "$SYMBOL" \
+    -interval "$INTERVAL" \
+    -liquidity TAKER \
+    -quote-as-of "$QUOTE_AS_OF" \
+    -cycle-limit 1 \
+    -pending-scan-limit 10 \
+    -position-scan-limit 10 \
+    -quote-scan-limit 10 2>&1)"
+kill_switch_status="$?"
+set -e
+if [ "$kill_switch_status" -eq 0 ]; then
+    fail "paper execution cycle unexpectedly entered while kill switch was active"
+fi
+printf '%s\n' "$kill_switch_output" | grep -q "kill switch" \
+    || fail "paper execution cycle kill-switch guard mismatch: $kill_switch_output"
+
+fill_count="$(postgres_scalar "SELECT count(*) FROM paper_order_fills WHERE validation_id = '$validation_id_sql';")"
+position_count="$(postgres_scalar "SELECT count(*) FROM paper_open_positions WHERE validation_id = '$validation_id_sql';")"
+assert_equal "fill count after kill-switch blocked entry" "$fill_count" "0"
+assert_equal "open position count after kill-switch blocked entry" "$position_count" "0"
+
+printf 'Releasing kill switch for the rest of the paper cycle smoke\n'
+postgres_script "
+INSERT INTO risk_kill_switch_events (
+    event_id, active, reason, source, created_at
+) VALUES (
+    '$kill_switch_release_id_sql',
+    FALSE,
+    'paper cycle smoke release',
+    'smoke',
+    now() + interval '2 seconds'
+);
+"
 
 printf 'Running two bounded paper execution cycles\n'
 go run ./cmd/paper-execute \

@@ -13,6 +13,7 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/backtest"
 	"github.com/VersoIt/Inquisitor/internal/clock"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
 
 func TestServiceRecordOrderFillFromRunningTicket(t *testing.T) {
@@ -175,6 +176,114 @@ func TestServiceRecordOrderFillRejectsUnsafeInputsTableDriven(t *testing.T) {
 	}
 }
 
+func TestServiceRecordOrderFillChecksKillSwitchBeforeNewFillTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	existingFill := appOrderFill(now)
+	repositoryErr := errors.New("postgres unavailable")
+	activeKillSwitch := domainrisk.KillSwitchState{
+		Active:    true,
+		Reason:    "operator emergency stop",
+		Source:    "operator",
+		UpdatedAt: now.Add(time.Minute),
+	}
+	validReq := appOrderFillRequest(now)
+
+	tests := []struct {
+		name           string
+		fills          *fakeOrderFillRepository
+		killSwitch     *fakePaperKillSwitchRepository
+		omitKillSwitch bool
+		req            apppaper.RecordOrderFillRequest
+		wantErrSub     string
+		wantFillCalls  int
+		wantKillCalls  int
+	}{
+		{
+			name:          "inactive kill switch allows new fill",
+			fills:         &fakeOrderFillRepository{stats: domainpaper.OrderFillStats{Inserted: 1}},
+			killSwitch:    &fakePaperKillSwitchRepository{},
+			req:           validReq,
+			wantFillCalls: 1,
+			wantKillCalls: 1,
+		},
+		{
+			name:          "active kill switch blocks new fill before write",
+			fills:         &fakeOrderFillRepository{},
+			killSwitch:    &fakePaperKillSwitchRepository{state: activeKillSwitch},
+			req:           validReq,
+			wantErrSub:    "kill switch",
+			wantFillCalls: 0,
+			wantKillCalls: 1,
+		},
+		{
+			name:          "kill switch lookup failure blocks new fill",
+			fills:         &fakeOrderFillRepository{},
+			killSwitch:    &fakePaperKillSwitchRepository{err: repositoryErr},
+			req:           validReq,
+			wantErrSub:    repositoryErr.Error(),
+			wantFillCalls: 0,
+			wantKillCalls: 1,
+		},
+		{
+			name:           "missing kill switch repository fails closed",
+			fills:          &fakeOrderFillRepository{},
+			omitKillSwitch: true,
+			req:            validReq,
+			wantErrSub:     "kill switch repository",
+			wantFillCalls:  0,
+		},
+		{
+			name:          "exact idempotent fill retry skips kill switch",
+			fills:         &fakeOrderFillRepository{fills: []domainpaper.OrderFill{existingFill}, stats: domainpaper.OrderFillStats{Skipped: 1}},
+			killSwitch:    &fakePaperKillSwitchRepository{state: activeKillSwitch},
+			req:           validReq,
+			wantFillCalls: 1,
+			wantKillCalls: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			options := []apppaper.Option{
+				apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+				apppaper.WithOrderTicketRepository(&fakeOrderTicketRepository{tickets: []domainpaper.OrderTicket{ticket}}),
+				apppaper.WithOrderFillRepository(tt.fills),
+				apppaper.WithClock(clock.FixedClock{Time: now.Add(2 * time.Minute)}),
+			}
+			if !tt.omitKillSwitch {
+				options = append(options, apppaper.WithKillSwitchRepository(tt.killSwitch))
+			}
+			service := apppaper.NewService(&fakeRunRepository{}, &fakeResultRepository{}, options...)
+
+			got, err := service.RecordOrderFill(context.Background(), tt.req)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("record order fill: %v", err)
+				}
+				if got.Stats.Total() == 0 {
+					t.Fatalf("expected repository stats on allowed fill, got %#v", got.Stats)
+				}
+			}
+			if tt.fills.calls != tt.wantFillCalls {
+				t.Fatalf("fill calls mismatch: got %d want %d", tt.fills.calls, tt.wantFillCalls)
+			}
+			if tt.killSwitch != nil && tt.killSwitch.currentCalls != tt.wantKillCalls {
+				t.Fatalf("kill switch calls mismatch: got %d want %d", tt.killSwitch.currentCalls, tt.wantKillCalls)
+			}
+			if len(tt.fills.queries) != 1 {
+				t.Fatalf("expected one fill-journal query before kill switch/write, got %#v", tt.fills.queries)
+			}
+		})
+	}
+}
+
 func orderFillService(
 	now time.Time,
 	record domainpaper.ValidationRecord,
@@ -187,6 +296,7 @@ func orderFillService(
 		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
 		apppaper.WithOrderTicketRepository(&fakeOrderTicketRepository{tickets: tickets}),
 		apppaper.WithOrderFillRepository(fills),
+		apppaper.WithKillSwitchRepository(&fakePaperKillSwitchRepository{}),
 		apppaper.WithClock(clock.FixedClock{Time: now.Add(2 * time.Minute)}),
 	)
 }
@@ -228,6 +338,40 @@ func (r *fakeOrderFillRepository) ListOrderFills(_ context.Context, query domain
 		out = append(out, fill)
 	}
 	return out, nil
+}
+
+type fakePaperKillSwitchRepository struct {
+	state        domainrisk.KillSwitchState
+	appended     domainrisk.KillSwitchEvent
+	currentCalls int
+	appendCalls  int
+	events       []domainrisk.KillSwitchEvent
+	err          error
+}
+
+func (r *fakePaperKillSwitchRepository) AppendKillSwitchEvent(_ context.Context, event domainrisk.KillSwitchEvent) (domainrisk.KillSwitchStats, error) {
+	r.appendCalls++
+	r.appended = event
+	if r.err != nil {
+		return domainrisk.KillSwitchStats{}, r.err
+	}
+	r.events = append(r.events, event)
+	return domainrisk.KillSwitchStats{Inserted: 1}, nil
+}
+
+func (r *fakePaperKillSwitchRepository) CurrentKillSwitchState(context.Context) (domainrisk.KillSwitchState, error) {
+	r.currentCalls++
+	if r.err != nil {
+		return domainrisk.KillSwitchState{}, r.err
+	}
+	return r.state, nil
+}
+
+func (r *fakePaperKillSwitchRepository) ListKillSwitchEvents(context.Context, domainrisk.KillSwitchEventQuery) ([]domainrisk.KillSwitchEvent, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.events, nil
 }
 
 func appOrderFillRequest(now time.Time) apppaper.RecordOrderFillRequest {

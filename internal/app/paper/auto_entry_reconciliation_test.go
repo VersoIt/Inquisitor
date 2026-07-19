@@ -328,6 +328,7 @@ func autoEntryReconciliationService(
 		apppaper.WithOrderTicketRepository(&fakeOrderTicketRepository{tickets: tickets}),
 		apppaper.WithOrderFillRepository(fills),
 		apppaper.WithOpenPositionRepository(positions),
+		apppaper.WithKillSwitchRepository(&fakePaperKillSwitchRepository{}),
 		apppaper.WithClock(clock.FixedClock{Time: now.Add(3 * time.Minute)}),
 	}
 	if orderbooks != nil {
