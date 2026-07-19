@@ -54,8 +54,40 @@ func TestServiceRecordOrderFillFromRunningTicket(t *testing.T) {
 	if fills.calls != 1 || fills.fill.FillID != got.Fill.FillID || got.Stats.Inserted != 1 {
 		t.Fatalf("fill repository mismatch: calls=%d fill=%#v stats=%#v", fills.calls, fills.fill, got.Stats)
 	}
-	if len(fills.queries) != 1 || fills.queries[0].TicketID != ticket.TicketID || fills.queries[0].Limit != 2 {
+	if len(fills.queries) != 1 || fills.queries[0].ValidationID != ticket.ValidationID ||
+		fills.queries[0].TicketID != ticket.TicketID || fills.queries[0].Limit != 2 {
 		t.Fatalf("expected ticket fill lookup before write, got %#v", fills.queries)
+	}
+}
+
+func TestServiceRecordOrderFillScopesExistingFillLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	foreignFill := appOrderFill(now)
+	foreignFill.FillID = "paper_fill_foreign_0001"
+	foreignFill.ValidationID = "paper_validation_foreign_0001"
+	foreignFill.TicketID = ticket.TicketID
+	fills := &fakeOrderFillRepository{
+		fills: []domainpaper.OrderFill{foreignFill},
+		stats: domainpaper.OrderFillStats{Inserted: 1},
+	}
+	service := orderFillService(now, record, []domainpaper.OrderTicket{ticket}, fills)
+
+	got, err := service.RecordOrderFill(context.Background(), appOrderFillRequest(now))
+	if err != nil {
+		t.Fatalf("record order fill with foreign fill present: %v", err)
+	}
+
+	if got.Fill.ValidationID != record.ValidationID || got.Fill.TicketID != ticket.TicketID || got.Stats.Inserted != 1 {
+		t.Fatalf("scoped fill result mismatch: %#v", got)
+	}
+	if fills.calls != 1 || len(fills.queries) != 1 {
+		t.Fatalf("fill repository call mismatch: calls=%d queries=%#v", fills.calls, fills.queries)
+	}
+	if fills.queries[0].ValidationID != record.ValidationID || fills.queries[0].TicketID != ticket.TicketID || fills.queries[0].Limit != 2 {
+		t.Fatalf("fill lookup must be scoped to validation: %#v", fills.queries[0])
 	}
 }
 
@@ -280,6 +312,9 @@ func TestServiceRecordOrderFillChecksKillSwitchBeforeNewFillTableDriven(t *testi
 			if len(tt.fills.queries) != 1 {
 				t.Fatalf("expected one fill-journal query before kill switch/write, got %#v", tt.fills.queries)
 			}
+			if tt.fills.queries[0].ValidationID != record.ValidationID || tt.fills.queries[0].TicketID != ticket.TicketID || tt.fills.queries[0].Limit != 2 {
+				t.Fatalf("fill-journal query must be scoped to validation: %#v", tt.fills.queries[0])
+			}
 		})
 	}
 }
@@ -329,6 +364,9 @@ func (r *fakeOrderFillRepository) ListOrderFills(_ context.Context, query domain
 	}
 	var out []domainpaper.OrderFill
 	for _, fill := range r.fills {
+		if query.ValidationID != "" && fill.ValidationID != query.ValidationID {
+			continue
+		}
 		if query.TicketID != "" && fill.TicketID != query.TicketID {
 			continue
 		}
@@ -336,6 +374,9 @@ func (r *fakeOrderFillRepository) ListOrderFills(_ context.Context, query domain
 			continue
 		}
 		out = append(out, fill)
+		if query.Limit > 0 && len(out) == query.Limit {
+			break
+		}
 	}
 	return out, nil
 }

@@ -71,7 +71,7 @@ func (s *Service) ReconcilePaperEntryWithQuote(ctx context.Context, req Reconcil
 
 	fillID := defaultPaperEntryFillID(ticket.TicketID, req.FillID)
 	positionID := defaultPaperEntryPositionID(ticket.TicketID, req.PositionID)
-	existingFill, hasExistingFill, err := s.findExistingFillForPaperEntry(ctx, ticket.TicketID)
+	existingFill, hasExistingFill, err := s.findExistingFillForPaperEntry(ctx, ticket.ValidationID, ticket.TicketID)
 	if err != nil {
 		return ReconcilePaperEntryWithQuoteResult{}, err
 	}
@@ -176,10 +176,11 @@ func (s *Service) selectPaperEntryTicket(
 	return pending.Tickets[0], nil
 }
 
-func (s *Service) findExistingFillForPaperEntry(ctx context.Context, ticketID string) (domainpaper.OrderFill, bool, error) {
+func (s *Service) findExistingFillForPaperEntry(ctx context.Context, validationID string, ticketID string) (domainpaper.OrderFill, bool, error) {
 	fills, err := s.fills.ListOrderFills(ctx, domainpaper.OrderFillQuery{
-		TicketID: ticketID,
-		Limit:    2,
+		ValidationID: validationID,
+		TicketID:     ticketID,
+		Limit:        2,
 	})
 	if err != nil {
 		return domainpaper.OrderFill{}, false, fmt.Errorf("check paper order ticket %q fill journal: %w", ticketID, err)

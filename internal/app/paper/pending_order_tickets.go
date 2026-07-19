@@ -86,8 +86,9 @@ func (s *Service) ListPendingOrderTickets(ctx context.Context, req ListPendingOr
 	result := ListPendingOrderTicketsResult{Record: record, ScannedTickets: len(tickets)}
 	for _, ticket := range tickets {
 		fills, err := s.fills.ListOrderFills(ctx, domainpaper.OrderFillQuery{
-			TicketID: ticket.TicketID,
-			Limit:    2,
+			ValidationID: record.ValidationID,
+			TicketID:     ticket.TicketID,
+			Limit:        2,
 		})
 		if err != nil {
 			return ListPendingOrderTicketsResult{}, fmt.Errorf("check paper order ticket %q fill status: %w", ticket.TicketID, err)

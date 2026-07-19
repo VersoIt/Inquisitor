@@ -45,8 +45,44 @@ func TestServiceOpenPositionFromOrderFill(t *testing.T) {
 	if positions.calls != 1 || positions.position.PositionID != got.Position.PositionID || got.Stats.Inserted != 1 {
 		t.Fatalf("position repository mismatch: calls=%d position=%#v stats=%#v", positions.calls, positions.position, got.Stats)
 	}
-	if len(positions.queries) != 1 || positions.queries[0].FillID != fill.FillID || positions.queries[0].Limit != 2 {
+	if len(positions.queries) != 1 || positions.queries[0].ValidationID != fill.ValidationID ||
+		positions.queries[0].FillID != fill.FillID || positions.queries[0].Limit != 2 {
 		t.Fatalf("expected fill position lookup before write, got %#v", positions.queries)
+	}
+}
+
+func TestServiceOpenPositionScopesExistingPositionLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	fill := appOrderFill(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	foreignPosition := appOpenPosition(now)
+	foreignPosition.PositionID = "paper_position_foreign_0001"
+	foreignPosition.ValidationID = "paper_validation_foreign_0001"
+	foreignPosition.FillID = fill.FillID
+	positions := &fakeOpenPositionRepository{
+		positions: []domainpaper.OpenPosition{foreignPosition},
+		stats:     domainpaper.OpenPositionStats{Inserted: 1},
+	}
+	service := openPositionService(now, record, []domainpaper.OrderTicket{ticket}, []domainpaper.OrderFill{fill}, positions)
+
+	got, err := service.OpenPosition(context.Background(), apppaper.OpenPositionRequest{
+		PositionID: "paper_position_app_0001",
+		FillID:     fill.FillID,
+	})
+	if err != nil {
+		t.Fatalf("open position with foreign position present: %v", err)
+	}
+
+	if got.Position.ValidationID != record.ValidationID || got.Position.FillID != fill.FillID || got.Stats.Inserted != 1 {
+		t.Fatalf("scoped position result mismatch: %#v", got)
+	}
+	if positions.calls != 1 || len(positions.queries) != 1 {
+		t.Fatalf("position repository call mismatch: calls=%d queries=%#v", positions.calls, positions.queries)
+	}
+	if positions.queries[0].ValidationID != record.ValidationID || positions.queries[0].FillID != fill.FillID || positions.queries[0].Limit != 2 {
+		t.Fatalf("position lookup must be scoped to validation: %#v", positions.queries[0])
 	}
 }
 

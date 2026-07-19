@@ -54,9 +54,42 @@ func TestServiceListPendingOrderTicketsReturnsUnfilledTickets(t *testing.T) {
 		tickets.queries[0].Symbol != "BTCUSDT" || tickets.queries[0].Interval != "1" || tickets.queries[0].Limit != 10 {
 		t.Fatalf("ticket query mismatch: %#v", tickets.queries)
 	}
-	if len(fills.queries) != 3 || fills.queries[0].TicketID != first.TicketID ||
-		fills.queries[1].TicketID != second.TicketID || fills.queries[2].TicketID != third.TicketID {
+	if len(fills.queries) != 3 || fills.queries[0].ValidationID != first.ValidationID ||
+		fills.queries[0].TicketID != first.TicketID || fills.queries[0].Limit != 2 ||
+		fills.queries[1].ValidationID != first.ValidationID || fills.queries[1].TicketID != second.TicketID || fills.queries[1].Limit != 2 ||
+		fills.queries[2].ValidationID != first.ValidationID || fills.queries[2].TicketID != third.TicketID || fills.queries[2].Limit != 2 {
 		t.Fatalf("fill status queries mismatch: %#v", fills.queries)
+	}
+}
+
+func TestServiceListPendingOrderTicketsScopesFillStatusToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	foreignFill := appOrderFill(now)
+	foreignFill.FillID = "paper_fill_foreign_0001"
+	foreignFill.ValidationID = "paper_validation_foreign_0001"
+	foreignFill.TicketID = ticket.TicketID
+	tickets := &fakeOrderTicketRepository{tickets: []domainpaper.OrderTicket{ticket}}
+	fills := &fakeOrderFillRepository{fills: []domainpaper.OrderFill{foreignFill}}
+	service := pendingOrderTicketService(now, record, tickets, fills)
+
+	got, err := service.ListPendingOrderTickets(context.Background(), apppaper.ListPendingOrderTicketsRequest{
+		ValidationID: ticket.ValidationID,
+		Limit:        10,
+		ScanLimit:    10,
+	})
+	if err != nil {
+		t.Fatalf("list pending tickets with foreign fill present: %v", err)
+	}
+
+	if got.FilledTickets != 0 || len(got.Tickets) != 1 || got.Tickets[0].TicketID != ticket.TicketID {
+		t.Fatalf("foreign fill must not mark ticket filled: %#v", got)
+	}
+	if len(fills.queries) != 1 || fills.queries[0].ValidationID != record.ValidationID ||
+		fills.queries[0].TicketID != ticket.TicketID || fills.queries[0].Limit != 2 {
+		t.Fatalf("fill status lookup must be scoped to validation: %#v", fills.queries)
 	}
 }
 
@@ -83,7 +116,8 @@ func TestServiceListPendingOrderTicketsStopsAtPendingLimit(t *testing.T) {
 	if len(got.Tickets) != 1 || got.Tickets[0].TicketID != first.TicketID {
 		t.Fatalf("pending limit mismatch: %#v", got)
 	}
-	if len(fills.queries) != 1 || fills.queries[0].TicketID != first.TicketID {
+	if len(fills.queries) != 1 || fills.queries[0].ValidationID != first.ValidationID ||
+		fills.queries[0].TicketID != first.TicketID || fills.queries[0].Limit != 2 {
 		t.Fatalf("expected fill checks to stop at limit, got %#v", fills.queries)
 	}
 }

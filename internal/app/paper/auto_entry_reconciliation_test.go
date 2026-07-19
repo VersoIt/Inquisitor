@@ -64,8 +64,61 @@ func TestServiceReconcilePaperEntryWithQuoteSelectsPendingTicketSourcesQuoteAndO
 	if len(orderbooks.queries) != 1 || orderbooks.queries[0].Limit != 20 || !orderbooks.queries[0].End.Equal(quoteTime.Add(2*time.Second).Add(time.Nanosecond)) {
 		t.Fatalf("quote query mismatch: %#v", orderbooks.queries)
 	}
-	if len(fills.queries) < 2 || fills.queries[0].TicketID != ticket.TicketID || fills.queries[1].TicketID != ticket.TicketID {
+	if len(fills.queries) < 2 || fills.queries[0].ValidationID != ticket.ValidationID ||
+		fills.queries[0].TicketID != ticket.TicketID || fills.queries[0].Limit != 2 ||
+		fills.queries[1].ValidationID != ticket.ValidationID || fills.queries[1].TicketID != ticket.TicketID || fills.queries[1].Limit != 2 {
 		t.Fatalf("expected pending and pre-quote fill checks, got %#v", fills.queries)
+	}
+}
+
+func TestServiceReconcilePaperEntryWithQuoteScopesExistingFillLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	foreignFill := appOrderFill(now)
+	foreignFill.FillID = "paper_fill_foreign_0001"
+	foreignFill.ValidationID = "paper_validation_foreign_0001"
+	foreignFill.TicketID = ticket.TicketID
+	quoteTime := now.Add(time.Minute)
+	fills := &fakeOrderFillRepository{
+		fills: []domainpaper.OrderFill{foreignFill},
+		stats: domainpaper.OrderFillStats{Inserted: 1},
+	}
+	positions := &fakeOpenPositionRepository{stats: domainpaper.OpenPositionStats{Inserted: 1}}
+	orderbooks := &fakeOrderbookSnapshotRepository{
+		snapshots: []marketdata.OrderbookSnapshot{appOrderbookSnapshot(quoteTime, "100000", "100200")},
+	}
+	service := autoEntryReconciliationService(now, record, []domainpaper.OrderTicket{ticket}, fills, positions, orderbooks)
+
+	got, err := service.ReconcilePaperEntryWithQuote(context.Background(), apppaper.ReconcilePaperEntryWithQuoteRequest{
+		ValidationID:   ticket.ValidationID,
+		TicketID:       ticket.TicketID,
+		Liquidity:      backtest.LiquidityTaker,
+		Costs:          marketExecutionCosts(t),
+		AsOf:           quoteTime.Add(time.Second),
+		MaxStaleness:   30 * time.Second,
+		MaxSpreadBPS:   decimal.RequireFromString("250"),
+		QuoteScanLimit: 10,
+	})
+	if err != nil {
+		t.Fatalf("reconcile paper entry with foreign fill present: %v", err)
+	}
+
+	if got.UsedExistingFill || !got.QuoteSourced || got.Fill.ValidationID != record.ValidationID ||
+		got.Fill.FillID == foreignFill.FillID || got.Position.ValidationID != record.ValidationID {
+		t.Fatalf("scoped entry result mismatch: %#v", got)
+	}
+	if fills.calls != 1 || positions.calls != 1 || len(orderbooks.queries) != 1 {
+		t.Fatalf("entry repository call mismatch: fill_calls=%d position_calls=%d quote_queries=%#v", fills.calls, positions.calls, orderbooks.queries)
+	}
+	if len(fills.queries) < 2 {
+		t.Fatalf("expected existing-fill and record-fill lookups, got %#v", fills.queries)
+	}
+	for index, query := range fills.queries[:2] {
+		if query.ValidationID != record.ValidationID || query.TicketID != ticket.TicketID || query.Limit != 2 {
+			t.Fatalf("fill lookup[%d] must be scoped to validation: %#v", index, query)
+		}
 	}
 }
 

@@ -56,7 +56,7 @@ func (s *Service) OpenPosition(ctx context.Context, req OpenPositionRequest) (Op
 	if record.Status != domainpaper.ValidationStatusRunning {
 		return OpenPositionResult{}, fmt.Errorf("paper open position requires RUNNING validation status")
 	}
-	if err := s.ensureFillNotOpenedByAnotherPosition(ctx, fill.FillID, req.PositionID); err != nil {
+	if err := s.ensureFillNotOpenedByAnotherPosition(ctx, fill.ValidationID, fill.FillID, req.PositionID); err != nil {
 		return OpenPositionResult{}, err
 	}
 
@@ -103,10 +103,11 @@ func (s *Service) loadOrderFill(ctx context.Context, fillID string) (domainpaper
 	return fills[0], nil
 }
 
-func (s *Service) ensureFillNotOpenedByAnotherPosition(ctx context.Context, fillID string, positionID string) error {
+func (s *Service) ensureFillNotOpenedByAnotherPosition(ctx context.Context, validationID string, fillID string, positionID string) error {
 	existing, err := s.positions.ListOpenPositions(ctx, domainpaper.OpenPositionQuery{
-		FillID: fillID,
-		Limit:  2,
+		ValidationID: validationID,
+		FillID:       fillID,
+		Limit:        2,
 	})
 	if err != nil {
 		return fmt.Errorf("check paper order fill %q position journal: %w", fillID, err)

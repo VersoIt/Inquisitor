@@ -60,7 +60,7 @@ func (s *Service) RecordOrderFill(ctx context.Context, req RecordOrderFillReques
 	if record.Status != domainpaper.ValidationStatusRunning {
 		return RecordOrderFillResult{}, fmt.Errorf("paper order fill requires RUNNING validation status")
 	}
-	existingFill, err := s.ensureOrderTicketNotFilledByAnotherFill(ctx, ticket.TicketID, req.FillID)
+	existingFill, err := s.ensureOrderTicketNotFilledByAnotherFill(ctx, ticket.ValidationID, ticket.TicketID, req.FillID)
 	if err != nil {
 		return RecordOrderFillResult{}, err
 	}
@@ -119,10 +119,11 @@ func (s *Service) loadOrderTicket(ctx context.Context, ticketID string) (domainp
 	return tickets[0], nil
 }
 
-func (s *Service) ensureOrderTicketNotFilledByAnotherFill(ctx context.Context, ticketID string, fillID string) (bool, error) {
+func (s *Service) ensureOrderTicketNotFilledByAnotherFill(ctx context.Context, validationID string, ticketID string, fillID string) (bool, error) {
 	existing, err := s.fills.ListOrderFills(ctx, domainpaper.OrderFillQuery{
-		TicketID: ticketID,
-		Limit:    2,
+		ValidationID: validationID,
+		TicketID:     ticketID,
+		Limit:        2,
 	})
 	if err != nil {
 		return false, fmt.Errorf("check paper order ticket %q fill journal: %w", ticketID, err)
