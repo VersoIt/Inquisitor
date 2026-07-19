@@ -132,7 +132,7 @@ INSERT INTO hypotheses (
     repeat('a', 64),
     '{}'::jsonb,
     'name: paper-cycle-smoke',
-    ('$quote_as_of_sql'::timestamptz - interval '7 days 1 second')
+    ('$quote_as_of_sql'::timestamptz - interval '31 days 1 second')
 );
 
 INSERT INTO research_runs (
@@ -145,9 +145,9 @@ INSERT INTO research_runs (
     'v1',
     repeat('a', 64),
     'COMPLETED',
-    ('$quote_as_of_sql'::timestamptz - interval '9 days 1 second'),
-    ('$quote_as_of_sql'::timestamptz - interval '8 days 1 second'),
-    ('$quote_as_of_sql'::timestamptz - interval '7 days 1 second'),
+    ('$quote_as_of_sql'::timestamptz - interval '33 days 1 second'),
+    ('$quote_as_of_sql'::timestamptz - interval '32 days 1 second'),
+    ('$quote_as_of_sql'::timestamptz - interval '31 days 1 second'),
     '[\"$symbol_sql\"]'::jsonb,
     '[\"$interval_sql\"]'::jsonb,
     '[\"paper-cycle-smoke\"]'::jsonb,
@@ -164,7 +164,7 @@ INSERT INTO research_results (
     'paper-cycle smoke candidate',
     '{}'::jsonb,
     '[]'::jsonb,
-    ('$quote_as_of_sql'::timestamptz - interval '7 days 1 second')
+    ('$quote_as_of_sql'::timestamptz - interval '31 days 1 second')
 );
 
 INSERT INTO paper_validation_records (
@@ -179,8 +179,8 @@ INSERT INTO paper_validation_records (
     1000,
     30,
     '[]'::jsonb,
-    ('$quote_as_of_sql'::timestamptz - interval '7 days 1 second'),
-    ('$quote_as_of_sql'::timestamptz - interval '7 days'),
+    ('$quote_as_of_sql'::timestamptz - interval '31 days 1 second'),
+    ('$quote_as_of_sql'::timestamptz - interval '31 days'),
     NULL,
     NULL
 );
@@ -205,13 +205,13 @@ INSERT INTO risk_decisions (
     102000,
     'risk_checks_passed',
     '[\"smoke_risk_checks_passed\"]'::jsonb,
-    ('$quote_as_of_sql'::timestamptz - interval '7 days'),
-    ('$quote_as_of_sql'::timestamptz - interval '7 days'),
+    ('$quote_as_of_sql'::timestamptz - interval '31 days'),
+    ('$quote_as_of_sql'::timestamptz - interval '31 days'),
     100000,
     1,
     75,
     'paper-cycle smoke',
-    ('$quote_as_of_sql'::timestamptz - interval '7 days 1 second')
+    ('$quote_as_of_sql'::timestamptz - interval '31 days 1 second')
 );
 
 INSERT INTO paper_order_tickets (
@@ -236,7 +236,7 @@ INSERT INTO paper_order_tickets (
     1,
     75,
     'risk_checks_passed',
-    ('$quote_as_of_sql'::timestamptz - interval '7 days')
+    ('$quote_as_of_sql'::timestamptz - interval '31 days')
 );
 
 INSERT INTO orderbook_snapshots (
@@ -311,6 +311,20 @@ assert_equal "close count" "$close_count" "0"
 assert_equal "equity event count" "$equity_count" "0"
 assert_equal "pending ticket count after fill" "$pending_count" "0"
 
+printf 'Verifying paper completion blocks active positions\n'
+set +e
+active_complete_output="$(go run ./cmd/paper-report \
+    -config "$smoke_config" \
+    -validation-id "$VALIDATION_ID" \
+    -action complete 2>&1)"
+active_complete_status="$?"
+set -e
+if [ "$active_complete_status" -eq 0 ]; then
+    fail "paper validation completion unexpectedly succeeded with an active open position"
+fi
+printf '%s\n' "$active_complete_output" | grep -q "active open positions" \
+    || fail "paper validation completion active-position guard mismatch: $active_complete_output"
+
 exit_quote_sql="
 INSERT INTO orderbook_snapshots (
     exchange, category, symbol, depth, bids_json, asks_json,
@@ -375,5 +389,14 @@ go run ./cmd/paper-execute \
     -pending-scan-limit 10 \
     -position-scan-limit 10 \
     -quote-scan-limit 10
+
+printf 'Completing settled paper validation\n'
+go run ./cmd/paper-report \
+    -config "$smoke_config" \
+    -validation-id "$VALIDATION_ID" \
+    -action complete
+
+validation_status="$(postgres_scalar "SELECT status FROM paper_validation_records WHERE validation_id = '$validation_id_sql';")"
+assert_equal "validation status after completion" "$validation_status" "COMPLETED"
 
 printf 'Paper execution cycle smoke passed for %s\n' "$VALIDATION_ID"

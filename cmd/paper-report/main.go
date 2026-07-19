@@ -41,6 +41,8 @@ func main() {
 		research,
 		apppaper.WithValidationRecordRepository(postgres.NewPaperValidationRepository(db)),
 		apppaper.WithValidationTradeRepository(postgres.NewPaperValidationTradeRepository(db)),
+		apppaper.WithOpenPositionRepository(postgres.NewPaperOpenPositionRepository(db)),
+		apppaper.WithPositionCloseRepository(postgres.NewPaperPositionCloseRepository(db)),
 		apppaper.WithEquityEventRepository(postgres.NewPaperEquityEventRepository(db)),
 		apppaper.WithDailyPerformanceRepository(postgres.NewPaperDailyPerformanceRepository(db)),
 	)

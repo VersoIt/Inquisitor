@@ -119,7 +119,7 @@ $quoteAsOfUtc = ([DateTimeOffset]::Parse($QuoteAsOf)).UtcDateTime
 $quoteAtUtc = $quoteAsOfUtc.AddSeconds(-1)
 $exitQuoteAsOfUtc = $quoteAsOfUtc.AddMinutes(1)
 $exitQuoteAtUtc = $exitQuoteAsOfUtc.AddSeconds(-1)
-$plannedAtUtc = $quoteAtUtc.AddDays(-7)
+$plannedAtUtc = $quoteAtUtc.AddDays(-31)
 $startedAtUtc = $plannedAtUtc.AddMinutes(1)
 $windowStartUtc = $plannedAtUtc.AddDays(-2)
 $windowEndUtc = $plannedAtUtc.AddDays(-1)
@@ -364,6 +364,26 @@ Assert-Equal "close count" $closeCount "0"
 Assert-Equal "equity event count" $equityCount "0"
 Assert-Equal "pending ticket count after fill" $pendingCount "0"
 
+Write-Host "Verifying paper completion blocks active positions"
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$activeCompleteExitCode = 0
+try {
+	$activeCompleteOutput = & go run ./cmd/paper-report `
+		-config $smokeConfig `
+		-validation-id $ValidationID `
+		-action complete 2>&1
+	$activeCompleteExitCode = $LASTEXITCODE
+} finally {
+	$ErrorActionPreference = $previousErrorActionPreference
+}
+if ($activeCompleteExitCode -eq 0) {
+	throw "paper validation completion unexpectedly succeeded with an active open position"
+}
+if (($activeCompleteOutput -join "`n") -notmatch "active open positions") {
+    throw "paper validation completion active-position guard mismatch: $($activeCompleteOutput -join "`n")"
+}
+
 Write-Host "Seeding take-profit quote for the exit cycle"
 Invoke-PostgresScript @"
 INSERT INTO orderbook_snapshots (
@@ -432,5 +452,17 @@ Write-Host "Running post-close paper execution cycle preflight"
 if ($LASTEXITCODE -ne 0) {
     throw "post-close paper execution cycle preflight smoke failed with exit code $LASTEXITCODE"
 }
+
+Write-Host "Completing settled paper validation"
+& go run ./cmd/paper-report `
+    -config $smokeConfig `
+    -validation-id $ValidationID `
+    -action complete
+if ($LASTEXITCODE -ne 0) {
+    throw "paper validation completion smoke failed with exit code $LASTEXITCODE"
+}
+
+$validationStatus = Invoke-PostgresScalar "SELECT status FROM paper_validation_records WHERE validation_id = '$validationIDSql';"
+Assert-Equal "validation status after completion" $validationStatus "COMPLETED"
 
 Write-Host "Paper execution cycle smoke passed for $ValidationID"

@@ -391,6 +391,9 @@ func TestServiceValidationLifecycleTransitionsTableDriven(t *testing.T) {
 				&fakeResultRepository{results: []domainresearch.Result{result}},
 				apppaper.WithValidationRecordRepository(records),
 				apppaper.WithValidationTradeRepository(&fakeValidationTradeRepository{}),
+				apppaper.WithOpenPositionRepository(&fakeOpenPositionRepository{}),
+				apppaper.WithPositionCloseRepository(&fakePositionCloseRepository{}),
+				apppaper.WithEquityEventRepository(&fakeEquityEventRepository{}),
 				apppaper.WithClock(clock.FixedClock{Time: tt.now}),
 			)
 			got, err := tt.run(service)
@@ -411,6 +414,214 @@ func TestServiceValidationLifecycleTransitionsTableDriven(t *testing.T) {
 			}
 			if tt.wantRepoCalls > 0 && records.transitionExpected != tt.wantExpected {
 				t.Fatalf("expected status mismatch: got %s want %s", records.transitionExpected, tt.wantExpected)
+			}
+		})
+	}
+}
+
+func TestServiceCompleteValidationRequiresSettledPositionJournalTableDriven(t *testing.T) {
+	plannedAt := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	record := testValidationRecord(t, "research_paper_app_0001", plannedAt, domainpaper.ValidationStatusRunning)
+	now := record.StartedAt.AddDate(0, 0, record.MinimumDays)
+	position := appOpenPosition(plannedAt)
+	position.ValidationID = record.ValidationID
+	close := appPositionClose(plannedAt)
+	close.ValidationID = record.ValidationID
+	close.PositionID = position.PositionID
+	close.EntryFillID = position.FillID
+	close.TicketID = position.TicketID
+	close.DecisionID = position.DecisionID
+	close.IntentID = position.IntentID
+	close.Exchange = position.Exchange
+	close.Category = position.Category
+	close.Symbol = position.Symbol
+	close.Interval = position.Interval
+	close.Side = position.Side
+	close.Quantity = position.Quantity
+	close.EntryPrice = position.EntryPrice
+	close.EntryNotional = position.EntryNotional
+	close.EntryFee = position.EntryFee
+	close.OpenedAt = position.OpenedAt
+	close.ClosedAt = position.OpenedAt.Add(2 * time.Minute)
+	close.RecordedAt = close.ClosedAt.Add(time.Minute)
+	duplicateClose := close
+	duplicateClose.CloseID = "paper_close_app_0002"
+	repositoryErr := errors.New("postgres unavailable")
+
+	tests := []struct {
+		name                string
+		positions           *fakeOpenPositionRepository
+		closes              *fakePositionCloseRepository
+		equity              *fakeEquityEventRepository
+		wantErrSub          string
+		wantTransitionCalls int
+		wantPositionQueries int
+		wantCloseQueries    int
+		wantEquityQueries   int
+	}{
+		{
+			name:                "completes when no positions exist",
+			positions:           &fakeOpenPositionRepository{},
+			closes:              &fakePositionCloseRepository{},
+			equity:              &fakeEquityEventRepository{},
+			wantTransitionCalls: 1,
+			wantPositionQueries: 1,
+		},
+		{
+			name:                "completes when every closed position has equity event",
+			positions:           &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{position}},
+			closes:              &fakePositionCloseRepository{closes: []domainpaper.PositionClose{close}},
+			equity:              &fakeEquityEventRepository{events: []domainpaper.EquityEvent{appEquityEventForClose(plannedAt, close, "paper_equity_app_0001")}},
+			wantTransitionCalls: 1,
+			wantPositionQueries: 1,
+			wantCloseQueries:    1,
+			wantEquityQueries:   1,
+		},
+		{
+			name:                "rejects active open position",
+			positions:           &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{position}},
+			closes:              &fakePositionCloseRepository{},
+			equity:              &fakeEquityEventRepository{},
+			wantErrSub:          "active open positions",
+			wantPositionQueries: 1,
+			wantCloseQueries:    1,
+		},
+		{
+			name:                "rejects closed position without equity event",
+			positions:           &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{position}},
+			closes:              &fakePositionCloseRepository{closes: []domainpaper.PositionClose{close}},
+			equity:              &fakeEquityEventRepository{},
+			wantErrSub:          "equity ledger events",
+			wantPositionQueries: 1,
+			wantCloseQueries:    1,
+			wantEquityQueries:   1,
+		},
+		{
+			name:                "rejects duplicate close journal",
+			positions:           &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{position}},
+			closes:              &fakePositionCloseRepository{closes: []domainpaper.PositionClose{close, duplicateClose}},
+			equity:              &fakeEquityEventRepository{},
+			wantErrSub:          "inconsistent close journal",
+			wantPositionQueries: 1,
+			wantCloseQueries:    1,
+		},
+		{
+			name:      "rejects duplicate equity events",
+			positions: &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{position}},
+			closes:    &fakePositionCloseRepository{closes: []domainpaper.PositionClose{close}},
+			equity: &fakeEquityEventRepository{events: []domainpaper.EquityEvent{
+				appEquityEventForClose(plannedAt, close, "paper_equity_app_0001"),
+				appEquityEventForClose(plannedAt, close, "paper_equity_app_0002"),
+			}},
+			wantErrSub:          "inconsistent equity ledger",
+			wantPositionQueries: 1,
+			wantCloseQueries:    1,
+			wantEquityQueries:   1,
+		},
+		{
+			name:       "rejects missing open position repository",
+			closes:     &fakePositionCloseRepository{},
+			equity:     &fakeEquityEventRepository{},
+			wantErrSub: "open position repository",
+		},
+		{
+			name:       "rejects missing position close repository",
+			positions:  &fakeOpenPositionRepository{},
+			equity:     &fakeEquityEventRepository{},
+			wantErrSub: "position close repository",
+		},
+		{
+			name:       "rejects missing equity event repository",
+			positions:  &fakeOpenPositionRepository{},
+			closes:     &fakePositionCloseRepository{},
+			wantErrSub: "equity event repository",
+		},
+		{
+			name:                "reports position scan failure",
+			positions:           &fakeOpenPositionRepository{err: repositoryErr},
+			closes:              &fakePositionCloseRepository{},
+			equity:              &fakeEquityEventRepository{},
+			wantErrSub:          repositoryErr.Error(),
+			wantPositionQueries: 1,
+		},
+		{
+			name:                "reports close lookup failure",
+			positions:           &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{position}},
+			closes:              &fakePositionCloseRepository{listErr: repositoryErr},
+			equity:              &fakeEquityEventRepository{},
+			wantErrSub:          repositoryErr.Error(),
+			wantPositionQueries: 1,
+			wantCloseQueries:    1,
+		},
+		{
+			name:                "reports equity lookup failure",
+			positions:           &fakeOpenPositionRepository{positions: []domainpaper.OpenPosition{position}},
+			closes:              &fakePositionCloseRepository{closes: []domainpaper.PositionClose{close}},
+			equity:              &fakeEquityEventRepository{listErr: repositoryErr},
+			wantErrSub:          repositoryErr.Error(),
+			wantPositionQueries: 1,
+			wantCloseQueries:    1,
+			wantEquityQueries:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			records := &fakeValidationRecordRepository{
+				records: []domainpaper.ValidationRecord{record},
+				stats:   domainpaper.ValidationRecordStats{Updated: 1},
+			}
+			options := []apppaper.Option{
+				apppaper.WithValidationRecordRepository(records),
+				apppaper.WithClock(clock.FixedClock{Time: now}),
+			}
+			if tt.positions != nil {
+				options = append(options, apppaper.WithOpenPositionRepository(tt.positions))
+			}
+			if tt.closes != nil {
+				options = append(options, apppaper.WithPositionCloseRepository(tt.closes))
+			}
+			if tt.equity != nil {
+				options = append(options, apppaper.WithEquityEventRepository(tt.equity))
+			}
+			service := apppaper.NewService(&fakeRunRepository{}, &fakeResultRepository{}, options...)
+
+			got, err := service.CompleteValidation(context.Background(), record.ValidationID)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("complete validation: %v", err)
+				}
+				if got.Record.Status != domainpaper.ValidationStatusCompleted || got.Stats.Updated != 1 {
+					t.Fatalf("completion result mismatch: %#v", got)
+				}
+			}
+			if records.transitionCalls != tt.wantTransitionCalls {
+				t.Fatalf("transition call count mismatch: got %d want %d", records.transitionCalls, tt.wantTransitionCalls)
+			}
+			if tt.wantTransitionCalls > 0 && records.transitionExpected != domainpaper.ValidationStatusRunning {
+				t.Fatalf("transition expected status mismatch: got %s want %s", records.transitionExpected, domainpaper.ValidationStatusRunning)
+			}
+			if tt.positions != nil && len(tt.positions.queries) != tt.wantPositionQueries {
+				t.Fatalf("position query count mismatch: got %d want %d queries=%#v", len(tt.positions.queries), tt.wantPositionQueries, tt.positions.queries)
+			}
+			if tt.wantPositionQueries > 0 && tt.positions.queries[0].ValidationID != record.ValidationID {
+				t.Fatalf("position query scope mismatch: %#v", tt.positions.queries[0])
+			}
+			if tt.closes != nil && len(tt.closes.queries) != tt.wantCloseQueries {
+				t.Fatalf("close query count mismatch: got %d want %d queries=%#v", len(tt.closes.queries), tt.wantCloseQueries, tt.closes.queries)
+			}
+			if tt.wantCloseQueries > 0 && (tt.closes.queries[0].ValidationID != record.ValidationID || tt.closes.queries[0].PositionID != position.PositionID || tt.closes.queries[0].Limit != 2) {
+				t.Fatalf("close query scope mismatch: %#v", tt.closes.queries[0])
+			}
+			if tt.equity != nil && len(tt.equity.queries) != tt.wantEquityQueries {
+				t.Fatalf("equity query count mismatch: got %d want %d queries=%#v", len(tt.equity.queries), tt.wantEquityQueries, tt.equity.queries)
+			}
+			if tt.wantEquityQueries > 0 && (tt.equity.queries[0].CloseID != close.CloseID || tt.equity.queries[0].Limit != 2) {
+				t.Fatalf("equity query scope mismatch: %#v", tt.equity.queries[0])
 			}
 		})
 	}

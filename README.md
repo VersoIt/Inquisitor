@@ -391,7 +391,7 @@ Start a real paper-observation period only with a fresh, empty journal. Offline 
 go run ./cmd/paper-report -config configs/config.example.yaml -validation-id paper_validation_001 -action start
 ```
 
-Completion is allowed only after the configured calendar-day minimum has elapsed. `COMPLETED` means the observation period ended; it does not approve live trading. Approval still requires the future risk engine, kill-switch evidence, acceptable paper metrics, and manual review.
+Completion is allowed only after the configured calendar-day minimum has elapsed and the live-paper position journal is fully settled: no active open positions, no duplicate close records, and every closed position must have exactly one equity-ledger event. `COMPLETED` means the observation period ended; it does not approve live trading. Approval still requires the future risk engine, kill-switch evidence, acceptable paper metrics, and manual review.
 
 ```powershell
 go run ./cmd/paper-report -config configs/config.example.yaml -validation-id paper_validation_001 -action complete
