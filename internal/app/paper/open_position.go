@@ -9,8 +9,9 @@ import (
 )
 
 type OpenPositionRequest struct {
-	PositionID string
-	FillID     string
+	PositionID   string
+	FillID       string
+	ValidationID string
 }
 
 type OpenPositionResult struct {
@@ -41,11 +42,15 @@ func (s *Service) OpenPosition(ctx context.Context, req OpenPositionRequest) (Op
 		return OpenPositionResult{}, fmt.Errorf("paper open position service requires clock")
 	}
 
-	fill, err := s.loadOrderFill(ctx, req.FillID)
+	validationID := strings.TrimSpace(req.ValidationID)
+	fill, err := s.loadOrderFill(ctx, validationID, req.FillID)
 	if err != nil {
 		return OpenPositionResult{}, err
 	}
-	ticket, err := s.loadOrderTicket(ctx, fill.TicketID)
+	if validationID != "" && fill.ValidationID != validationID {
+		return OpenPositionResult{}, fmt.Errorf("paper order fill %q belongs to validation %q, not %q", fill.FillID, fill.ValidationID, validationID)
+	}
+	ticket, err := s.loadOrderTicket(ctx, fill.ValidationID, fill.TicketID)
 	if err != nil {
 		return OpenPositionResult{}, err
 	}
@@ -82,14 +87,16 @@ func (s *Service) OpenPosition(ctx context.Context, req OpenPositionRequest) (Op
 	}, nil
 }
 
-func (s *Service) loadOrderFill(ctx context.Context, fillID string) (domainpaper.OrderFill, error) {
+func (s *Service) loadOrderFill(ctx context.Context, validationID string, fillID string) (domainpaper.OrderFill, error) {
 	fillID = strings.TrimSpace(fillID)
 	if fillID == "" {
 		return domainpaper.OrderFill{}, fmt.Errorf("fill_id is required")
 	}
+	validationID = strings.TrimSpace(validationID)
 	fills, err := s.fills.ListOrderFills(ctx, domainpaper.OrderFillQuery{
-		FillID: fillID,
-		Limit:  2,
+		ValidationID: validationID,
+		FillID:       fillID,
+		Limit:        2,
 	})
 	if err != nil {
 		return domainpaper.OrderFill{}, fmt.Errorf("load paper order fill %q: %w", fillID, err)

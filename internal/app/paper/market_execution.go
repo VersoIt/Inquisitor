@@ -3,6 +3,7 @@ package paper
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -12,12 +13,13 @@ import (
 )
 
 type SimulateOrderFillRequest struct {
-	FillID    string
-	TicketID  string
-	Liquidity backtest.LiquidityRole
-	MidPrice  decimal.Decimal
-	Costs     backtest.CostModel
-	FilledAt  time.Time
+	FillID       string
+	TicketID     string
+	ValidationID string
+	Liquidity    backtest.LiquidityRole
+	MidPrice     decimal.Decimal
+	Costs        backtest.CostModel
+	FilledAt     time.Time
 }
 
 type SettlePositionAtMarketRequest struct {
@@ -38,9 +40,13 @@ func (s *Service) SimulateOrderFill(ctx context.Context, req SimulateOrderFillRe
 	if s == nil || s.tickets == nil {
 		return RecordOrderFillResult{}, fmt.Errorf("paper simulated order fill requires order ticket repository")
 	}
-	ticket, err := s.loadOrderTicket(ctx, req.TicketID)
+	validationID := strings.TrimSpace(req.ValidationID)
+	ticket, err := s.loadOrderTicket(ctx, validationID, req.TicketID)
 	if err != nil {
 		return RecordOrderFillResult{}, err
+	}
+	if validationID != "" && ticket.ValidationID != validationID {
+		return RecordOrderFillResult{}, fmt.Errorf("paper order ticket %q belongs to validation %q, not %q", ticket.TicketID, ticket.ValidationID, validationID)
 	}
 	fill, err := backtest.EvaluateFill(backtest.FillInput{
 		Direction: orderSideDirection(ticket.Side),
@@ -57,6 +63,7 @@ func (s *Service) SimulateOrderFill(ctx context.Context, req SimulateOrderFillRe
 	return s.RecordOrderFill(ctx, RecordOrderFillRequest{
 		FillID:        req.FillID,
 		TicketID:      req.TicketID,
+		ValidationID:  validationID,
 		Liquidity:     req.Liquidity,
 		MidPrice:      fill.MidPrice,
 		ExecutedPrice: fill.ExecutedPrice,

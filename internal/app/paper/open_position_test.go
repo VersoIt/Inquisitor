@@ -86,6 +86,52 @@ func TestServiceOpenPositionScopesExistingPositionLookupToValidation(t *testing.
 	}
 }
 
+func TestServiceOpenPositionScopesEntryLookupsToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	fill := appOrderFill(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	foreignTicket := ticket
+	foreignTicket.ValidationID = "paper_validation_foreign_0001"
+	foreignFill := fill
+	foreignFill.ValidationID = foreignTicket.ValidationID
+	tickets := &fakeOrderTicketRepository{tickets: []domainpaper.OrderTicket{foreignTicket, ticket}}
+	fills := &fakeOrderFillRepository{fills: []domainpaper.OrderFill{foreignFill, fill}}
+	positions := &fakeOpenPositionRepository{stats: domainpaper.OpenPositionStats{Inserted: 1}}
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOrderTicketRepository(tickets),
+		apppaper.WithOrderFillRepository(fills),
+		apppaper.WithOpenPositionRepository(positions),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(3 * time.Minute)}),
+	)
+
+	got, err := service.OpenPosition(context.Background(), apppaper.OpenPositionRequest{
+		PositionID:   "paper_position_app_0001",
+		FillID:       fill.FillID,
+		ValidationID: " " + record.ValidationID + " ",
+	})
+	if err != nil {
+		t.Fatalf("open position with foreign entry records present: %v", err)
+	}
+
+	if got.Fill.ValidationID != record.ValidationID || got.Ticket.ValidationID != record.ValidationID ||
+		got.Position.ValidationID != record.ValidationID || got.Stats.Inserted != 1 {
+		t.Fatalf("scoped entry lookup result mismatch: %#v", got)
+	}
+	if len(fills.queries) != 1 || fills.queries[0].ValidationID != record.ValidationID ||
+		fills.queries[0].FillID != fill.FillID || fills.queries[0].Limit != 2 {
+		t.Fatalf("fill lookup must be scoped to validation: %#v", fills.queries)
+	}
+	if len(tickets.queries) != 1 || tickets.queries[0].ValidationID != record.ValidationID ||
+		tickets.queries[0].TicketID != ticket.TicketID || tickets.queries[0].Limit != 2 {
+		t.Fatalf("ticket lookup must be scoped to validation: %#v", tickets.queries)
+	}
+}
+
 func TestServiceOpenPositionRejectsUnsafeInputsTableDriven(t *testing.T) {
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	ticket := appOrderTicket(now)

@@ -80,8 +80,9 @@ func (s *Service) ReconcilePaperEntryWithQuote(ctx context.Context, req Reconcil
 			return ReconcilePaperEntryWithQuoteResult{}, fmt.Errorf("paper order ticket %q already has fill %q, not requested fill %q", ticket.TicketID, existingFill.FillID, fillID)
 		}
 		opened, openErr := s.OpenPosition(ctx, OpenPositionRequest{
-			PositionID: positionID,
-			FillID:     existingFill.FillID,
+			PositionID:   positionID,
+			FillID:       existingFill.FillID,
+			ValidationID: validationID,
 		})
 		if openErr != nil {
 			return ReconcilePaperEntryWithQuoteResult{}, fmt.Errorf("open paper position after existing fill %q: %w", existingFill.FillID, openErr)
@@ -115,13 +116,14 @@ func (s *Service) ReconcilePaperEntryWithQuote(ctx context.Context, req Reconcil
 		return ReconcilePaperEntryWithQuoteResult{}, err
 	}
 	entry, err := s.ReconcileTicketFillAtMarket(ctx, ReconcileTicketFillAtMarketRequest{
-		FillID:     fillID,
-		PositionID: positionID,
-		TicketID:   ticket.TicketID,
-		Liquidity:  req.Liquidity,
-		MidPrice:   quote.MidPrice,
-		Costs:      req.Costs,
-		FilledAt:   quote.Snapshot.ExchangeTime,
+		FillID:       fillID,
+		PositionID:   positionID,
+		TicketID:     ticket.TicketID,
+		ValidationID: validationID,
+		Liquidity:    req.Liquidity,
+		MidPrice:     quote.MidPrice,
+		Costs:        req.Costs,
+		FilledAt:     quote.Snapshot.ExchangeTime,
 	})
 	if err != nil {
 		return ReconcilePaperEntryWithQuoteResult{}, err
@@ -153,7 +155,7 @@ func (s *Service) selectPaperEntryTicket(
 		if record.Status != domainpaper.ValidationStatusRunning {
 			return domainpaper.OrderTicket{}, fmt.Errorf("paper auto entry reconciliation requires RUNNING validation status")
 		}
-		ticket, err := s.loadOrderTicket(ctx, ticketID)
+		ticket, err := s.loadOrderTicket(ctx, validationID, ticketID)
 		if err != nil {
 			return domainpaper.OrderTicket{}, err
 		}

@@ -10,6 +10,7 @@ import (
 
 	apppaper "github.com/VersoIt/Inquisitor/internal/app/paper"
 	"github.com/VersoIt/Inquisitor/internal/backtest"
+	"github.com/VersoIt/Inquisitor/internal/clock"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
 )
 
@@ -68,6 +69,51 @@ func TestServiceSimulateOrderFillUsesMakerFee(t *testing.T) {
 	if got.Fill.Liquidity != backtest.LiquidityMaker || !got.Fill.FeeBPS.Equal(decimal.RequireFromString("2")) ||
 		!got.Fill.Fee.Equal(decimal.RequireFromString("10.005")) {
 		t.Fatalf("maker fee mismatch: %#v", got.Fill)
+	}
+}
+
+func TestServiceSimulateOrderFillScopesTicketLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	foreignTicket := ticket
+	foreignTicket.ValidationID = "paper_validation_foreign_0001"
+	tickets := &fakeOrderTicketRepository{tickets: []domainpaper.OrderTicket{foreignTicket, ticket}}
+	fills := &fakeOrderFillRepository{stats: domainpaper.OrderFillStats{Inserted: 1}}
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOrderTicketRepository(tickets),
+		apppaper.WithOrderFillRepository(fills),
+		apppaper.WithKillSwitchRepository(&fakePaperKillSwitchRepository{}),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(2 * time.Minute)}),
+	)
+
+	got, err := service.SimulateOrderFill(context.Background(), apppaper.SimulateOrderFillRequest{
+		FillID:       "paper_fill_app_0001",
+		TicketID:     ticket.TicketID,
+		ValidationID: " " + ticket.ValidationID + " ",
+		Liquidity:    backtest.LiquidityTaker,
+		MidPrice:     decimal.RequireFromString("100000"),
+		Costs:        marketExecutionCosts(t),
+		FilledAt:     now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("simulate order fill with foreign ticket present: %v", err)
+	}
+
+	if got.Ticket.ValidationID != record.ValidationID || got.Fill.ValidationID != record.ValidationID || got.Stats.Inserted != 1 {
+		t.Fatalf("scoped simulated fill mismatch: %#v", got)
+	}
+	if len(tickets.queries) != 2 {
+		t.Fatalf("expected simulate and record ticket lookups, got %#v", tickets.queries)
+	}
+	for index, query := range tickets.queries {
+		if query.ValidationID != record.ValidationID || query.TicketID != ticket.TicketID || query.Limit != 2 {
+			t.Fatalf("ticket lookup[%d] must be scoped to validation: %#v", index, query)
+		}
 	}
 }
 

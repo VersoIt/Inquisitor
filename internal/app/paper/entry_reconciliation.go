@@ -13,13 +13,14 @@ import (
 )
 
 type ReconcileTicketFillAtMarketRequest struct {
-	FillID     string
-	PositionID string
-	TicketID   string
-	Liquidity  backtest.LiquidityRole
-	MidPrice   decimal.Decimal
-	Costs      backtest.CostModel
-	FilledAt   time.Time
+	FillID       string
+	PositionID   string
+	TicketID     string
+	ValidationID string
+	Liquidity    backtest.LiquidityRole
+	MidPrice     decimal.Decimal
+	Costs        backtest.CostModel
+	FilledAt     time.Time
 }
 
 type ReconcileTicketFillAtMarketResult struct {
@@ -43,20 +44,22 @@ func (s *Service) ReconcileTicketFillAtMarket(ctx context.Context, req Reconcile
 	}
 
 	filled, err := s.SimulateOrderFill(ctx, SimulateOrderFillRequest{
-		FillID:    req.FillID,
-		TicketID:  req.TicketID,
-		Liquidity: req.Liquidity,
-		MidPrice:  req.MidPrice,
-		Costs:     req.Costs,
-		FilledAt:  req.FilledAt,
+		FillID:       req.FillID,
+		TicketID:     req.TicketID,
+		ValidationID: req.ValidationID,
+		Liquidity:    req.Liquidity,
+		MidPrice:     req.MidPrice,
+		Costs:        req.Costs,
+		FilledAt:     req.FilledAt,
 	})
 	if err != nil {
 		return ReconcileTicketFillAtMarketResult{}, err
 	}
 
 	opened, err := s.OpenPosition(ctx, OpenPositionRequest{
-		PositionID: req.PositionID,
-		FillID:     req.FillID,
+		PositionID:   req.PositionID,
+		FillID:       req.FillID,
+		ValidationID: filled.Fill.ValidationID,
 	})
 	if err != nil {
 		return ReconcileTicketFillAtMarketResult{}, fmt.Errorf("open paper position after fill %q: %w", filled.Fill.FillID, err)

@@ -86,6 +86,68 @@ func TestServiceReconcileTicketFillAtMarketCompletesOpenAfterIdempotentFill(t *t
 	}
 }
 
+func TestServiceReconcileTicketFillAtMarketScopesEntryLookupsToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	foreignTicket := ticket
+	foreignTicket.ValidationID = "paper_validation_foreign_0001"
+	foreignFill := appOrderFill(now)
+	foreignFill.ValidationID = foreignTicket.ValidationID
+	tickets := &fakeOrderTicketRepository{tickets: []domainpaper.OrderTicket{foreignTicket, ticket}}
+	fills := &fakeOrderFillRepository{
+		fills: []domainpaper.OrderFill{foreignFill},
+		stats: domainpaper.OrderFillStats{Inserted: 1},
+	}
+	positions := &fakeOpenPositionRepository{stats: domainpaper.OpenPositionStats{Inserted: 1}}
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOrderTicketRepository(tickets),
+		apppaper.WithOrderFillRepository(fills),
+		apppaper.WithOpenPositionRepository(positions),
+		apppaper.WithKillSwitchRepository(&fakePaperKillSwitchRepository{}),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(3 * time.Minute)}),
+	)
+
+	got, err := service.ReconcileTicketFillAtMarket(context.Background(), apppaper.ReconcileTicketFillAtMarketRequest{
+		FillID:       "paper_fill_app_0001",
+		PositionID:   "paper_position_app_0001",
+		TicketID:     ticket.TicketID,
+		ValidationID: " " + record.ValidationID + " ",
+		Liquidity:    backtest.LiquidityTaker,
+		MidPrice:     decimal.RequireFromString("100000"),
+		Costs:        marketExecutionCosts(t),
+		FilledAt:     now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("reconcile entry with foreign records present: %v", err)
+	}
+
+	if got.Ticket.ValidationID != record.ValidationID || got.Fill.ValidationID != record.ValidationID ||
+		got.Position.ValidationID != record.ValidationID {
+		t.Fatalf("scoped reconciliation result mismatch: %#v", got)
+	}
+	if len(tickets.queries) != 3 {
+		t.Fatalf("expected simulate, record, and open ticket lookups, got %#v", tickets.queries)
+	}
+	for index, query := range tickets.queries {
+		if query.ValidationID != record.ValidationID || query.TicketID != ticket.TicketID || query.Limit != 2 {
+			t.Fatalf("ticket lookup[%d] must be scoped to validation: %#v", index, query)
+		}
+	}
+	if len(fills.queries) < 2 {
+		t.Fatalf("expected existing-fill and open-fill lookups, got %#v", fills.queries)
+	}
+	for index, query := range fills.queries[:2] {
+		if query.ValidationID != record.ValidationID || query.Limit != 2 {
+			t.Fatalf("fill lookup[%d] must be scoped to validation: %#v", index, query)
+		}
+	}
+}
+
 func TestServiceReconcileTicketFillAtMarketRequiresPositionRepositoryBeforeFill(t *testing.T) {
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	ticket := appOrderTicket(now)

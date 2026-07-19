@@ -29,7 +29,7 @@ const paperExecutionCycleLockNamespace = "paper-execute:auto-cycle"
 func main() {
 	configPath := flag.String("config", "configs/config.example.yaml", "path to YAML config")
 	action := flag.String("action", "", "action: quote, pending, auto-enter, auto-exit, cycle-preflight, auto-cycle, enter, fill, settle")
-	validationID := flag.String("validation-id", "", "paper validation id for action=pending, action=auto-enter, action=auto-exit, action=cycle-preflight, or action=auto-cycle")
+	validationID := flag.String("validation-id", "", "paper validation id for action=pending, action=auto-enter, action=auto-exit, action=cycle-preflight, action=auto-cycle, action=enter, or action=fill")
 	fillID := flag.String("fill-id", "", "stable paper fill id for action=auto-enter, action=enter, or action=fill")
 	ticketID := flag.String("ticket-id", "", "paper order ticket id for action=auto-enter, action=enter, or action=fill")
 	eventID := flag.String("event-id", "", "stable paper equity event id for action=auto-exit or action=settle")
@@ -412,13 +412,14 @@ func main() {
 		}
 	case "enter":
 		result, enterErr := service.ReconcileTicketFillAtMarket(ctx, apppaper.ReconcileTicketFillAtMarketRequest{
-			FillID:     *fillID,
-			PositionID: *positionID,
-			TicketID:   *ticketID,
-			Liquidity:  liquidity,
-			MidPrice:   midPrice,
-			Costs:      costs,
-			FilledAt:   occurredAt,
+			FillID:       *fillID,
+			PositionID:   *positionID,
+			TicketID:     *ticketID,
+			ValidationID: *validationID,
+			Liquidity:    liquidity,
+			MidPrice:     midPrice,
+			Costs:        costs,
+			FilledAt:     occurredAt,
 		})
 		if enterErr != nil {
 			log.Error("paper entry reconciliation failed", "error", enterErr)
@@ -444,12 +445,13 @@ func main() {
 		)
 	case "fill":
 		result, fillErr := service.SimulateOrderFill(ctx, apppaper.SimulateOrderFillRequest{
-			FillID:    *fillID,
-			TicketID:  *ticketID,
-			Liquidity: liquidity,
-			MidPrice:  midPrice,
-			Costs:     costs,
-			FilledAt:  occurredAt,
+			FillID:       *fillID,
+			TicketID:     *ticketID,
+			ValidationID: *validationID,
+			Liquidity:    liquidity,
+			MidPrice:     midPrice,
+			Costs:        costs,
+			FilledAt:     occurredAt,
 		})
 		if fillErr != nil {
 			log.Error("paper simulated fill failed", "error", fillErr)

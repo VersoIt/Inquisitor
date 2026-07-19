@@ -15,6 +15,7 @@ import (
 type RecordOrderFillRequest struct {
 	FillID        string
 	TicketID      string
+	ValidationID  string
 	Liquidity     backtest.LiquidityRole
 	MidPrice      decimal.Decimal
 	ExecutedPrice decimal.Decimal
@@ -49,9 +50,13 @@ func (s *Service) RecordOrderFill(ctx context.Context, req RecordOrderFillReques
 		return RecordOrderFillResult{}, fmt.Errorf("paper order fill service requires clock")
 	}
 
-	ticket, err := s.loadOrderTicket(ctx, req.TicketID)
+	validationID := strings.TrimSpace(req.ValidationID)
+	ticket, err := s.loadOrderTicket(ctx, validationID, req.TicketID)
 	if err != nil {
 		return RecordOrderFillResult{}, err
+	}
+	if validationID != "" && ticket.ValidationID != validationID {
+		return RecordOrderFillResult{}, fmt.Errorf("paper order ticket %q belongs to validation %q, not %q", ticket.TicketID, ticket.ValidationID, validationID)
 	}
 	record, err := s.loadValidationRecord(ctx, ticket.ValidationID)
 	if err != nil {
@@ -98,14 +103,16 @@ func (s *Service) RecordOrderFill(ctx context.Context, req RecordOrderFillReques
 	}, nil
 }
 
-func (s *Service) loadOrderTicket(ctx context.Context, ticketID string) (domainpaper.OrderTicket, error) {
+func (s *Service) loadOrderTicket(ctx context.Context, validationID string, ticketID string) (domainpaper.OrderTicket, error) {
 	ticketID = strings.TrimSpace(ticketID)
 	if ticketID == "" {
 		return domainpaper.OrderTicket{}, fmt.Errorf("ticket_id is required")
 	}
+	validationID = strings.TrimSpace(validationID)
 	tickets, err := s.tickets.ListOrderTickets(ctx, domainpaper.OrderTicketQuery{
-		TicketID: ticketID,
-		Limit:    2,
+		TicketID:     ticketID,
+		ValidationID: validationID,
+		Limit:        2,
 	})
 	if err != nil {
 		return domainpaper.OrderTicket{}, fmt.Errorf("load paper order ticket %q: %w", ticketID, err)

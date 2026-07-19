@@ -91,6 +91,43 @@ func TestServiceRecordOrderFillScopesExistingFillLookupToValidation(t *testing.T
 	}
 }
 
+func TestServiceRecordOrderFillScopesTicketLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	foreignTicket := ticket
+	foreignTicket.ValidationID = "paper_validation_foreign_0001"
+	tickets := &fakeOrderTicketRepository{tickets: []domainpaper.OrderTicket{foreignTicket, ticket}}
+	fills := &fakeOrderFillRepository{stats: domainpaper.OrderFillStats{Inserted: 1}}
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOrderTicketRepository(tickets),
+		apppaper.WithOrderFillRepository(fills),
+		apppaper.WithKillSwitchRepository(&fakePaperKillSwitchRepository{}),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(2 * time.Minute)}),
+	)
+	req := appOrderFillRequest(now)
+	req.ValidationID = " " + ticket.ValidationID + " "
+
+	got, err := service.RecordOrderFill(context.Background(), req)
+	if err != nil {
+		t.Fatalf("record order fill with foreign ticket present: %v", err)
+	}
+
+	if got.Ticket.ValidationID != record.ValidationID || got.Fill.ValidationID != record.ValidationID || got.Stats.Inserted != 1 {
+		t.Fatalf("scoped ticket result mismatch: %#v", got)
+	}
+	if len(tickets.queries) != 1 {
+		t.Fatalf("expected one ticket lookup, got %#v", tickets.queries)
+	}
+	if tickets.queries[0].ValidationID != record.ValidationID || tickets.queries[0].TicketID != ticket.TicketID || tickets.queries[0].Limit != 2 {
+		t.Fatalf("ticket lookup must be scoped to validation: %#v", tickets.queries[0])
+	}
+}
+
 func TestServiceRecordOrderFillRejectsUnsafeInputsTableDriven(t *testing.T) {
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	ticket := appOrderTicket(now)

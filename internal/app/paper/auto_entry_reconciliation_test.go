@@ -71,6 +71,59 @@ func TestServiceReconcilePaperEntryWithQuoteSelectsPendingTicketSourcesQuoteAndO
 	}
 }
 
+func TestServiceReconcilePaperEntryWithQuoteScopesExplicitTicketLookupToValidation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	ticket := appOrderTicket(now)
+	record := testValidationRecord(t, "research_app_0001", now.Add(-2*time.Hour), domainpaper.ValidationStatusRunning)
+	record.ValidationID = ticket.ValidationID
+	foreignTicket := ticket
+	foreignTicket.ValidationID = "paper_validation_foreign_0001"
+	tickets := &fakeOrderTicketRepository{tickets: []domainpaper.OrderTicket{foreignTicket, ticket}}
+	fills := &fakeOrderFillRepository{stats: domainpaper.OrderFillStats{Inserted: 1}}
+	positions := &fakeOpenPositionRepository{stats: domainpaper.OpenPositionStats{Inserted: 1}}
+	quoteTime := now.Add(time.Minute)
+	service := apppaper.NewService(
+		&fakeRunRepository{},
+		&fakeResultRepository{},
+		apppaper.WithValidationRecordRepository(&fakeValidationRecordRepository{records: []domainpaper.ValidationRecord{record}}),
+		apppaper.WithOrderTicketRepository(tickets),
+		apppaper.WithOrderFillRepository(fills),
+		apppaper.WithOpenPositionRepository(positions),
+		apppaper.WithKillSwitchRepository(&fakePaperKillSwitchRepository{}),
+		apppaper.WithOrderbookSnapshotRepository(&fakeOrderbookSnapshotRepository{
+			snapshots: []marketdata.OrderbookSnapshot{appOrderbookSnapshot(quoteTime, "100000", "100200")},
+		}),
+		apppaper.WithClock(clock.FixedClock{Time: now.Add(3 * time.Minute)}),
+	)
+
+	got, err := service.ReconcilePaperEntryWithQuote(context.Background(), apppaper.ReconcilePaperEntryWithQuoteRequest{
+		ValidationID:   " " + ticket.ValidationID + " ",
+		TicketID:       ticket.TicketID,
+		Liquidity:      backtest.LiquidityTaker,
+		Costs:          marketExecutionCosts(t),
+		AsOf:           quoteTime.Add(time.Second),
+		MaxStaleness:   30 * time.Second,
+		MaxSpreadBPS:   decimal.RequireFromString("250"),
+		QuoteScanLimit: 10,
+	})
+	if err != nil {
+		t.Fatalf("reconcile explicit paper entry with foreign ticket present: %v", err)
+	}
+
+	if got.Ticket.ValidationID != record.ValidationID || got.Fill.ValidationID != record.ValidationID ||
+		got.Position.ValidationID != record.ValidationID || !got.QuoteSourced {
+		t.Fatalf("scoped explicit entry result mismatch: %#v", got)
+	}
+	if len(tickets.queries) != 4 {
+		t.Fatalf("expected explicit, simulate, record, and open ticket lookups, got %#v", tickets.queries)
+	}
+	for index, query := range tickets.queries {
+		if query.ValidationID != record.ValidationID || query.TicketID != ticket.TicketID || query.Limit != 2 {
+			t.Fatalf("ticket lookup[%d] must be scoped to validation: %#v", index, query)
+		}
+	}
+}
+
 func TestServiceReconcilePaperEntryWithQuoteScopesExistingFillLookupToValidation(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	ticket := appOrderTicket(now)
@@ -275,7 +328,7 @@ func TestServiceReconcilePaperEntryWithQuoteRejectsUnsafeInputsTableDriven(t *te
 			wantQuoteQueries:  0,
 		},
 		{
-			name:   "explicit ticket validation mismatch",
+			name:   "explicit ticket outside validation is not found",
 			record: record,
 			tickets: []domainpaper.OrderTicket{func() domainpaper.OrderTicket {
 				other := ticket
@@ -292,7 +345,7 @@ func TestServiceReconcilePaperEntryWithQuoteRejectsUnsafeInputsTableDriven(t *te
 				req.TicketID = ticket.TicketID
 				return req
 			}(),
-			wantErrSub:        "belongs to validation",
+			wantErrSub:        "not found",
 			wantFillCalls:     0,
 			wantPositionCalls: 0,
 			wantQuoteQueries:  0,
