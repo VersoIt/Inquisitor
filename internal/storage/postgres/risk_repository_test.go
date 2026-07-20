@@ -175,6 +175,22 @@ func TestRiskRepositoriesIntegrationTableDriven(t *testing.T) {
 func cleanupRiskControls(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
 	if _, err := db.ExecContext(ctx, `
+		DELETE FROM live_order_acknowledgements
+		WHERE submission_id IN ('live_submission_sqlmock_0001', 'live_submission_sqlmock_0002', 'live_submission_sqlmock_0003')
+		   OR client_order_id IN ('live_client_sqlmock_0001', 'live_client_sqlmock_0002', 'live_client_sqlmock_mismatch')
+		   OR exchange_order_id IN ('bybit_order_sqlmock_0001', 'bybit_order_sqlmock_0002')
+	`); err != nil {
+		t.Fatalf("cleanup live order acknowledgements: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM live_order_submissions
+		WHERE submission_id IN ('live_submission_sqlmock_0001', 'live_submission_sqlmock_0002', 'live_submission_sqlmock_0003')
+		   OR client_order_id IN ('live_client_sqlmock_0001', 'live_client_sqlmock_0002', 'live_client_sqlmock_mismatch')
+		   OR decision_id IN ('risk_decision_sqlmock_0001', 'risk_decision_sqlmock_0002')
+	`); err != nil {
+		t.Fatalf("cleanup live order submissions: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
 		DELETE FROM paper_equity_events
 		WHERE close_id IN ('paper_close_sqlmock_0001', 'paper_close_sqlmock_0002')
 		   OR position_id IN ('paper_position_sqlmock_0001', 'paper_position_sqlmock_0002')
