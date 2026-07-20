@@ -56,3 +56,23 @@ type klineResult struct {
 	Symbol   string     `json:"symbol"`
 	List     [][]string `json:"list"`
 }
+
+type createOrderRequest struct {
+	Category    string `json:"category"`
+	Symbol      string `json:"symbol"`
+	Side        string `json:"side"`
+	OrderType   string `json:"orderType"`
+	Qty         string `json:"qty"`
+	Price       string `json:"price,omitempty"`
+	TimeInForce string `json:"timeInForce,omitempty"`
+	PositionIdx int    `json:"positionIdx"`
+	OrderLinkID string `json:"orderLinkId"`
+	ReduceOnly  bool   `json:"reduceOnly"`
+	TakeProfit  string `json:"takeProfit,omitempty"`
+	StopLoss    string `json:"stopLoss,omitempty"`
+}
+
+type createOrderResult struct {
+	OrderID     string `json:"orderId"`
+	OrderLinkID string `json:"orderLinkId"`
+}

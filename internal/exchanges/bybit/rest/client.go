@@ -1,7 +1,11 @@
 package rest
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +20,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/VersoIt/Inquisitor/internal/exchanges"
+	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	"github.com/VersoIt/Inquisitor/internal/marketdata/validator"
 )
@@ -28,6 +33,9 @@ type Client struct {
 	maxRetries int
 	backoff    time.Duration
 	now        func() time.Time
+	apiKey     string
+	apiSecret  string
+	recvWindow time.Duration
 }
 
 type Option func(*Client)
@@ -59,6 +67,21 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
+func WithHMACAuth(apiKey string, apiSecret string) Option {
+	return func(c *Client) {
+		c.apiKey = strings.TrimSpace(apiKey)
+		c.apiSecret = strings.TrimSpace(apiSecret)
+	}
+}
+
+func WithRecvWindow(window time.Duration) Option {
+	return func(c *Client) {
+		if window > 0 {
+			c.recvWindow = window
+		}
+	}
+}
+
 func New(baseURL string, options ...Option) (*Client, error) {
 	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil {
@@ -76,12 +99,43 @@ func New(baseURL string, options ...Option) (*Client, error) {
 		maxRetries: 2,
 		backoff:    250 * time.Millisecond,
 		now:        func() time.Time { return time.Now().UTC() },
+		recvWindow: 5 * time.Second,
 	}
 	for _, option := range options {
 		option(client)
 	}
 
 	return client, nil
+}
+
+func (c *Client) SubmitOrder(ctx context.Context, submission domainlive.OrderSubmission) (domainlive.OrderAcknowledgement, error) {
+	if err := ctx.Err(); err != nil {
+		return domainlive.OrderAcknowledgement{}, err
+	}
+	if c == nil {
+		return domainlive.OrderAcknowledgement{}, fmt.Errorf("bybit client is required")
+	}
+	if err := domainlive.ValidateOrderSubmission(submission); err != nil {
+		return domainlive.OrderAcknowledgement{}, err
+	}
+	req, err := bybitCreateOrderRequest(submission)
+	if err != nil {
+		return domainlive.OrderAcknowledgement{}, err
+	}
+
+	var result createOrderResult
+	if err := c.postAuthenticated(ctx, "/v5/order/create", req, &result); err != nil {
+		return domainlive.OrderAcknowledgement{}, err
+	}
+
+	return domainlive.NewOrderAcknowledgement(domainlive.OrderAcknowledgementInput{
+		SubmissionID:    submission.SubmissionID,
+		ClientOrderID:   result.OrderLinkID,
+		Exchange:        exchangeName,
+		ExchangeOrderID: result.OrderID,
+		Status:          domainlive.OrderStatusAccepted,
+		ReceivedAt:      c.now(),
+	})
 }
 
 func (c *Client) GetServerTime(ctx context.Context) (time.Time, error) {
@@ -222,6 +276,93 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, result 
 	}
 
 	return lastErr
+}
+
+func (c *Client) postAuthenticated(ctx context.Context, path string, payload any, result any) error {
+	if strings.TrimSpace(c.apiKey) == "" || strings.TrimSpace(c.apiSecret) == "" {
+		return fmt.Errorf("bybit private request requires API key and API secret")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode bybit request body: %w", err)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(c.backoff * time.Duration(attempt))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		err := c.postAuthenticatedOnce(ctx, path, body, result)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRetryable(err) {
+			break
+		}
+	}
+
+	return lastErr
+}
+
+func (c *Client) postAuthenticatedOnce(ctx context.Context, path string, body []byte, result any) error {
+	endpoint := *c.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create bybit request: %w", err)
+	}
+	timestamp := strconv.FormatInt(c.now().UnixMilli(), 10)
+	recvWindow := strconv.FormatInt(c.recvWindow.Milliseconds(), 10)
+	// Bybit V5 signs POST requests as timestamp + apiKey + recvWindow + raw JSON body.
+	signature := signBybitHMAC(c.apiSecret, timestamp+c.apiKey+recvWindow+string(body))
+
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "Inquisitor/phase1")
+	request.Header.Set("X-BAPI-API-KEY", c.apiKey)
+	request.Header.Set("X-BAPI-TIMESTAMP", timestamp)
+	request.Header.Set("X-BAPI-RECV-WINDOW", recvWindow)
+	request.Header.Set("X-BAPI-SIGN", signature)
+
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode == http.StatusTooManyRequests {
+		return exchanges.ErrRateLimited
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		return fmt.Errorf("bybit http status %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var envelope responseEnvelope[json.RawMessage]
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		return fmt.Errorf("decode bybit response: %w", err)
+	}
+	if envelope.RetCode != 0 {
+		return exchanges.ExchangeError{
+			Exchange: exchangeName,
+			RetCode:  envelope.RetCode,
+			RetMsg:   envelope.RetMsg,
+		}
+	}
+	if err := json.Unmarshal(envelope.Result, result); err != nil {
+		return fmt.Errorf("decode bybit result: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Client) getOnce(ctx context.Context, path string, query url.Values, result any) error {
@@ -427,4 +568,92 @@ func cloneValues(values url.Values) url.Values {
 		cloned[key] = append([]string(nil), items...)
 	}
 	return cloned
+}
+
+func bybitCreateOrderRequest(submission domainlive.OrderSubmission) (createOrderRequest, error) {
+	side, err := bybitOrderSide(submission.Side, submission.ReduceOnly)
+	if err != nil {
+		return createOrderRequest{}, err
+	}
+	orderType, err := bybitOrderType(submission.Type)
+	if err != nil {
+		return createOrderRequest{}, err
+	}
+	timeInForce, err := bybitTimeInForce(submission.TimeInForce)
+	if err != nil {
+		return createOrderRequest{}, err
+	}
+
+	req := createOrderRequest{
+		Category:    submission.Category,
+		Symbol:      submission.Symbol,
+		Side:        side,
+		OrderType:   orderType,
+		Qty:         submission.Quantity.String(),
+		TimeInForce: timeInForce,
+		PositionIdx: 0,
+		OrderLinkID: submission.ClientOrderID,
+		ReduceOnly:  submission.ReduceOnly,
+	}
+	if submission.Type == domainlive.OrderTypeLimit {
+		req.Price = submission.LimitPrice.String()
+	}
+	if !submission.ReduceOnly {
+		if submission.TakeProfit.IsPositive() {
+			req.TakeProfit = submission.TakeProfit.String()
+		}
+		if submission.StopLoss.IsPositive() {
+			req.StopLoss = submission.StopLoss.String()
+		}
+	}
+	return req, nil
+}
+
+func bybitOrderSide(side domainlive.OrderSide, reduceOnly bool) (string, error) {
+	switch side {
+	case domainlive.OrderSideLong:
+		if reduceOnly {
+			return "Sell", nil
+		}
+		return "Buy", nil
+	case domainlive.OrderSideShort:
+		if reduceOnly {
+			return "Buy", nil
+		}
+		return "Sell", nil
+	default:
+		return "", fmt.Errorf("unsupported live order side %q", side)
+	}
+}
+
+func bybitOrderType(orderType domainlive.OrderType) (string, error) {
+	switch orderType {
+	case domainlive.OrderTypeMarket:
+		return "Market", nil
+	case domainlive.OrderTypeLimit:
+		return "Limit", nil
+	default:
+		return "", fmt.Errorf("unsupported live order type %q", orderType)
+	}
+}
+
+func bybitTimeInForce(timeInForce domainlive.TimeInForce) (string, error) {
+	switch timeInForce {
+	case domainlive.TimeInForceGTC:
+		return "GTC", nil
+	case domainlive.TimeInForceIOC:
+		return "IOC", nil
+	case domainlive.TimeInForceFOK:
+		return "FOK", nil
+	case domainlive.TimeInForcePostOnly:
+		return "PostOnly", nil
+	default:
+		return "", fmt.Errorf("unsupported live time_in_force %q", timeInForce)
+	}
+}
+
+func signBybitHMAC(secret string, payload string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
 }
