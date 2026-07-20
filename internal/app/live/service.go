@@ -17,6 +17,7 @@ type Service struct {
 	journal    domainlive.OrderJournal
 	killSwitch domainrisk.KillSwitchRepository
 	clock      clock.Clock
+	env        EnvironmentReader
 }
 
 type Option func(*Service)
@@ -43,7 +44,7 @@ type SubmitApprovedEntryOrderResult struct {
 }
 
 func NewService(options ...Option) *Service {
-	service := &Service{clock: clock.SystemClock{}}
+	service := &Service{clock: clock.SystemClock{}, env: osEnvironmentReader{}}
 	for _, option := range options {
 		option(service)
 	}
