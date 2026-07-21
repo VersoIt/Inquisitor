@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/shopspring/decimal"
 
 	applive "github.com/VersoIt/Inquisitor/internal/app/live"
 	"github.com/VersoIt/Inquisitor/internal/config"
+	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 )
 
 func TestLiveStartupRequestFromConfigMapsSafetyFields(t *testing.T) {
@@ -38,6 +40,12 @@ func TestLiveStartupRequestFromConfigMapsSafetyFields(t *testing.T) {
 		WithdrawalPermissionAllowed: false,
 		InitialLiveCapitalUSDT:      decimal.RequireFromString("50.25"),
 		MaxInitialLiveCapitalUSDT:   maxCapital,
+		ExpectedFlatPositions: []domainlive.PositionSnapshotQuery{{
+			Exchange: "bybit",
+			Category: "linear",
+			Symbol:   "BTCUSDT",
+		}},
+		MaxPositionSnapshotAge: defaultMaxPositionSnapshotAge,
 	})
 }
 
@@ -89,6 +97,15 @@ func TestRunLivePreflightUsesConfigEnvAndKillSwitch(t *testing.T) {
 	}
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_position_snapshots").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	positionReader := &fakeLivePreflightPositionReader{
+		snapshot: validLivePreflightFlatPositionSnapshot(t, domainlive.PositionSnapshotQuery{
+			Exchange: "bybit",
+			Category: "linear",
+			Symbol:   "BTCUSDT",
+		}),
+	}
 
 	var output bytes.Buffer
 	err = runLivePreflight(context.Background(), []string{
@@ -98,6 +115,9 @@ func TestRunLivePreflightUsesConfigEnvAndKillSwitch(t *testing.T) {
 	}, livePreflightDependencies{
 		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
 			return db, nil
+		},
+		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
+			return positionReader, nil
 		},
 		output: &output,
 	})
@@ -114,11 +134,17 @@ func TestRunLivePreflightUsesConfigEnvAndKillSwitch(t *testing.T) {
 		`"ready":true`,
 		`"api_key_present":true`,
 		`"api_secret_present":true`,
+		`"position_checks":1`,
+		`"position_snapshots":1`,
+		`"position_snapshot_inserted":1`,
 		`"msg":"live startup preflight passed"`,
 	} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
 		}
+	}
+	if positionReader.calls != 1 || positionReader.query.Symbol != "BTCUSDT" {
+		t.Fatalf("position reader mismatch: calls=%d query=%#v", positionReader.calls, positionReader.query)
 	}
 	if strings.Contains(logs, "actual-live-api-key-value") || strings.Contains(logs, "actual-live-api-secret-value") {
 		t.Fatalf("logs must not contain credential values, got\n%s", logs)
@@ -170,6 +196,13 @@ func safeLivePreflightConfig() config.Config {
 			DSN:          "postgres://user:pass@localhost:5432/inquisitor?sslmode=disable",
 			MaxOpenConns: 1,
 			MaxIdleConns: 1,
+		},
+		Exchange: config.ExchangeConfig{
+			Primary:     "bybit",
+			RestBaseURL: "https://api-testnet.bybit.com",
+			PublicWSURL: "wss://stream-testnet.bybit.com/v5/public/linear",
+			Category:    "linear",
+			Symbols:     []string{"BTCUSDT"},
 		},
 		Trading: config.TradingConfig{
 			Enabled:   true,
@@ -301,4 +334,51 @@ func assertLivePreflightRequest(t *testing.T, got applive.PreflightLiveStartupRe
 	if !got.MaxInitialLiveCapitalUSDT.Equal(want.MaxInitialLiveCapitalUSDT) {
 		t.Fatalf("max capital mismatch: got %s, want %s", got.MaxInitialLiveCapitalUSDT, want.MaxInitialLiveCapitalUSDT)
 	}
+	if got.MaxPositionSnapshotAge != want.MaxPositionSnapshotAge {
+		t.Fatalf("max position snapshot age mismatch: got %s, want %s", got.MaxPositionSnapshotAge, want.MaxPositionSnapshotAge)
+	}
+	if len(got.ExpectedFlatPositions) != len(want.ExpectedFlatPositions) {
+		t.Fatalf("position query length mismatch: got %#v, want %#v", got.ExpectedFlatPositions, want.ExpectedFlatPositions)
+	}
+	for index := range got.ExpectedFlatPositions {
+		if got.ExpectedFlatPositions[index] != want.ExpectedFlatPositions[index] {
+			t.Fatalf("position query[%d] mismatch: got %#v, want %#v", index, got.ExpectedFlatPositions[index], want.ExpectedFlatPositions[index])
+		}
+	}
+}
+
+type fakeLivePreflightPositionReader struct {
+	query    domainlive.PositionSnapshotQuery
+	snapshot domainlive.PositionSnapshot
+	calls    int
+	err      error
+}
+
+func (r *fakeLivePreflightPositionReader) GetPositionSnapshot(_ context.Context, query domainlive.PositionSnapshotQuery) (domainlive.PositionSnapshot, error) {
+	r.calls++
+	r.query = query
+	if r.err != nil {
+		return domainlive.PositionSnapshot{}, r.err
+	}
+	return r.snapshot, nil
+}
+
+func validLivePreflightFlatPositionSnapshot(t *testing.T, query domainlive.PositionSnapshotQuery) domainlive.PositionSnapshot {
+	t.Helper()
+
+	snapshot, err := domainlive.NewPositionSnapshot(domainlive.PositionSnapshotInput{
+		Exchange:       query.Exchange,
+		Category:       query.Category,
+		Symbol:         query.Symbol,
+		Size:           decimal.Zero,
+		MarkPrice:      decimal.RequireFromString("100000"),
+		ExchangeStatus: domainlive.ExchangePositionStatusNormal,
+		PositionIndex:  0,
+		Sequence:       -1,
+		ObservedAt:     time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("new live preflight flat position snapshot: %v", err)
+	}
+	return snapshot
 }

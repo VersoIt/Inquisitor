@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
+
+	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 )
 
 type EnvironmentReader interface {
@@ -26,6 +29,8 @@ type PreflightLiveStartupRequest struct {
 	WithdrawalPermissionAllowed bool
 	InitialLiveCapitalUSDT      decimal.Decimal
 	MaxInitialLiveCapitalUSDT   decimal.Decimal
+	ExpectedFlatPositions       []domainlive.PositionSnapshotQuery
+	MaxPositionSnapshotAge      time.Duration
 }
 
 type PreflightLiveStartupResult struct {
@@ -46,6 +51,10 @@ type PreflightLiveStartupResult struct {
 	KillSwitchActive           bool
 	KillSwitchReason           string
 	KillSwitchSource           string
+	ExpectedFlatPositions      []domainlive.PositionSnapshotQuery
+	MaxPositionSnapshotAge     time.Duration
+	PositionSnapshots          []domainlive.PositionSnapshot
+	PositionSnapshotStats      domainlive.PositionSnapshotStats
 	Problems                   []string
 }
 
@@ -82,6 +91,8 @@ func (s *Service) PreflightLiveStartup(ctx context.Context, req PreflightLiveSta
 		SubaccountConfirmed:       req.SubaccountConfirmed,
 		InitialLiveCapitalUSDT:    req.InitialLiveCapitalUSDT,
 		MaxInitialLiveCapitalUSDT: req.MaxInitialLiveCapitalUSDT,
+		ExpectedFlatPositions:     append([]domainlive.PositionSnapshotQuery(nil), req.ExpectedFlatPositions...),
+		MaxPositionSnapshotAge:    req.MaxPositionSnapshotAge,
 	}
 
 	result.Problems = append(result.Problems, validateLiveStartupPolicy(req)...)
@@ -110,6 +121,16 @@ func (s *Service) PreflightLiveStartup(ctx context.Context, req PreflightLiveSta
 	}
 
 	result.WithdrawalPermissionDenied = !req.WithdrawalPermissionAllowed
+	if len(result.Problems) == 0 && len(req.ExpectedFlatPositions) > 0 {
+		snapshots, stats, problems, err := s.preflightExpectedFlatLivePositions(ctx, req.ExpectedFlatPositions, req.MaxPositionSnapshotAge)
+		result.PositionSnapshots = snapshots
+		result.PositionSnapshotStats = stats
+		if err != nil {
+			return result, err
+		}
+		result.Problems = append(result.Problems, problems...)
+	}
+
 	result.Ready = len(result.Problems) == 0
 	if !result.Ready {
 		return result, fmt.Errorf("live startup preflight failed: %s", strings.Join(result.Problems, "; "))
@@ -151,6 +172,95 @@ func validateLiveStartupPolicy(req PreflightLiveStartupRequest) []string {
 	}
 	if req.InitialLiveCapitalUSDT.GreaterThan(req.MaxInitialLiveCapitalUSDT) {
 		problems = append(problems, "initial live capital must not exceed max initial live capital")
+	}
+	return problems
+}
+
+func (s *Service) preflightExpectedFlatLivePositions(
+	ctx context.Context,
+	queries []domainlive.PositionSnapshotQuery,
+	maxAge time.Duration,
+) ([]domainlive.PositionSnapshot, domainlive.PositionSnapshotStats, []string, error) {
+	var problems []string
+	if maxAge <= 0 {
+		problems = append(problems, "max position snapshot age must be positive")
+	}
+	for _, query := range queries {
+		if err := domainlive.ValidatePositionSnapshotQuery(query); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if len(problems) > 0 {
+		return nil, domainlive.PositionSnapshotStats{}, problems, nil
+	}
+
+	if s.positionReader == nil {
+		return nil, domainlive.PositionSnapshotStats{}, nil, fmt.Errorf("live startup preflight requires position snapshot reader")
+	}
+	if s.positionJournal == nil {
+		return nil, domainlive.PositionSnapshotStats{}, nil, fmt.Errorf("live startup preflight requires position snapshot journal")
+	}
+	if s.clock == nil {
+		return nil, domainlive.PositionSnapshotStats{}, nil, fmt.Errorf("live startup preflight requires clock")
+	}
+
+	now := s.clock.Now()
+	var (
+		snapshots []domainlive.PositionSnapshot
+		stats     domainlive.PositionSnapshotStats
+	)
+	for _, query := range queries {
+		snapshot, err := s.positionReader.GetPositionSnapshot(ctx, query)
+		if err != nil {
+			return snapshots, stats, problems, fmt.Errorf("read live startup position snapshot %q: %w", query.Symbol, err)
+		}
+		if err := ensurePositionSnapshotMatchesQuery(snapshot, query); err != nil {
+			return snapshots, stats, problems, err
+		}
+
+		recordStats, err := s.positionJournal.RecordPositionSnapshot(ctx, snapshot)
+		if err != nil {
+			return snapshots, stats, problems, fmt.Errorf("record live startup position snapshot %q: %w", snapshot.Symbol, err)
+		}
+		if recordStats.Total() == 0 {
+			return snapshots, stats, problems, fmt.Errorf("live startup position snapshot journal did not record %q", snapshot.Symbol)
+		}
+
+		snapshots = append(snapshots, snapshot)
+		stats.Inserted += recordStats.Inserted
+		stats.Skipped += recordStats.Skipped
+		problems = append(problems, validateStartupFlatPosition(snapshot, now, maxAge)...)
+	}
+	return snapshots, stats, problems, nil
+}
+
+func ensurePositionSnapshotMatchesQuery(snapshot domainlive.PositionSnapshot, query domainlive.PositionSnapshotQuery) error {
+	if err := domainlive.ValidatePositionSnapshot(snapshot); err != nil {
+		return err
+	}
+	if snapshot.Exchange != query.Exchange {
+		return fmt.Errorf("live startup position exchange %q does not match query %q", snapshot.Exchange, query.Exchange)
+	}
+	if snapshot.Category != query.Category {
+		return fmt.Errorf("live startup position category %q does not match query %q", snapshot.Category, query.Category)
+	}
+	if snapshot.Symbol != query.Symbol {
+		return fmt.Errorf("live startup position symbol %q does not match query %q", snapshot.Symbol, query.Symbol)
+	}
+	return nil
+}
+
+func validateStartupFlatPosition(snapshot domainlive.PositionSnapshot, now time.Time, maxAge time.Duration) []string {
+	var problems []string
+	if snapshot.Open {
+		problems = append(problems, fmt.Sprintf("live position %s must be flat before startup: side=%s size=%s", snapshot.Symbol, snapshot.Side, snapshot.Size))
+	}
+	age := now.Sub(snapshot.ObservedAt)
+	if age < 0 {
+		problems = append(problems, fmt.Sprintf("live position %s snapshot observed_at must not be in the future", snapshot.Symbol))
+	}
+	if age > maxAge {
+		problems = append(problems, fmt.Sprintf("live position %s snapshot is stale: age=%s max=%s", snapshot.Symbol, age, maxAge))
 	}
 	return problems
 }

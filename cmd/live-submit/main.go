@@ -26,15 +26,18 @@ import (
 
 const defaultMaxInitialLiveCapitalUSDT = "100"
 
+const defaultMaxPositionSnapshotAge = 5 * time.Second
+
 type liveSubmissionIdentity struct {
 	SubmissionID  string
 	ClientOrderID string
 }
 
 type liveSubmitDependencies struct {
-	openDB      func(context.Context, config.DatabaseConfig) (*sql.DB, error)
-	newExecutor func(*config.Config, string, string) (domainlive.OrderExecutor, error)
-	output      io.Writer
+	openDB            func(context.Context, config.DatabaseConfig) (*sql.DB, error)
+	newExecutor       func(*config.Config, string, string) (domainlive.OrderExecutor, error)
+	newPositionReader func(*config.Config) (domainlive.PositionSnapshotReader, error)
+	output            io.Writer
 }
 
 func main() {
@@ -107,11 +110,23 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 	defer db.Close()
 
 	killSwitch := postgres.NewRiskKillSwitchRepository(db)
-	preflightService := applive.NewService(applive.WithKillSwitchRepository(killSwitch))
+	liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
 	preflightRequest, err := liveSubmitPreflightRequestFromConfig(cfg, *subaccountConfirmed, maxInitialCapital)
 	if err != nil {
 		return err
 	}
+	preflightOptions := []applive.Option{applive.WithKillSwitchRepository(killSwitch)}
+	if len(preflightRequest.ExpectedFlatPositions) > 0 {
+		positionReader, err := deps.newPositionReader(cfg)
+		if err != nil {
+			return fmt.Errorf("create live position reader for submit preflight: %w", err)
+		}
+		preflightOptions = append(preflightOptions,
+			applive.WithPositionSnapshotReader(positionReader),
+			applive.WithPositionSnapshotJournal(liveOrderJournal),
+		)
+	}
+	preflightService := applive.NewService(preflightOptions...)
 	preflight, err := preflightService.PreflightLiveStartup(submitCtx, preflightRequest)
 	logLiveSubmitPreflightResult(log, preflight)
 	if err != nil {
@@ -135,7 +150,6 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 		return fmt.Errorf("live order executor must support post-submit position reconciliation")
 	}
 
-	liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
 	service := applive.NewService(
 		applive.WithRiskDecisionReader(postgres.NewRiskDecisionRepository(db)),
 		applive.WithOrderExecutor(executor),
@@ -188,6 +202,9 @@ func (deps liveSubmitDependencies) withDefaults() liveSubmitDependencies {
 	if deps.newExecutor == nil {
 		deps.newExecutor = newBybitLiveOrderExecutor
 	}
+	if deps.newPositionReader == nil {
+		deps.newPositionReader = newBybitLivePositionReader
+	}
 	if deps.output == nil {
 		deps.output = os.Stdout
 	}
@@ -198,6 +215,16 @@ func newBybitLiveOrderExecutor(cfg *config.Config, apiKey string, apiSecret stri
 	return bybitrest.New(
 		cfg.Exchange.RestBaseURL,
 		bybitrest.WithHMACAuth(apiKey, apiSecret),
+	)
+}
+
+func newBybitLivePositionReader(cfg *config.Config) (domainlive.PositionSnapshotReader, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	return bybitrest.New(
+		cfg.Exchange.RestBaseURL,
+		bybitrest.WithHMACAuth(lookupEnvValue(cfg.Live.APIKeyEnv), lookupEnvValue(cfg.Live.APISecretEnv)),
 	)
 }
 
@@ -232,7 +259,24 @@ func liveSubmitPreflightRequestFromConfig(cfg *config.Config, subaccountConfirme
 		WithdrawalPermissionAllowed: cfg.Live.WithdrawalPermissionAllowed,
 		InitialLiveCapitalUSDT:      initialCapital,
 		MaxInitialLiveCapitalUSDT:   maxInitialCapital,
+		ExpectedFlatPositions:       liveSubmitExpectedFlatPositionsFromConfig(cfg),
+		MaxPositionSnapshotAge:      defaultMaxPositionSnapshotAge,
 	}, nil
+}
+
+func liveSubmitExpectedFlatPositionsFromConfig(cfg *config.Config) []domainlive.PositionSnapshotQuery {
+	if cfg == nil {
+		return nil
+	}
+	queries := make([]domainlive.PositionSnapshotQuery, 0, len(cfg.Exchange.Symbols))
+	for _, symbol := range cfg.Exchange.Symbols {
+		queries = append(queries, domainlive.PositionSnapshotQuery{
+			Exchange: strings.ToLower(strings.TrimSpace(cfg.Exchange.Primary)),
+			Category: strings.ToLower(strings.TrimSpace(cfg.Exchange.Category)),
+			Symbol:   strings.ToUpper(strings.TrimSpace(symbol)),
+		})
+	}
+	return queries
 }
 
 func parsePositiveDecimalFlag(field string, value string) (decimal.Decimal, error) {
@@ -333,6 +377,11 @@ func lookupNonEmptyEnv(name string) (string, bool) {
 	return value, ok && strings.TrimSpace(value) != ""
 }
 
+func lookupEnvValue(name string) string {
+	value, _ := os.LookupEnv(strings.TrimSpace(name))
+	return strings.TrimSpace(value)
+}
+
 func logLiveSubmitPreflightResult(log *slog.Logger, result applive.PreflightLiveStartupResult) {
 	log.Info(
 		"live submit preflight checked",
@@ -353,8 +402,33 @@ func logLiveSubmitPreflightResult(log *slog.Logger, result applive.PreflightLive
 		"kill_switch_active", result.KillSwitchActive,
 		"kill_switch_reason", result.KillSwitchReason,
 		"kill_switch_source", result.KillSwitchSource,
+		"position_checks", len(result.ExpectedFlatPositions),
+		"position_symbols", liveSubmitPositionQuerySymbols(result.ExpectedFlatPositions),
+		"position_snapshots", len(result.PositionSnapshots),
+		"open_position_symbols", liveSubmitOpenPositionSymbols(result.PositionSnapshots),
+		"max_position_snapshot_age_ms", result.MaxPositionSnapshotAge.Milliseconds(),
+		"position_snapshot_inserted", result.PositionSnapshotStats.Inserted,
+		"position_snapshot_skipped", result.PositionSnapshotStats.Skipped,
 		"problems", result.Problems,
 	)
+}
+
+func liveSubmitPositionQuerySymbols(queries []domainlive.PositionSnapshotQuery) []string {
+	symbols := make([]string, 0, len(queries))
+	for _, query := range queries {
+		symbols = append(symbols, query.Symbol)
+	}
+	return symbols
+}
+
+func liveSubmitOpenPositionSymbols(snapshots []domainlive.PositionSnapshot) []string {
+	symbols := make([]string, 0)
+	for _, snapshot := range snapshots {
+		if snapshot.Open {
+			symbols = append(symbols, snapshot.Symbol)
+		}
+	}
+	return symbols
 }
 
 func logLiveSubmitResult(log *slog.Logger, result applive.SubmitApprovedEntryOrderResult) {

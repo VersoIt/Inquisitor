@@ -16,15 +16,20 @@ import (
 
 	applive "github.com/VersoIt/Inquisitor/internal/app/live"
 	"github.com/VersoIt/Inquisitor/internal/config"
+	bybitrest "github.com/VersoIt/Inquisitor/internal/exchanges/bybit/rest"
+	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	"github.com/VersoIt/Inquisitor/internal/logger"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
 const defaultMaxInitialLiveCapitalUSDT = "100"
 
+const defaultMaxPositionSnapshotAge = 5 * time.Second
+
 type livePreflightDependencies struct {
-	openDB func(context.Context, config.DatabaseConfig) (*sql.DB, error)
-	output io.Writer
+	openDB            func(context.Context, config.DatabaseConfig) (*sql.DB, error)
+	newPositionReader func(*config.Config) (domainlive.PositionSnapshotReader, error)
+	output            io.Writer
 }
 
 func main() {
@@ -76,9 +81,21 @@ func runLivePreflight(ctx context.Context, args []string, deps livePreflightDepe
 	}
 	defer db.Close()
 
-	service := applive.NewService(
+	serviceOptions := []applive.Option{
 		applive.WithKillSwitchRepository(postgres.NewRiskKillSwitchRepository(db)),
-	)
+	}
+	if len(request.ExpectedFlatPositions) > 0 {
+		positionReader, err := deps.newPositionReader(cfg)
+		if err != nil {
+			return fmt.Errorf("create live position reader for startup preflight: %w", err)
+		}
+		liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
+		serviceOptions = append(serviceOptions,
+			applive.WithPositionSnapshotReader(positionReader),
+			applive.WithPositionSnapshotJournal(liveOrderJournal),
+		)
+	}
+	service := applive.NewService(serviceOptions...)
 	result, err := service.PreflightLiveStartup(preflightCtx, request)
 	logLiveStartupPreflightResult(log, result)
 	if err != nil {
@@ -92,10 +109,25 @@ func (deps livePreflightDependencies) withDefaults() livePreflightDependencies {
 	if deps.openDB == nil {
 		deps.openDB = postgres.Open
 	}
+	if deps.newPositionReader == nil {
+		deps.newPositionReader = newBybitLivePositionReader
+	}
 	if deps.output == nil {
 		deps.output = os.Stdout
 	}
 	return deps
+}
+
+func newBybitLivePositionReader(cfg *config.Config) (domainlive.PositionSnapshotReader, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	apiKey := lookupEnvValue(cfg.Live.APIKeyEnv)
+	apiSecret := lookupEnvValue(cfg.Live.APISecretEnv)
+	return bybitrest.New(
+		cfg.Exchange.RestBaseURL,
+		bybitrest.WithHMACAuth(apiKey, apiSecret),
+	)
 }
 
 func liveStartupRequestFromConfig(cfg *config.Config, subaccountConfirmed bool, maxInitialCapital decimal.Decimal) (applive.PreflightLiveStartupRequest, error) {
@@ -119,7 +151,24 @@ func liveStartupRequestFromConfig(cfg *config.Config, subaccountConfirmed bool, 
 		WithdrawalPermissionAllowed: cfg.Live.WithdrawalPermissionAllowed,
 		InitialLiveCapitalUSDT:      initialCapital,
 		MaxInitialLiveCapitalUSDT:   maxInitialCapital,
+		ExpectedFlatPositions:       liveStartupExpectedFlatPositionsFromConfig(cfg),
+		MaxPositionSnapshotAge:      defaultMaxPositionSnapshotAge,
 	}, nil
+}
+
+func liveStartupExpectedFlatPositionsFromConfig(cfg *config.Config) []domainlive.PositionSnapshotQuery {
+	if cfg == nil {
+		return nil
+	}
+	queries := make([]domainlive.PositionSnapshotQuery, 0, len(cfg.Exchange.Symbols))
+	for _, symbol := range cfg.Exchange.Symbols {
+		queries = append(queries, domainlive.PositionSnapshotQuery{
+			Exchange: strings.ToLower(strings.TrimSpace(cfg.Exchange.Primary)),
+			Category: strings.ToLower(strings.TrimSpace(cfg.Exchange.Category)),
+			Symbol:   strings.ToUpper(strings.TrimSpace(symbol)),
+		})
+	}
+	return queries
 }
 
 func parsePositiveDecimalFlag(field string, value string) (decimal.Decimal, error) {
@@ -145,6 +194,11 @@ func decimalFromConfigFloat(field string, value float64) (decimal.Decimal, error
 	return parsed, nil
 }
 
+func lookupEnvValue(name string) string {
+	value, _ := os.LookupEnv(strings.TrimSpace(name))
+	return strings.TrimSpace(value)
+}
+
 func logLiveStartupPreflightResult(log *slog.Logger, result applive.PreflightLiveStartupResult) {
 	log.Info(
 		"live startup preflight checked",
@@ -165,6 +219,31 @@ func logLiveStartupPreflightResult(log *slog.Logger, result applive.PreflightLiv
 		"kill_switch_active", result.KillSwitchActive,
 		"kill_switch_reason", result.KillSwitchReason,
 		"kill_switch_source", result.KillSwitchSource,
+		"position_checks", len(result.ExpectedFlatPositions),
+		"position_symbols", liveStartupPositionQuerySymbols(result.ExpectedFlatPositions),
+		"position_snapshots", len(result.PositionSnapshots),
+		"open_position_symbols", liveStartupOpenPositionSymbols(result.PositionSnapshots),
+		"max_position_snapshot_age_ms", result.MaxPositionSnapshotAge.Milliseconds(),
+		"position_snapshot_inserted", result.PositionSnapshotStats.Inserted,
+		"position_snapshot_skipped", result.PositionSnapshotStats.Skipped,
 		"problems", result.Problems,
 	)
+}
+
+func liveStartupPositionQuerySymbols(queries []domainlive.PositionSnapshotQuery) []string {
+	symbols := make([]string, 0, len(queries))
+	for _, query := range queries {
+		symbols = append(symbols, query.Symbol)
+	}
+	return symbols
+}
+
+func liveStartupOpenPositionSymbols(snapshots []domainlive.PositionSnapshot) []string {
+	symbols := make([]string, 0)
+	for _, snapshot := range snapshots {
+		if snapshot.Open {
+			symbols = append(symbols, snapshot.Symbol)
+		}
+	}
+	return symbols
 }

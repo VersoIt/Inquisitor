@@ -73,13 +73,13 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 automated paper entry/exit reconciliation, bounded execution-cycle CLI, app-layer explicit-scope guard, locked preflight guard, active Kill Switch entry guard, and Docker-backed smoke script that selects pending tickets/open positions, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, verifies duplicate-entry prevention, and settles triggered stop-loss/take-profit exits without sending exchange orders.
 - Initial Phase 7 live order submission boundary for approved LIVE risk decisions only, with deterministic client order IDs, durable pre-exchange journaling, exchange acknowledgement journaling, and duplicate-decision prevention.
 - Bybit V5 private order-create adapter with HMAC signing, config-driven REST base URL, internal live-domain mapping, and tests that never place real orders.
-- Live startup preflight use case and CLI that checks explicit live config, env confirmation, API credential presence, dedicated subaccount confirmation, withdrawal-disabled policy, initial-capital cap, and inactive Kill Switch before live startup.
-- Armed live-submit CLI that refuses to send unless `-execute=true` is provided, reruns live startup preflight, loads a persisted approved LIVE risk decision from PostgreSQL, records the submission before exchange I/O, submits through the exchange adapter, immediately reconciles the submitted order status by deterministic client order ID, and persists the status snapshot.
+- Live startup preflight use case and CLI that checks explicit live config, env confirmation, API credential presence, dedicated subaccount confirmation, withdrawal-disabled policy, initial-capital cap, inactive Kill Switch, and fresh flat live positions for configured symbols before live startup.
+- Armed live-submit CLI that refuses to send unless `-execute=true` is provided, reruns live startup preflight including fresh flat-position checks, loads a persisted approved LIVE risk decision from PostgreSQL, records the submission before exchange I/O, submits through the exchange adapter, immediately reconciles the submitted order status by deterministic client order ID, and persists the status snapshot.
 - Bybit V5 private position-list adapter with HMAC-signed read-back of live position snapshots by symbol, including flat-position handling and fail-closed detection of non-unique hedge-mode rows.
 - App-layer live position reconciliation that compares exchange position size with submitted order executed quantity, persists durable position snapshots, and fails closed on unexpected flat/open/side/size mismatches.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially startup checks for stale/unexpected live positions before any autonomous live loop exists.
+The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially account-level live readiness checks, bounded live-loop orchestration, and operator-visible health/audit reporting before any autonomous live loop exists.
 
 ## What This Is Not
 
@@ -477,7 +477,7 @@ go run ./cmd/paper-execute -config configs/config.example.yaml -action settle -e
 
 Live trading remains disabled by default. Use a separate local live config, not `configs/config.example.yaml`, and keep API keys scoped to a dedicated subaccount with withdrawals disabled.
 
-Run live startup preflight before any live submission:
+Run live startup preflight before any live submission. It checks every configured `exchange.symbols` position on Bybit, requires a fresh flat snapshot, and records that snapshot in PostgreSQL:
 
 ```powershell
 $env:TRADING_LIVE_CONFIRM="true"
@@ -486,7 +486,7 @@ $env:BYBIT_API_SECRET="..."
 go run ./cmd/live-preflight -config configs/live.local.yaml -subaccount-confirmed -max-initial-live-capital-usdt 100
 ```
 
-Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
+Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight including the same fresh flat-position guard, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
 
 ```powershell
 go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -execute
