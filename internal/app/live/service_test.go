@@ -122,6 +122,170 @@ func TestServiceSubmitApprovedEntryOrderRecordsRejectedExchangeAcknowledgement(t
 	}
 }
 
+func TestServiceSubmitPersistedDecisionEntryOrderLoadsDecisionAndSubmits(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	sequence := 0
+	reader := &fakeLiveRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{liveRiskDecisionAudit(now.Add(-time.Minute))}}
+	journal := &fakeLiveOrderJournal{
+		sequence:        &sequence,
+		submissionStats: domainlive.OrderSubmissionStats{Inserted: 1},
+		ackStats:        domainlive.OrderAcknowledgementStats{Inserted: 1},
+	}
+	executor := &fakeLiveOrderExecutor{
+		sequence: &sequence,
+		ack:      acceptedLiveAcknowledgement(now.Add(time.Second)),
+	}
+	service := livePersistedOrderService(now, reader, executor, journal, &fakeLiveKillSwitchRepository{})
+
+	got, err := service.SubmitPersistedDecisionEntryOrder(context.Background(), applive.SubmitPersistedDecisionEntryOrderRequest{
+		DecisionID:    " risk_decision_live_0001 ",
+		SubmissionID:  " live_submission_app_0001 ",
+		ClientOrderID: " live_client_app_0001 ",
+		Exchange:      " BYBIT ",
+		Category:      " LINEAR ",
+	})
+	if err != nil {
+		t.Fatalf("submit persisted live decision: %v", err)
+	}
+
+	if reader.calls != 1 || reader.query.DecisionID != "risk_decision_live_0001" || reader.query.Limit != 2 {
+		t.Fatalf("risk decision query mismatch: calls=%d query=%#v", reader.calls, reader.query)
+	}
+	if !got.ExchangeSubmitted || got.Decision.DecisionID != "risk_decision_live_0001" {
+		t.Fatalf("persisted submission result mismatch: %#v", got)
+	}
+	if !(journal.submissionOrder < executor.order && executor.order < journal.ackOrder) {
+		t.Fatalf("persisted live order must preserve journal/executor ordering: submission=%d executor=%d ack=%d", journal.submissionOrder, executor.order, journal.ackOrder)
+	}
+}
+
+func TestServiceSubmitPersistedDecisionEntryOrderRejectsUnsafeInputsTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	repositoryErr := errors.New("postgres unavailable")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name                string
+		ctx                 context.Context
+		reader              *fakeLiveRiskDecisionReader
+		req                 applive.SubmitPersistedDecisionEntryOrderRequest
+		withoutReader       bool
+		wantErrSub          string
+		wantReaderCalls     int
+		wantSubmissionCalls int
+		wantExecutorCalls   int
+		wantAckCalls        int
+	}{
+		{
+			name:       "cancelled context",
+			ctx:        cancelled,
+			reader:     &fakeLiveRiskDecisionReader{},
+			req:        validPersistedSubmitRequest(),
+			wantErrSub: "canceled",
+		},
+		{
+			name:          "missing reader",
+			ctx:           context.Background(),
+			withoutReader: true,
+			req:           validPersistedSubmitRequest(),
+			wantErrSub:    "risk decision reader",
+		},
+		{
+			name:       "missing decision id",
+			ctx:        context.Background(),
+			reader:     &fakeLiveRiskDecisionReader{},
+			req:        mutatePersistedSubmitRequest(func(req *applive.SubmitPersistedDecisionEntryOrderRequest) { req.DecisionID = " " }),
+			wantErrSub: "decision_id",
+		},
+		{
+			name:            "risk decision repository error",
+			ctx:             context.Background(),
+			reader:          &fakeLiveRiskDecisionReader{err: repositoryErr},
+			req:             validPersistedSubmitRequest(),
+			wantErrSub:      "load live risk decision",
+			wantReaderCalls: 1,
+		},
+		{
+			name:            "risk decision not found",
+			ctx:             context.Background(),
+			reader:          &fakeLiveRiskDecisionReader{},
+			req:             validPersistedSubmitRequest(),
+			wantErrSub:      "not found",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "risk decision is not unique",
+			ctx:  context.Background(),
+			reader: &fakeLiveRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{
+				liveRiskDecisionAudit(now.Add(-time.Minute)),
+				liveRiskDecisionAudit(now.Add(-time.Minute)),
+			}},
+			req:             validPersistedSubmitRequest(),
+			wantErrSub:      "not unique",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "risk decision is rejected",
+			ctx:  context.Background(),
+			reader: &fakeLiveRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{func() domainrisk.DecisionAuditRecord {
+				record := liveRiskDecisionAudit(now.Add(-time.Minute))
+				record.Decision.Approved = false
+				record.Decision.FinalQuantity = decimal.Zero
+				record.Decision.MaxLoss = decimal.Zero
+				record.Decision.Reason = "kill_switch_active"
+				record.Decision.Checks = []domainrisk.Check{{Name: "kill_switch_inactive", Passed: false, Reason: "kill_switch_active"}}
+				return record
+			}()}},
+			req:             validPersistedSubmitRequest(),
+			wantErrSub:      "approved risk decision",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "risk decision is paper mode",
+			ctx:  context.Background(),
+			reader: &fakeLiveRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{func() domainrisk.DecisionAuditRecord {
+				record := liveRiskDecisionAudit(now.Add(-time.Minute))
+				record.Mode = domainrisk.ModePaper
+				return record
+			}()}},
+			req:             validPersistedSubmitRequest(),
+			wantErrSub:      "LIVE risk mode",
+			wantReaderCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			journal := &fakeLiveOrderJournal{submissionStats: domainlive.OrderSubmissionStats{Inserted: 1}, ackStats: domainlive.OrderAcknowledgementStats{Inserted: 1}}
+			executor := &fakeLiveOrderExecutor{ack: acceptedLiveAcknowledgement(now.Add(time.Second))}
+			var service *applive.Service
+			if tt.withoutReader {
+				service = liveOrderService(now, executor, journal, &fakeLiveKillSwitchRepository{})
+			} else {
+				service = livePersistedOrderService(now, tt.reader, executor, journal, &fakeLiveKillSwitchRepository{})
+			}
+
+			_, err := service.SubmitPersistedDecisionEntryOrder(tt.ctx, tt.req)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+			if tt.reader != nil && tt.reader.calls != tt.wantReaderCalls {
+				t.Fatalf("reader calls mismatch: got %d want %d", tt.reader.calls, tt.wantReaderCalls)
+			}
+			if journal.submissionCalls != tt.wantSubmissionCalls {
+				t.Fatalf("submission calls mismatch: got %d want %d", journal.submissionCalls, tt.wantSubmissionCalls)
+			}
+			if executor.calls != tt.wantExecutorCalls {
+				t.Fatalf("executor calls mismatch: got %d want %d", executor.calls, tt.wantExecutorCalls)
+			}
+			if journal.ackCalls != tt.wantAckCalls {
+				t.Fatalf("ack calls mismatch: got %d want %d", journal.ackCalls, tt.wantAckCalls)
+			}
+		})
+	}
+}
+
 func TestServiceSubmitApprovedEntryOrderBlocksActiveKillSwitchBeforeSideEffects(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	journal := &fakeLiveOrderJournal{submissionStats: domainlive.OrderSubmissionStats{Inserted: 1}}
@@ -388,6 +552,38 @@ func liveOrderService(
 	)
 }
 
+func livePersistedOrderService(
+	now time.Time,
+	reader *fakeLiveRiskDecisionReader,
+	executor *fakeLiveOrderExecutor,
+	journal *fakeLiveOrderJournal,
+	killSwitch *fakeLiveKillSwitchRepository,
+) *applive.Service {
+	return applive.NewService(
+		applive.WithRiskDecisionReader(reader),
+		applive.WithOrderExecutor(executor),
+		applive.WithOrderJournal(journal),
+		applive.WithKillSwitchRepository(killSwitch),
+		applive.WithClock(clock.FixedClock{Time: now}),
+	)
+}
+
+type fakeLiveRiskDecisionReader struct {
+	query   domainrisk.DecisionAuditQuery
+	records []domainrisk.DecisionAuditRecord
+	calls   int
+	err     error
+}
+
+func (r *fakeLiveRiskDecisionReader) ListDecisions(_ context.Context, query domainrisk.DecisionAuditQuery) ([]domainrisk.DecisionAuditRecord, error) {
+	r.calls++
+	r.query = query
+	if r.err != nil {
+		return nil, r.err
+	}
+	return append([]domainrisk.DecisionAuditRecord(nil), r.records...), nil
+}
+
 type fakeLiveOrderExecutor struct {
 	submission domainlive.OrderSubmission
 	ack        domainlive.OrderAcknowledgement
@@ -482,8 +678,24 @@ func validSubmitRequest(now time.Time) applive.SubmitApprovedEntryOrderRequest {
 	}
 }
 
+func validPersistedSubmitRequest() applive.SubmitPersistedDecisionEntryOrderRequest {
+	return applive.SubmitPersistedDecisionEntryOrderRequest{
+		DecisionID:    "risk_decision_live_0001",
+		SubmissionID:  "live_submission_app_0001",
+		ClientOrderID: "live_client_app_0001",
+		Exchange:      "bybit",
+		Category:      "linear",
+	}
+}
+
 func mutateSubmitRequest(now time.Time, mutate func(*applive.SubmitApprovedEntryOrderRequest)) applive.SubmitApprovedEntryOrderRequest {
 	req := validSubmitRequest(now)
+	mutate(&req)
+	return req
+}
+
+func mutatePersistedSubmitRequest(mutate func(*applive.SubmitPersistedDecisionEntryOrderRequest)) applive.SubmitPersistedDecisionEntryOrderRequest {
+	req := validPersistedSubmitRequest()
 	mutate(&req)
 	return req
 }

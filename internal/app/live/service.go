@@ -13,11 +13,12 @@ import (
 )
 
 type Service struct {
-	executor   domainlive.OrderExecutor
-	journal    domainlive.OrderJournal
-	killSwitch domainrisk.KillSwitchRepository
-	clock      clock.Clock
-	env        EnvironmentReader
+	executor      domainlive.OrderExecutor
+	journal       domainlive.OrderJournal
+	killSwitch    domainrisk.KillSwitchRepository
+	riskDecisions RiskDecisionReader
+	clock         clock.Clock
+	env           EnvironmentReader
 }
 
 type Option func(*Service)

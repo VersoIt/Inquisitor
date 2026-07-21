@@ -71,9 +71,13 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 paper position settlement use case that safely chains position close recording and equity accounting, allowing retries to continue after a close was already persisted.
 - Initial Phase 7 conservative paper market execution helpers that derive simulated entry/exit fills from mid price plus fee/spread/slippage assumptions before recording fills or settlements.
 - Initial Phase 7 automated paper entry/exit reconciliation, bounded execution-cycle CLI, app-layer explicit-scope guard, locked preflight guard, active Kill Switch entry guard, and Docker-backed smoke script that selects pending tickets/open positions, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, verifies duplicate-entry prevention, and settles triggered stop-loss/take-profit exits without sending exchange orders.
+- Initial Phase 7 live order submission boundary for approved LIVE risk decisions only, with deterministic client order IDs, durable pre-exchange journaling, exchange acknowledgement journaling, and duplicate-decision prevention.
+- Bybit V5 private order-create adapter with HMAC signing, config-driven REST base URL, internal live-domain mapping, and tests that never place real orders.
+- Live startup preflight use case and CLI that checks explicit live config, env confirmation, API credential presence, dedicated subaccount confirmation, withdrawal-disabled policy, initial-capital cap, and inactive Kill Switch before live startup.
+- Armed live-submit CLI that refuses to send unless `-execute=true` is provided, reruns live startup preflight, loads a persisted approved LIVE risk decision from PostgreSQL, records the submission before exchange I/O, and submits through the exchange adapter.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add stronger operational guardrails around the bounded paper-only execution cycle. Exchange order placement remains intentionally absent.
+The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially post-submit reconciliation against exchange order/position state before any autonomous live loop exists.
 
 ## What This Is Not
 
@@ -127,6 +131,8 @@ Important safety defaults:
 - `trading.enabled: false`
 - `trading.mode: paper`
 - `trading.allow_live: false`
+- `live.require_env_confirmation: true`
+- `live.require_subaccount: true`
 - `live.withdrawal_permission_allowed: false`
 
 ## Migrations
@@ -153,8 +159,9 @@ Initial migrations are in `migrations/`:
 - `018_paper_open_positions.sql`
 - `019_paper_position_closes.sql`
 - `020_paper_equity_events.sql`
+- `021_live_order_journal.sql`
 
-They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position/equity, and Kill Switch tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position/equity, Kill Switch, and live order journal tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 
@@ -461,6 +468,33 @@ Settle an existing paper open position from an observed exit mid price. This rec
 ```powershell
 go run ./cmd/paper-execute -config configs/config.example.yaml -action settle -event-id paper_equity_001 -close-id paper_close_001 -position-id paper_position_001 -mid-price 101000 -liquidity TAKER -close-reason TAKE_PROFIT -at 2026-07-16T13:00:00Z
 ```
+
+## Live Micro-Size Guardrails
+
+Live trading remains disabled by default. Use a separate local live config, not `configs/config.example.yaml`, and keep API keys scoped to a dedicated subaccount with withdrawals disabled.
+
+Run live startup preflight before any live submission:
+
+```powershell
+$env:TRADING_LIVE_CONFIRM="true"
+$env:BYBIT_API_KEY="..."
+$env:BYBIT_API_SECRET="..."
+go run ./cmd/live-preflight -config configs/live.local.yaml -subaccount-confirmed -max-initial-live-capital-usdt 100
+```
+
+Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, and records the exchange acknowledgement:
+
+```powershell
+go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -execute
+```
+
+Limit orders must also pass explicit order instructions:
+
+```powershell
+go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -order-type LIMIT -time-in-force POST_ONLY -limit-price 100000 -execute
+```
+
+The live submit command does not create signals, does not run strategies, does not size positions, and does not accept raw order payloads. It can only submit an already persisted approved LIVE risk-decision audit record.
 
 ## Regime Classification
 

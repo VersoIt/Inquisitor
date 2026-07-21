@@ -52,8 +52,15 @@ PAPER_SMOKE_DATABASE_USER ?= inquisitor
 PAPER_SMOKE_VALIDATION_ID ?= paper_cycle_smoke_001
 PAPER_SMOKE_QUOTE_AS_OF ?= 2026-07-18T12:00:01Z
 PAPER_SMOKE_EXIT_QUOTE_AS_OF ?= 2026-07-18T12:01:01Z
+LIVE_DECISION_ID ?=
+LIVE_MAX_INITIAL_CAPITAL ?= 100
+LIVE_SUBACCOUNT_CONFIRMED ?=
+LIVE_EXECUTE ?=
+LIVE_ORDER_TYPE ?= MARKET
+LIVE_TIME_IN_FORCE ?=
+LIVE_LIMIT_PRICE ?=
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-submit docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -152,6 +159,12 @@ paper-fill:
 
 paper-settle:
 	$(GO) run ./cmd/paper-execute -config $(CONFIG) -action settle $(if $(PAPER_EVENT_ID),-event-id $(PAPER_EVENT_ID),) $(if $(PAPER_CLOSE_ID),-close-id $(PAPER_CLOSE_ID),) $(if $(PAPER_POSITION_ID),-position-id $(PAPER_POSITION_ID),) $(if $(PAPER_MID_PRICE),-mid-price $(PAPER_MID_PRICE),) $(if $(PAPER_LIQUIDITY),-liquidity $(PAPER_LIQUIDITY),) $(if $(PAPER_CLOSE_REASON),-close-reason $(PAPER_CLOSE_REASON),) $(if $(PAPER_EXECUTION_AT),-at $(PAPER_EXECUTION_AT),)
+
+live-preflight:
+	$(GO) run ./cmd/live-preflight -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
+
+live-submit:
+	$(GO) run ./cmd/live-submit -config $(CONFIG) -decision-id $(LIVE_DECISION_ID) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)
 
 docker-up:
 	docker compose up -d postgres
