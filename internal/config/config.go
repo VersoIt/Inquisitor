@@ -250,14 +250,18 @@ func (c Config) Validate() error {
 	if c.Slippage.ConservativeMultiplier < 1 {
 		problems = append(problems, "slippage.conservative_multiplier must be greater than or equal to 1")
 	}
-	if !oneOf(c.Trading.Mode, "paper") {
-		problems = append(problems, "trading.mode must be paper in Phase 1")
+	tradingMode := strings.ToLower(strings.TrimSpace(c.Trading.Mode))
+	if !oneOf(tradingMode, "paper", "live") {
+		problems = append(problems, "trading.mode must be paper or live")
 	}
-	if c.Trading.AllowLive || c.Live.WithdrawalPermissionAllowed {
-		problems = append(problems, "live trading and withdrawal permissions must be disabled by default")
+	if c.Live.WithdrawalPermissionAllowed {
+		problems = append(problems, "withdrawal permissions must be disabled")
 	}
-	if c.Trading.Enabled && c.Trading.Mode == "live" && !c.Trading.AllowLive {
-		problems = append(problems, "trading.mode=live requires trading.allow_live=true")
+	if c.Trading.AllowLive && tradingMode != "live" {
+		problems = append(problems, "trading.allow_live=true requires trading.mode=live")
+	}
+	if tradingMode == "live" {
+		problems = append(problems, validateLiveTradingConfig(c)...)
 	}
 	if c.Trading.MaxOpenPositions <= 0 {
 		problems = append(problems, "trading.max_open_positions must be positive")
@@ -349,11 +353,39 @@ func (c Config) Validate() error {
 	if !c.Paper.SimulateSpread {
 		problems = append(problems, "paper.simulate_spread must be true")
 	}
-
 	if len(problems) > 0 {
 		return fmt.Errorf("config validation failed: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func validateLiveTradingConfig(c Config) []string {
+	var problems []string
+	if !c.Trading.Enabled {
+		problems = append(problems, "trading.mode=live requires trading.enabled=true")
+	}
+	if !c.Trading.AllowLive {
+		problems = append(problems, "trading.mode=live requires trading.allow_live=true")
+	}
+	if !c.Live.RequireEnvConfirmation {
+		problems = append(problems, "live.require_env_confirmation must be true for live mode")
+	}
+	if !c.Live.RequireSubaccount {
+		problems = append(problems, "live.require_subaccount must be true for live mode")
+	}
+	if strings.TrimSpace(c.Live.ConfirmationEnv) == "" {
+		problems = append(problems, "live.confirmation_env is required")
+	}
+	if strings.TrimSpace(c.Live.APIKeyEnv) == "" {
+		problems = append(problems, "live.api_key_env is required")
+	}
+	if strings.TrimSpace(c.Live.APISecretEnv) == "" {
+		problems = append(problems, "live.api_secret_env is required")
+	}
+	if c.Live.InitialLiveCapitalUSDT <= 0 {
+		problems = append(problems, "live.initial_live_capital_usdt must be positive")
+	}
+	return problems
 }
 
 func expandEnvStrict(input string) (string, error) {

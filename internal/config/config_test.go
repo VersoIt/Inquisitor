@@ -65,8 +65,28 @@ func TestValidateRejectsUnsafeLiveDefaults(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unsafe live config to fail")
 	}
-	if !strings.Contains(err.Error(), "live trading") {
+	if !strings.Contains(err.Error(), "trading.allow_live") {
 		t.Fatalf("expected live trading safety error, got %v", err)
+	}
+}
+
+func TestValidateAcceptsExplicitLiveConfig(t *testing.T) {
+	cfg := validLiveConfig()
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected explicit live config to be valid, got %v", err)
+	}
+}
+
+func TestValidateAcceptsPaperConfigWithoutLiveCredentials(t *testing.T) {
+	cfg := validConfig()
+	cfg.Live.ConfirmationEnv = ""
+	cfg.Live.APIKeyEnv = ""
+	cfg.Live.APISecretEnv = ""
+	cfg.Live.InitialLiveCapitalUSDT = 0
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected paper config without live credentials to be valid, got %v", err)
 	}
 }
 
@@ -115,11 +135,66 @@ func TestValidateTableDriven(t *testing.T) {
 			wantErrSub: "unsupported interval 7",
 		},
 		{
-			name: "rejects live trading mode in phase one",
+			name: "rejects unknown trading mode",
 			mutate: func(cfg *config.Config) {
-				cfg.Trading.Mode = "live"
+				cfg.Trading.Mode = "shadow"
 			},
-			wantErrSub: "trading.mode must be paper",
+			wantErrSub: "trading.mode must be paper or live",
+		},
+		{
+			name: "rejects live mode when trading disabled",
+			mutate: func(cfg *config.Config) {
+				*cfg = validLiveConfig()
+				cfg.Trading.Enabled = false
+			},
+			wantErrSub: "trading.enabled",
+		},
+		{
+			name: "rejects live mode without allow live",
+			mutate: func(cfg *config.Config) {
+				*cfg = validLiveConfig()
+				cfg.Trading.AllowLive = false
+			},
+			wantErrSub: "trading.allow_live",
+		},
+		{
+			name: "rejects paper mode with allow live",
+			mutate: func(cfg *config.Config) {
+				cfg.Trading.AllowLive = true
+			},
+			wantErrSub: "trading.allow_live=true requires trading.mode=live",
+		},
+		{
+			name: "rejects live mode without env confirmation",
+			mutate: func(cfg *config.Config) {
+				*cfg = validLiveConfig()
+				cfg.Live.RequireEnvConfirmation = false
+			},
+			wantErrSub: "live.require_env_confirmation",
+		},
+		{
+			name: "rejects live mode without subaccount requirement",
+			mutate: func(cfg *config.Config) {
+				*cfg = validLiveConfig()
+				cfg.Live.RequireSubaccount = false
+			},
+			wantErrSub: "live.require_subaccount",
+		},
+		{
+			name: "rejects missing live api key env name",
+			mutate: func(cfg *config.Config) {
+				*cfg = validLiveConfig()
+				cfg.Live.APIKeyEnv = " "
+			},
+			wantErrSub: "live.api_key_env",
+		},
+		{
+			name: "rejects zero initial live capital",
+			mutate: func(cfg *config.Config) {
+				*cfg = validLiveConfig()
+				cfg.Live.InitialLiveCapitalUSDT = 0
+			},
+			wantErrSub: "live.initial_live_capital_usdt",
 		},
 		{
 			name: "rejects confidence outside percent range",
@@ -280,7 +355,13 @@ func validConfig() config.Config {
 			MaxLeverage:      1,
 		},
 		Live: config.LiveConfig{
+			RequireEnvConfirmation:      true,
+			ConfirmationEnv:             "TRADING_LIVE_CONFIRM",
+			APIKeyEnv:                   "BYBIT_API_KEY",
+			APISecretEnv:                "BYBIT_API_SECRET",
+			RequireSubaccount:           true,
 			WithdrawalPermissionAllowed: false,
+			InitialLiveCapitalUSDT:      50,
 		},
 		Risk: config.RiskConfig{
 			RiskPerTradePct:                   0.25,
@@ -316,4 +397,19 @@ func validConfig() config.Config {
 			SimulateSpread:   true,
 		},
 	}
+}
+
+func validLiveConfig() config.Config {
+	cfg := validConfig()
+	cfg.Trading.Enabled = true
+	cfg.Trading.Mode = "live"
+	cfg.Trading.AllowLive = true
+	cfg.Live.RequireEnvConfirmation = true
+	cfg.Live.ConfirmationEnv = "TRADING_LIVE_CONFIRM"
+	cfg.Live.APIKeyEnv = "BYBIT_API_KEY"
+	cfg.Live.APISecretEnv = "BYBIT_API_SECRET"
+	cfg.Live.RequireSubaccount = true
+	cfg.Live.WithdrawalPermissionAllowed = false
+	cfg.Live.InitialLiveCapitalUSDT = 50
+	return cfg
 }
