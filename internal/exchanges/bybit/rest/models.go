@@ -103,3 +103,29 @@ type orderRealtimeItem struct {
 	CreatedTime  string `json:"createdTime"`
 	UpdatedTime  string `json:"updatedTime"`
 }
+
+type positionListResult struct {
+	Category       string             `json:"category"`
+	NextPageCursor string             `json:"nextPageCursor"`
+	List           []positionListItem `json:"list"`
+}
+
+type positionListItem struct {
+	PositionIdx    int    `json:"positionIdx"`
+	Symbol         string `json:"symbol"`
+	Side           string `json:"side"`
+	Size           string `json:"size"`
+	AvgPrice       string `json:"avgPrice"`
+	PositionValue  string `json:"positionValue"`
+	PositionStatus string `json:"positionStatus"`
+	Leverage       string `json:"leverage"`
+	MarkPrice      string `json:"markPrice"`
+	LiqPrice       string `json:"liqPrice"`
+	UnrealisedPnl  string `json:"unrealisedPnl"`
+	CurRealisedPnl string `json:"curRealisedPnl"`
+	CumRealisedPnl string `json:"cumRealisedPnl"`
+	Seq            int64  `json:"seq"`
+	IsReduceOnly   bool   `json:"isReduceOnly"`
+	CreatedTime    string `json:"createdTime"`
+	UpdatedTime    string `json:"updatedTime"`
+}

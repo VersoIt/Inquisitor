@@ -171,6 +171,38 @@ func (c *Client) GetOrderStatus(ctx context.Context, query domainlive.OrderStatu
 	return c.mapOrderStatus(query, result.Category, result.List[0])
 }
 
+func (c *Client) GetPositionSnapshot(ctx context.Context, query domainlive.PositionSnapshotQuery) (domainlive.PositionSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	if c == nil {
+		return domainlive.PositionSnapshot{}, fmt.Errorf("bybit client is required")
+	}
+	if err := domainlive.ValidatePositionSnapshotQuery(query); err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	if query.Exchange != exchangeName {
+		return domainlive.PositionSnapshot{}, fmt.Errorf("bybit position snapshot requires exchange %q", exchangeName)
+	}
+
+	values := url.Values{}
+	values.Set("category", query.Category)
+	values.Set("symbol", query.Symbol)
+	values.Set("limit", "20")
+
+	var result positionListResult
+	if err := c.getAuthenticated(ctx, "/v5/position/list", values, &result); err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	if len(result.List) == 0 {
+		return domainlive.PositionSnapshot{}, fmt.Errorf("bybit position snapshot not found for symbol %q", query.Symbol)
+	}
+	if len(result.List) > 1 {
+		return domainlive.PositionSnapshot{}, fmt.Errorf("bybit position snapshot for symbol %q is not unique", query.Symbol)
+	}
+	return c.mapPositionSnapshot(query, result.Category, result.List[0])
+}
+
 func (c *Client) GetServerTime(ctx context.Context) (time.Time, error) {
 	var result serverTimeResult
 	if err := c.get(ctx, "/v5/market/time", nil, &result); err != nil {
@@ -679,6 +711,84 @@ func (c *Client) mapOrderStatus(query domainlive.OrderStatusQuery, category stri
 	})
 }
 
+func (c *Client) mapPositionSnapshot(query domainlive.PositionSnapshotQuery, category string, item positionListItem) (domainlive.PositionSnapshot, error) {
+	size, err := parseOptionalDecimal("size", item.Size)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	averagePrice, err := parseOptionalDecimal("avgPrice", item.AvgPrice)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	positionValue, err := parseOptionalDecimal("positionValue", item.PositionValue)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	markPrice, err := parseOptionalDecimal("markPrice", item.MarkPrice)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	liquidationPrice, err := parseOptionalDecimal("liqPrice", item.LiqPrice)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	leverage, err := parseOptionalDecimal("leverage", item.Leverage)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	unrealisedPnL, err := parseOptionalDecimal("unrealisedPnl", item.UnrealisedPnl)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	currentRealisedPnL, err := parseOptionalDecimal("curRealisedPnl", item.CurRealisedPnl)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	cumulativeRealisedPnL, err := parseOptionalDecimal("cumRealisedPnl", item.CumRealisedPnl)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	exchangeCreatedAt, err := parseOptionalBybitUnixMilli("createdTime", item.CreatedTime)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	exchangeUpdatedAt, err := parseOptionalBybitUnixMilli("updatedTime", item.UpdatedTime)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	side, err := positionSideFromBybit(item.Side)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+	status, err := positionStatusFromBybit(item.PositionStatus)
+	if err != nil {
+		return domainlive.PositionSnapshot{}, err
+	}
+
+	return domainlive.NewPositionSnapshot(domainlive.PositionSnapshotInput{
+		Exchange:              exchangeName,
+		Category:              firstNonEmpty(category, query.Category),
+		Symbol:                item.Symbol,
+		Side:                  side,
+		Size:                  size,
+		AveragePrice:          averagePrice,
+		PositionValue:         positionValue,
+		MarkPrice:             markPrice,
+		LiquidationPrice:      liquidationPrice,
+		Leverage:              leverage,
+		UnrealisedPnL:         unrealisedPnL,
+		CurrentRealisedPnL:    currentRealisedPnL,
+		CumulativeRealisedPnL: cumulativeRealisedPnL,
+		ExchangeStatus:        status,
+		PositionIndex:         item.PositionIdx,
+		Sequence:              item.Seq,
+		ExchangeReduceOnly:    item.IsReduceOnly,
+		ExchangeCreatedAt:     exchangeCreatedAt,
+		ExchangeUpdatedAt:     exchangeUpdatedAt,
+		ObservedAt:            c.now(),
+	})
+}
+
 func mapInstrument(category string, item instrumentInfo) (marketdata.Instrument, error) {
 	tickSize, err := parseDecimal("priceFilter.tickSize", item.PriceFilter.TickSize)
 	if err != nil {
@@ -775,6 +885,13 @@ func parseBybitUnixMilli(field, value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse %s as unix milliseconds: %w", field, err)
 	}
 	return time.UnixMilli(milliseconds).UTC(), nil
+}
+
+func parseOptionalBybitUnixMilli(field, value string) (time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, nil
+	}
+	return parseBybitUnixMilli(field, value)
 }
 
 func cloneValues(values url.Values) url.Values {
@@ -926,6 +1043,34 @@ func orderStatusFromBybit(status string) (domainlive.ExchangeOrderStatus, error)
 		return domainlive.ExchangeOrderStatusDeactivated, nil
 	default:
 		return "", fmt.Errorf("unsupported bybit orderStatus %q", status)
+	}
+}
+
+func positionSideFromBybit(side string) (domainlive.OrderSide, error) {
+	switch strings.TrimSpace(side) {
+	case "":
+		return "", nil
+	case "Buy":
+		return domainlive.OrderSideLong, nil
+	case "Sell":
+		return domainlive.OrderSideShort, nil
+	default:
+		return "", fmt.Errorf("unsupported bybit position side %q", side)
+	}
+}
+
+func positionStatusFromBybit(status string) (domainlive.ExchangePositionStatus, error) {
+	switch strings.TrimSpace(status) {
+	case "":
+		return "", nil
+	case "Normal":
+		return domainlive.ExchangePositionStatusNormal, nil
+	case "Liq":
+		return domainlive.ExchangePositionStatusLiq, nil
+	case "Adl":
+		return domainlive.ExchangePositionStatusAdl, nil
+	default:
+		return "", fmt.Errorf("unsupported bybit positionStatus %q", status)
 	}
 }
 

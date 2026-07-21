@@ -75,9 +75,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Bybit V5 private order-create adapter with HMAC signing, config-driven REST base URL, internal live-domain mapping, and tests that never place real orders.
 - Live startup preflight use case and CLI that checks explicit live config, env confirmation, API credential presence, dedicated subaccount confirmation, withdrawal-disabled policy, initial-capital cap, and inactive Kill Switch before live startup.
 - Armed live-submit CLI that refuses to send unless `-execute=true` is provided, reruns live startup preflight, loads a persisted approved LIVE risk decision from PostgreSQL, records the submission before exchange I/O, submits through the exchange adapter, immediately reconciles the submitted order status by deterministic client order ID, and persists the status snapshot.
+- Bybit V5 private position-list adapter with HMAC-signed read-back of live position snapshots by symbol, including flat-position handling and fail-closed detection of non-unique hedge-mode rows.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially exchange position reconciliation before any autonomous live loop exists.
+The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially app-layer exchange position reconciliation and durable position snapshot storage before any autonomous live loop exists.
 
 ## What This Is Not
 

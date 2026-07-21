@@ -761,6 +761,271 @@ func TestGetOrderStatusRejectsUnsafeExchangePayloadsTableDriven(t *testing.T) {
 	}
 }
 
+func TestGetPositionSnapshotSignsAuthenticatedQueryAndMapsOpenPosition(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		if r.Method != http.MethodGet || r.URL.Path != "/v5/position/list" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		if r.URL.Query().Get("category") != "linear" ||
+			r.URL.Query().Get("symbol") != "BTCUSDT" ||
+			r.URL.Query().Get("limit") != "20" {
+			t.Fatalf("query mismatch: %s", r.URL.RawQuery)
+		}
+		timestamp := r.Header.Get("X-BAPI-TIMESTAMP")
+		recvWindow := r.Header.Get("X-BAPI-RECV-WINDOW")
+		if timestamp != "1784721600000" || recvWindow != "5000" {
+			t.Fatalf("timestamp/recv window mismatch: timestamp=%q recv=%q", timestamp, recvWindow)
+		}
+		wantSignature := testBybitHMAC("api-secret", timestamp+"api-key"+recvWindow+r.URL.RawQuery)
+		if r.Header.Get("X-BAPI-SIGN") != wantSignature {
+			t.Fatalf("signature mismatch: got %q want %q query=%s", r.Header.Get("X-BAPI-SIGN"), wantSignature, r.URL.RawQuery)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"retCode":0,
+			"retMsg":"OK",
+			"result":{
+				"category":"linear",
+				"list":[{
+					"positionIdx":0,
+					"symbol":"BTCUSDT",
+					"side":"Buy",
+					"size":"0.25",
+					"avgPrice":"100001",
+					"positionValue":"25000.25",
+					"positionStatus":"Normal",
+					"leverage":"1",
+					"markPrice":"100100",
+					"liqPrice":"50000",
+					"unrealisedPnl":"24.75",
+					"curRealisedPnl":"-15",
+					"cumRealisedPnl":"10",
+					"seq":12345,
+					"isReduceOnly":false,
+					"createdTime":"1784721599000",
+					"updatedTime":"1784721600000"
+				}]
+			},
+			"time":1784721600000
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := rest.New(
+		server.URL,
+		rest.WithHMACAuth("api-key", "api-secret"),
+		rest.WithClock(func() time.Time { return now }),
+		rest.WithRetry(0, time.Nanosecond),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	got, err := client.GetPositionSnapshot(context.Background(), domainlive.PositionSnapshotQuery{
+		Exchange: "bybit",
+		Category: "linear",
+		Symbol:   "BTCUSDT",
+	})
+	if err != nil {
+		t.Fatalf("get position snapshot: %v", err)
+	}
+	if !sawRequest {
+		t.Fatal("expected mock server to receive position request")
+	}
+	if !got.Open ||
+		got.Side != domainlive.OrderSideLong ||
+		got.ExchangeStatus != domainlive.ExchangePositionStatusNormal ||
+		!got.Size.Equal(decimal.RequireFromString("0.25")) ||
+		!got.AveragePrice.Equal(decimal.RequireFromString("100001")) ||
+		!got.UnrealisedPnL.Equal(decimal.RequireFromString("24.75")) ||
+		got.Sequence != 12345 ||
+		got.ObservedAt != now {
+		t.Fatalf("position snapshot mismatch: %#v", got)
+	}
+}
+
+func TestGetPositionSnapshotMapsFlatBybitPosition(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"retCode":0,
+			"retMsg":"OK",
+			"result":{
+				"category":"linear",
+				"list":[{
+					"positionIdx":0,
+					"symbol":"BTCUSDT",
+					"side":"",
+					"size":"0",
+					"avgPrice":"",
+					"positionValue":"0",
+					"positionStatus":"Normal",
+					"leverage":"",
+					"markPrice":"100100",
+					"liqPrice":"",
+					"unrealisedPnl":"0",
+					"curRealisedPnl":"0",
+					"cumRealisedPnl":"0",
+					"seq":-1,
+					"isReduceOnly":false,
+					"createdTime":"",
+					"updatedTime":""
+				}]
+			},
+			"time":1784721600000
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := rest.New(
+		server.URL,
+		rest.WithHMACAuth("api-key", "api-secret"),
+		rest.WithClock(func() time.Time { return now }),
+		rest.WithRetry(0, time.Nanosecond),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	got, err := client.GetPositionSnapshot(context.Background(), domainlive.PositionSnapshotQuery{
+		Exchange: "bybit",
+		Category: "linear",
+		Symbol:   "BTCUSDT",
+	})
+	if err != nil {
+		t.Fatalf("get flat position snapshot: %v", err)
+	}
+	if got.Open || got.Side != "" || !got.Size.IsZero() || got.ExchangeStatus != domainlive.ExchangePositionStatusNormal {
+		t.Fatalf("flat position snapshot mismatch: %#v", got)
+	}
+}
+
+func TestGetPositionSnapshotRejectsMissingCredentialsBeforeHTTPRequest(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+	}))
+	defer server.Close()
+
+	client, err := rest.New(server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.GetPositionSnapshot(context.Background(), domainlive.PositionSnapshotQuery{
+		Exchange: "bybit",
+		Category: "linear",
+		Symbol:   "BTCUSDT",
+	})
+	if err == nil || !strings.Contains(err.Error(), "API key") {
+		t.Fatalf("expected missing credentials error, got %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("missing credentials must block before HTTP request, got calls=%d", calls)
+	}
+}
+
+func TestGetPositionSnapshotRejectsUnsafeExchangePayloadsTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		resultJSON string
+		wantErrSub string
+	}{
+		{
+			name:       "not found",
+			resultJSON: `{"category":"linear","list":[]}`,
+			wantErrSub: "not found",
+		},
+		{
+			name: "multiple rows",
+			resultJSON: `{"category":"linear","list":[
+				{"positionIdx":1,"symbol":"BTCUSDT","side":"Buy","size":"0.1","avgPrice":"100000","positionValue":"10000","positionStatus":"Normal","createdTime":"1784721599000","updatedTime":"1784721600000"},
+				{"positionIdx":2,"symbol":"BTCUSDT","side":"Sell","size":"0","avgPrice":"","positionValue":"0","positionStatus":"Normal","createdTime":"","updatedTime":""}
+			]}`,
+			wantErrSub: "not unique",
+		},
+		{
+			name: "unknown side",
+			resultJSON: `{"category":"linear","list":[{
+				"positionIdx":0,
+				"symbol":"BTCUSDT",
+				"side":"Both",
+				"size":"0.25",
+				"avgPrice":"100001",
+				"positionValue":"25000.25",
+				"positionStatus":"Normal",
+				"createdTime":"1784721599000",
+				"updatedTime":"1784721600000"
+			}]}`,
+			wantErrSub: "side",
+		},
+		{
+			name: "unknown status",
+			resultJSON: `{"category":"linear","list":[{
+				"positionIdx":0,
+				"symbol":"BTCUSDT",
+				"side":"Buy",
+				"size":"0.25",
+				"avgPrice":"100001",
+				"positionValue":"25000.25",
+				"positionStatus":"Paused",
+				"createdTime":"1784721599000",
+				"updatedTime":"1784721600000"
+			}]}`,
+			wantErrSub: "positionStatus",
+		},
+		{
+			name: "bad size decimal",
+			resultJSON: `{"category":"linear","list":[{
+				"positionIdx":0,
+				"symbol":"BTCUSDT",
+				"side":"Buy",
+				"size":"nope",
+				"avgPrice":"100001",
+				"positionValue":"25000.25",
+				"positionStatus":"Normal",
+				"createdTime":"1784721599000",
+				"updatedTime":"1784721600000"
+			}]}`,
+			wantErrSub: "size",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"retCode":0,"retMsg":"OK","result":` + tt.resultJSON + `,"time":1784721600000}`))
+			}))
+			defer server.Close()
+
+			client, err := rest.New(
+				server.URL,
+				rest.WithHMACAuth("api-key", "api-secret"),
+				rest.WithClock(func() time.Time { return time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC) }),
+				rest.WithRetry(0, time.Nanosecond),
+			)
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+
+			_, err = client.GetPositionSnapshot(context.Background(), domainlive.PositionSnapshotQuery{
+				Exchange: "bybit",
+				Category: "linear",
+				Symbol:   "BTCUSDT",
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
+	}
+}
+
 func TestGetKlinesRejectsMalformedKlineRows(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
