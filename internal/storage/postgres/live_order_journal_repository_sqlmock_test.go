@@ -208,6 +208,83 @@ func TestLiveOrderJournalRepositorySQLMockTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records live position snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLivePositionSnapshot(now.Add(3 * time.Second))
+				mock.ExpectExec("INSERT INTO live_position_snapshots").
+					WithArgs(livePositionSnapshotSQLDriverArgs(snapshot)...).
+					WillReturnResult(sqlmock.NewResult(1, 1))
+
+				stats, err := postgres.NewLiveOrderJournalRepository(db).RecordPositionSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record live position snapshot: %v", err)
+				}
+				if stats.Inserted != 1 || stats.Skipped != 0 || stats.Total() != 1 {
+					t.Fatalf("position snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "accepts exact idempotent live position snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLivePositionSnapshot(now.Add(3 * time.Second))
+				args := livePositionSnapshotSQLDriverArgs(snapshot)
+				mock.ExpectExec("INSERT INTO live_position_snapshots").
+					WithArgs(args...).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery("SELECT 1\\s+FROM live_position_snapshots").
+					WithArgs(args...).
+					WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+
+				stats, err := postgres.NewLiveOrderJournalRepository(db).RecordPositionSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record duplicate live position snapshot: %v", err)
+				}
+				if stats.Inserted != 0 || stats.Skipped != 1 || stats.Total() != 1 {
+					t.Fatalf("position snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "accepts exact idempotent flat live position snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testFlatLivePositionSnapshot(now.Add(4 * time.Second))
+				args := livePositionSnapshotSQLDriverArgs(snapshot)
+				mock.ExpectExec("INSERT INTO live_position_snapshots").
+					WithArgs(args...).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery("SELECT 1\\s+FROM live_position_snapshots").
+					WithArgs(args...).
+					WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+
+				stats, err := postgres.NewLiveOrderJournalRepository(db).RecordPositionSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record duplicate flat live position snapshot: %v", err)
+				}
+				if stats.Inserted != 0 || stats.Skipped != 1 || stats.Total() != 1 {
+					t.Fatalf("position snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "rejects conflicting live position snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLivePositionSnapshot(now.Add(3 * time.Second))
+				args := livePositionSnapshotSQLDriverArgs(snapshot)
+				mock.ExpectExec("INSERT INTO live_position_snapshots").
+					WithArgs(args...).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery("SELECT 1\\s+FROM live_position_snapshots").
+					WithArgs(args...).
+					WillReturnRows(sqlmock.NewRows([]string{"exists"}))
+
+				_, err := postgres.NewLiveOrderJournalRepository(db).RecordPositionSnapshot(ctx, snapshot)
+				if err == nil || !strings.Contains(err.Error(), "different payload") {
+					t.Fatalf("expected conflict error, got %v", err)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -259,6 +336,16 @@ func TestLiveOrderJournalRepositoryRejectsInvalidInputsBeforeSQLTableDriven(t *t
 				return err
 			},
 			wantErrSub: "cumulative_executed_quantity",
+		},
+		{
+			name: "record position snapshot rejects invalid payload",
+			run: func(db *sql.DB) error {
+				snapshot := testLivePositionSnapshot(now.Add(3 * time.Second))
+				snapshot.Size = decimal.Zero
+				_, err := postgres.NewLiveOrderJournalRepository(db).RecordPositionSnapshot(ctx, snapshot)
+				return err
+			},
+			wantErrSub: "open",
 		},
 	}
 
@@ -344,6 +431,46 @@ func testLiveOrderStatusSnapshot(observedAt time.Time) domainlive.OrderStatusSna
 	}
 }
 
+func testLivePositionSnapshot(observedAt time.Time) domainlive.PositionSnapshot {
+	return domainlive.PositionSnapshot{
+		Exchange:              "bybit",
+		Category:              "linear",
+		Symbol:                "BTCUSDT",
+		Open:                  true,
+		Side:                  domainlive.OrderSideLong,
+		Size:                  decimal.RequireFromString("0.25"),
+		AveragePrice:          decimal.RequireFromString("100001"),
+		PositionValue:         decimal.RequireFromString("25000.25"),
+		MarkPrice:             decimal.RequireFromString("100100"),
+		LiquidationPrice:      decimal.RequireFromString("50000"),
+		Leverage:              decimal.RequireFromString("1"),
+		UnrealisedPnL:         decimal.RequireFromString("24.75"),
+		CurrentRealisedPnL:    decimal.RequireFromString("-15"),
+		CumulativeRealisedPnL: decimal.RequireFromString("10"),
+		ExchangeStatus:        domainlive.ExchangePositionStatusNormal,
+		PositionIndex:         0,
+		Sequence:              12345,
+		ExchangeCreatedAt:     observedAt.Add(-2 * time.Second),
+		ExchangeUpdatedAt:     observedAt.Add(-time.Second),
+		ObservedAt:            observedAt,
+	}
+}
+
+func testFlatLivePositionSnapshot(observedAt time.Time) domainlive.PositionSnapshot {
+	return domainlive.PositionSnapshot{
+		Exchange:       "bybit",
+		Category:       "linear",
+		Symbol:         "BTCUSDT",
+		Open:           false,
+		Size:           decimal.Zero,
+		MarkPrice:      decimal.RequireFromString("100100"),
+		ExchangeStatus: domainlive.ExchangePositionStatusNormal,
+		PositionIndex:  0,
+		Sequence:       -1,
+		ObservedAt:     observedAt,
+	}
+}
+
 func liveOrderSubmissionSQLDriverArgs(submission domainlive.OrderSubmission) []driver.Value {
 	return []driver.Value{
 		submission.SubmissionID,
@@ -409,4 +536,37 @@ func liveOrderStatusSnapshotSQLDriverArgs(snapshot domainlive.OrderStatusSnapsho
 		snapshot.ExchangeUpdatedAt.UTC(),
 		snapshot.ObservedAt.UTC(),
 	}
+}
+
+func livePositionSnapshotSQLDriverArgs(snapshot domainlive.PositionSnapshot) []driver.Value {
+	return []driver.Value{
+		snapshot.Exchange,
+		snapshot.Category,
+		snapshot.Symbol,
+		snapshot.Open,
+		string(snapshot.Side),
+		snapshot.Size.String(),
+		snapshot.AveragePrice.String(),
+		snapshot.PositionValue.String(),
+		snapshot.MarkPrice.String(),
+		snapshot.LiquidationPrice.String(),
+		snapshot.Leverage.String(),
+		snapshot.UnrealisedPnL.String(),
+		snapshot.CurrentRealisedPnL.String(),
+		snapshot.CumulativeRealisedPnL.String(),
+		string(snapshot.ExchangeStatus),
+		snapshot.PositionIndex,
+		snapshot.Sequence,
+		snapshot.ExchangeReduceOnly,
+		nullableLivePositionDriverTime(snapshot.ExchangeCreatedAt),
+		nullableLivePositionDriverTime(snapshot.ExchangeUpdatedAt),
+		snapshot.ObservedAt.UTC(),
+	}
+}
+
+func nullableLivePositionDriverTime(value time.Time) driver.Value {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC()
 }

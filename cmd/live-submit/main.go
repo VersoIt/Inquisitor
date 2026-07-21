@@ -130,6 +130,10 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 	if !ok {
 		return fmt.Errorf("live order executor must support post-submit order status reconciliation")
 	}
+	positionReader, ok := executor.(domainlive.PositionSnapshotReader)
+	if !ok {
+		return fmt.Errorf("live order executor must support post-submit position reconciliation")
+	}
 
 	liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
 	service := applive.NewService(
@@ -138,6 +142,8 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 		applive.WithOrderStatusReader(statusReader),
 		applive.WithOrderJournal(liveOrderJournal),
 		applive.WithOrderStatusJournal(liveOrderJournal),
+		applive.WithPositionSnapshotReader(positionReader),
+		applive.WithPositionSnapshotJournal(liveOrderJournal),
 		applive.WithKillSwitchRepository(killSwitch),
 	)
 	result, err := service.SubmitPersistedDecisionEntryOrder(submitCtx, applive.SubmitPersistedDecisionEntryOrderRequest{
@@ -164,6 +170,14 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 		return fmt.Errorf("reconcile live order status %q: %w", result.Submission.ClientOrderID, err)
 	}
 	logLiveSubmitReconciliation(log, reconciliation)
+	positionReconciliation, err := service.ReconcileSubmittedOrderPosition(submitCtx, applive.ReconcileSubmittedOrderPositionRequest{
+		Submission:  result.Submission,
+		OrderStatus: reconciliation.Snapshot,
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile live position %q: %w", result.Submission.Symbol, err)
+	}
+	logLiveSubmitPositionReconciliation(log, positionReconciliation)
 	return nil
 }
 
@@ -398,4 +412,41 @@ func logLiveSubmitReconciliation(log *slog.Logger, result applive.ReconcileSubmi
 		"snapshot_inserted", result.SnapshotStats.Inserted,
 		"snapshot_skipped", result.SnapshotStats.Skipped,
 	)
+}
+
+func logLiveSubmitPositionReconciliation(log *slog.Logger, result applive.ReconcileSubmittedOrderPositionResult) {
+	snapshot := result.Snapshot
+	log.Info(
+		"live position reconciled",
+		"exchange", snapshot.Exchange,
+		"category", snapshot.Category,
+		"symbol", snapshot.Symbol,
+		"open", snapshot.Open,
+		"side", snapshot.Side,
+		"size", snapshot.Size.String(),
+		"average_price", snapshot.AveragePrice.String(),
+		"position_value", snapshot.PositionValue.String(),
+		"mark_price", snapshot.MarkPrice.String(),
+		"liquidation_price", snapshot.LiquidationPrice.String(),
+		"leverage", snapshot.Leverage.String(),
+		"unrealised_pnl", snapshot.UnrealisedPnL.String(),
+		"current_realised_pnl", snapshot.CurrentRealisedPnL.String(),
+		"cumulative_realised_pnl", snapshot.CumulativeRealisedPnL.String(),
+		"exchange_status", snapshot.ExchangeStatus,
+		"position_index", snapshot.PositionIndex,
+		"sequence", snapshot.Sequence,
+		"exchange_reduce_only", snapshot.ExchangeReduceOnly,
+		"exchange_created_at", formatOptionalLiveSubmitTime(snapshot.ExchangeCreatedAt),
+		"exchange_updated_at", formatOptionalLiveSubmitTime(snapshot.ExchangeUpdatedAt),
+		"observed_at", snapshot.ObservedAt.Format(time.RFC3339Nano),
+		"snapshot_inserted", result.SnapshotStats.Inserted,
+		"snapshot_skipped", result.SnapshotStats.Skipped,
+	)
+}
+
+func formatOptionalLiveSubmitTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format(time.RFC3339Nano)
 }

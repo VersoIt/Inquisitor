@@ -71,8 +71,21 @@ type PositionSnapshotInput struct {
 	ObservedAt            time.Time
 }
 
+type PositionSnapshotStats struct {
+	Inserted int
+	Skipped  int
+}
+
 type PositionSnapshotReader interface {
 	GetPositionSnapshot(ctx context.Context, query PositionSnapshotQuery) (PositionSnapshot, error)
+}
+
+type PositionSnapshotJournal interface {
+	RecordPositionSnapshot(ctx context.Context, snapshot PositionSnapshot) (PositionSnapshotStats, error)
+}
+
+func (s PositionSnapshotStats) Total() int {
+	return s.Inserted + s.Skipped
 }
 
 func NewPositionSnapshot(input PositionSnapshotInput) (PositionSnapshot, error) {

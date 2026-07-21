@@ -144,6 +144,12 @@ func TestKnownExchangePositionStatusCoversBybitLifecycle(t *testing.T) {
 	}
 }
 
+func TestPositionSnapshotStatsTotal(t *testing.T) {
+	if got := (live.PositionSnapshotStats{Inserted: 2, Skipped: 3}).Total(); got != 5 {
+		t.Fatalf("total mismatch: got %d", got)
+	}
+}
+
 func validPositionSnapshotQuery() live.PositionSnapshotQuery {
 	return live.PositionSnapshotQuery{
 		Exchange: "bybit",

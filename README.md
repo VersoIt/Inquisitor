@@ -76,9 +76,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Live startup preflight use case and CLI that checks explicit live config, env confirmation, API credential presence, dedicated subaccount confirmation, withdrawal-disabled policy, initial-capital cap, and inactive Kill Switch before live startup.
 - Armed live-submit CLI that refuses to send unless `-execute=true` is provided, reruns live startup preflight, loads a persisted approved LIVE risk decision from PostgreSQL, records the submission before exchange I/O, submits through the exchange adapter, immediately reconciles the submitted order status by deterministic client order ID, and persists the status snapshot.
 - Bybit V5 private position-list adapter with HMAC-signed read-back of live position snapshots by symbol, including flat-position handling and fail-closed detection of non-unique hedge-mode rows.
+- App-layer live position reconciliation that compares exchange position size with submitted order executed quantity, persists durable position snapshots, and fails closed on unexpected flat/open/side/size mismatches.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially app-layer exchange position reconciliation and durable position snapshot storage before any autonomous live loop exists.
+The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially startup checks for stale/unexpected live positions before any autonomous live loop exists.
 
 ## What This Is Not
 
@@ -162,8 +163,9 @@ Initial migrations are in `migrations/`:
 - `020_paper_equity_events.sql`
 - `021_live_order_journal.sql`
 - `022_live_order_status_snapshots.sql`
+- `023_live_position_snapshots.sql`
 
-They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position/equity, Kill Switch, live order journal, and live order status snapshot tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position/equity, Kill Switch, live order journal, live order status snapshot, and live position snapshot tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 
@@ -484,7 +486,7 @@ $env:BYBIT_API_SECRET="..."
 go run ./cmd/live-preflight -config configs/live.local.yaml -subaccount-confirmed -max-initial-live-capital-usdt 100
 ```
 
-Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID and stores the status snapshot:
+Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
 
 ```powershell
 go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -execute

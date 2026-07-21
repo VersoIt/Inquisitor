@@ -208,6 +208,56 @@ func TestLiveOrderJournalRepositoryIntegrationTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records live position snapshot",
+			run: func(t *testing.T) {
+				snapshot := testLivePositionSnapshot(now.Add(4 * time.Second))
+				stats, err := repo.RecordPositionSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record live position snapshot: %v", err)
+				}
+				if stats.Inserted != 1 || stats.Skipped != 0 {
+					t.Fatalf("position snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "accepts exact idempotent live position snapshot",
+			run: func(t *testing.T) {
+				snapshot := testLivePositionSnapshot(now.Add(4 * time.Second))
+				stats, err := repo.RecordPositionSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record duplicate live position snapshot: %v", err)
+				}
+				if stats.Inserted != 0 || stats.Skipped != 1 {
+					t.Fatalf("position snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "rejects conflicting live position snapshot",
+			run: func(t *testing.T) {
+				conflict := testLivePositionSnapshot(now.Add(4 * time.Second))
+				conflict.UnrealisedPnL = decimal.RequireFromString("25")
+				_, err := repo.RecordPositionSnapshot(ctx, conflict)
+				if err == nil || !strings.Contains(err.Error(), "different payload") {
+					t.Fatalf("expected conflict error, got %v", err)
+				}
+			},
+		},
+		{
+			name: "records flat live position snapshot",
+			run: func(t *testing.T) {
+				flat := testFlatLivePositionSnapshot(now.Add(5 * time.Second))
+				stats, err := repo.RecordPositionSnapshot(ctx, flat)
+				if err != nil {
+					t.Fatalf("record flat live position snapshot: %v", err)
+				}
+				if stats.Inserted != 1 || stats.Skipped != 0 {
+					t.Fatalf("flat position snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -238,6 +288,16 @@ func testLiveRiskDecisionForSubmission(now time.Time, submission domainlive.Orde
 
 func cleanupLiveOrderJournal(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM live_position_snapshots
+		WHERE exchange = 'bybit'
+		  AND category = 'linear'
+		  AND symbol = 'BTCUSDT'
+		  AND observed_at >= '2026-07-19T12:00:00Z'::timestamptz
+		  AND observed_at < '2026-07-19T12:10:00Z'::timestamptz
+	`); err != nil {
+		t.Fatalf("cleanup live position snapshots: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `
 		DELETE FROM live_order_status_snapshots
 		WHERE client_order_id IN ('live_client_sqlmock_0001', 'live_client_sqlmock_0002', 'live_client_sqlmock_mismatch', 'live_client_sqlmock_missing')

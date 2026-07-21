@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 )
@@ -115,6 +116,41 @@ func (r *LiveOrderJournalRepository) RecordOrderStatusSnapshot(ctx context.Conte
 	return domainlive.OrderStatusSnapshotStats{Skipped: 1}, nil
 }
 
+func (r *LiveOrderJournalRepository) RecordPositionSnapshot(ctx context.Context, snapshot domainlive.PositionSnapshot) (domainlive.PositionSnapshotStats, error) {
+	if err := domainlive.ValidatePositionSnapshot(snapshot); err != nil {
+		return domainlive.PositionSnapshotStats{}, err
+	}
+	args := livePositionSnapshotSQLArgs(snapshot)
+	result, err := r.db.ExecContext(ctx, `
+		INSERT INTO live_position_snapshots (
+			exchange, category, symbol, open, side, size, average_price, position_value,
+			mark_price, liquidation_price, leverage, unrealised_pnl, current_realised_pnl,
+			cumulative_realised_pnl, exchange_status, position_index, sequence,
+			exchange_reduce_only, exchange_created_at, exchange_updated_at, observed_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13,
+			$14, $15, $16, $17,
+			$18, $19, $20, $21
+		)
+		ON CONFLICT (exchange, category, symbol, observed_at) DO NOTHING
+	`, args...)
+	if err != nil {
+		return domainlive.PositionSnapshotStats{}, fmt.Errorf("insert live position snapshot %s: %w", snapshot.Symbol, err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return domainlive.PositionSnapshotStats{}, fmt.Errorf("read live position snapshot insert rows affected: %w", err)
+	}
+	if inserted == 1 {
+		return domainlive.PositionSnapshotStats{Inserted: 1}, nil
+	}
+	if err := r.assertExistingLivePositionSnapshotMatches(ctx, args); err != nil {
+		return domainlive.PositionSnapshotStats{}, err
+	}
+	return domainlive.PositionSnapshotStats{Skipped: 1}, nil
+}
+
 func (r *LiveOrderJournalRepository) assertExistingLiveOrderSubmissionMatches(ctx context.Context, args []any) error {
 	var exists int
 	if err := r.db.QueryRowContext(ctx, `
@@ -209,6 +245,41 @@ func (r *LiveOrderJournalRepository) assertExistingLiveOrderStatusSnapshotMatche
 	return nil
 }
 
+func (r *LiveOrderJournalRepository) assertExistingLivePositionSnapshotMatches(ctx context.Context, args []any) error {
+	var exists int
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT 1
+		FROM live_position_snapshots
+		WHERE exchange = $1
+		  AND category = $2
+		  AND symbol = $3
+		  AND open = $4
+		  AND side = $5
+		  AND size = $6::numeric
+		  AND average_price = $7::numeric
+		  AND position_value = $8::numeric
+		  AND mark_price = $9::numeric
+		  AND liquidation_price = $10::numeric
+		  AND leverage = $11::numeric
+		  AND unrealised_pnl = $12::numeric
+		  AND current_realised_pnl = $13::numeric
+		  AND cumulative_realised_pnl = $14::numeric
+		  AND exchange_status = $15
+		  AND position_index = $16
+		  AND sequence = $17
+		  AND exchange_reduce_only = $18
+		  AND exchange_created_at IS NOT DISTINCT FROM $19::timestamptz
+		  AND exchange_updated_at IS NOT DISTINCT FROM $20::timestamptz
+		  AND observed_at = $21
+	`, args...).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("live position snapshot %s already exists with different payload", args[2])
+		}
+		return fmt.Errorf("verify existing live position snapshot %s: %w", args[2], err)
+	}
+	return nil
+}
+
 func liveOrderSubmissionSQLArgs(submission domainlive.OrderSubmission) []any {
 	return []any{
 		submission.SubmissionID,
@@ -262,6 +333,39 @@ func liveOrderStatusSnapshotSQLArgs(snapshot domainlive.OrderStatusSnapshot) []a
 		snapshot.ExchangeUpdatedAt.UTC(),
 		snapshot.ObservedAt.UTC(),
 	}
+}
+
+func livePositionSnapshotSQLArgs(snapshot domainlive.PositionSnapshot) []any {
+	return []any{
+		snapshot.Exchange,
+		snapshot.Category,
+		snapshot.Symbol,
+		snapshot.Open,
+		string(snapshot.Side),
+		snapshot.Size.String(),
+		snapshot.AveragePrice.String(),
+		snapshot.PositionValue.String(),
+		snapshot.MarkPrice.String(),
+		snapshot.LiquidationPrice.String(),
+		snapshot.Leverage.String(),
+		snapshot.UnrealisedPnL.String(),
+		snapshot.CurrentRealisedPnL.String(),
+		snapshot.CumulativeRealisedPnL.String(),
+		string(snapshot.ExchangeStatus),
+		snapshot.PositionIndex,
+		snapshot.Sequence,
+		snapshot.ExchangeReduceOnly,
+		nullableUTC(snapshot.ExchangeCreatedAt),
+		nullableUTC(snapshot.ExchangeUpdatedAt),
+		snapshot.ObservedAt.UTC(),
+	}
+}
+
+func nullableUTC(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC()
 }
 
 func liveOrderAcknowledgementSQLArgs(acknowledgement domainlive.OrderAcknowledgement) []any {

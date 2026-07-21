@@ -13,14 +13,16 @@ import (
 )
 
 type Service struct {
-	executor      domainlive.OrderExecutor
-	statusReader  domainlive.OrderStatusReader
-	statusJournal domainlive.OrderStatusJournal
-	journal       domainlive.OrderJournal
-	killSwitch    domainrisk.KillSwitchRepository
-	riskDecisions RiskDecisionReader
-	clock         clock.Clock
-	env           EnvironmentReader
+	executor        domainlive.OrderExecutor
+	statusReader    domainlive.OrderStatusReader
+	statusJournal   domainlive.OrderStatusJournal
+	positionReader  domainlive.PositionSnapshotReader
+	positionJournal domainlive.PositionSnapshotJournal
+	journal         domainlive.OrderJournal
+	killSwitch      domainrisk.KillSwitchRepository
+	riskDecisions   RiskDecisionReader
+	clock           clock.Clock
+	env             EnvironmentReader
 }
 
 type Option func(*Service)
@@ -69,6 +71,18 @@ func WithOrderStatusReader(reader domainlive.OrderStatusReader) Option {
 func WithOrderStatusJournal(journal domainlive.OrderStatusJournal) Option {
 	return func(service *Service) {
 		service.statusJournal = journal
+	}
+}
+
+func WithPositionSnapshotReader(reader domainlive.PositionSnapshotReader) Option {
+	return func(service *Service) {
+		service.positionReader = reader
+	}
+}
+
+func WithPositionSnapshotJournal(journal domainlive.PositionSnapshotJournal) Option {
+	return func(service *Service) {
+		service.positionJournal = journal
 	}
 }
 
