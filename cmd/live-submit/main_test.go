@@ -169,6 +169,14 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 	if fakeExecutor.calls != 1 {
 		t.Fatalf("executor calls mismatch: got %d", fakeExecutor.calls)
 	}
+	if fakeExecutor.statusCalls != 1 {
+		t.Fatalf("status reader calls mismatch: got %d", fakeExecutor.statusCalls)
+	}
+	if fakeExecutor.statusQuery.ClientOrderID != identity.ClientOrderID ||
+		fakeExecutor.statusQuery.Symbol != "BTCUSDT" ||
+		fakeExecutor.statusQuery.Exchange != "bybit" {
+		t.Fatalf("status query mismatch: %#v", fakeExecutor.statusQuery)
+	}
 	if fakeExecutor.submission.DecisionID != "risk_decision_live_cli_0001" ||
 		fakeExecutor.submission.SubmissionID != identity.SubmissionID ||
 		fakeExecutor.submission.ClientOrderID != identity.ClientOrderID ||
@@ -183,6 +191,8 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 		`"msg":"live order submit checked"`,
 		`"exchange_submitted":true`,
 		`"ack_status":"ACCEPTED"`,
+		`"msg":"live order status reconciled"`,
+		`"exchange_status":"FILLED"`,
 	} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
@@ -193,10 +203,51 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 	}
 }
 
+func TestRunLiveSubmitRequiresStatusReaderBeforeOrderSideEffects(t *testing.T) {
+	t.Setenv("TRADING_LIVE_CONFIRM", "true")
+	t.Setenv("BYBIT_API_KEY", "actual-live-api-key-value")
+	t.Setenv("BYBIT_API_SECRET", "actual-live-api-secret-value")
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	mock.ExpectQuery("SELECT active, reason, source, created_at").
+		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+
+	executor := &fakeLiveSubmitSubmitOnlyExecutor{}
+	err = runLiveSubmit(context.Background(), []string{
+		"-config", writeLiveSubmitConfig(t),
+		"-decision-id", "risk_decision_live_cli_0001",
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+		"-execute",
+	}, liveSubmitDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
+			return executor, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "status reconciliation") {
+		t.Fatalf("expected status reader requirement error, got %v", err)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("executor must not submit before status reader capability check, calls=%d", executor.calls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+}
+
 type fakeLiveSubmitExecutor struct {
-	submission domainlive.OrderSubmission
-	receivedAt time.Time
-	calls      int
+	submission  domainlive.OrderSubmission
+	statusQuery domainlive.OrderStatusQuery
+	receivedAt  time.Time
+	calls       int
+	statusCalls int
 }
 
 func (e *fakeLiveSubmitExecutor) SubmitOrder(_ context.Context, submission domainlive.OrderSubmission) (domainlive.OrderAcknowledgement, error) {
@@ -210,6 +261,43 @@ func (e *fakeLiveSubmitExecutor) SubmitOrder(_ context.Context, submission domai
 		Status:          domainlive.OrderStatusAccepted,
 		ReceivedAt:      e.receivedAt,
 	})
+}
+
+func (e *fakeLiveSubmitExecutor) GetOrderStatus(_ context.Context, query domainlive.OrderStatusQuery) (domainlive.OrderStatusSnapshot, error) {
+	e.statusCalls++
+	e.statusQuery = query
+	return domainlive.NewOrderStatusSnapshot(domainlive.OrderStatusSnapshotInput{
+		ClientOrderID:              e.submission.ClientOrderID,
+		ExchangeOrderID:            "bybit_order_cli_0001",
+		Exchange:                   e.submission.Exchange,
+		Category:                   e.submission.Category,
+		Symbol:                     e.submission.Symbol,
+		Side:                       e.submission.Side,
+		Type:                       e.submission.Type,
+		TimeInForce:                e.submission.TimeInForce,
+		ExchangeStatus:             domainlive.ExchangeOrderStatusFilled,
+		RejectReason:               "EC_NoError",
+		Quantity:                   e.submission.Quantity,
+		Price:                      decimal.Zero,
+		AveragePrice:               e.submission.ReferencePrice,
+		LeavesQuantity:             decimal.Zero,
+		CumulativeExecutedQuantity: e.submission.Quantity,
+		CumulativeExecutedValue:    e.submission.Notional,
+		CumulativeFee:              decimal.RequireFromString("1"),
+		ReduceOnly:                 e.submission.ReduceOnly,
+		ExchangeCreatedAt:          e.receivedAt.Add(-time.Second),
+		ExchangeUpdatedAt:          e.receivedAt,
+		ObservedAt:                 e.receivedAt,
+	})
+}
+
+type fakeLiveSubmitSubmitOnlyExecutor struct {
+	calls int
+}
+
+func (e *fakeLiveSubmitSubmitOnlyExecutor) SubmitOrder(context.Context, domainlive.OrderSubmission) (domainlive.OrderAcknowledgement, error) {
+	e.calls++
+	return domainlive.OrderAcknowledgement{}, nil
 }
 
 func liveSubmitRiskDecisionRows(now time.Time) *sqlmock.Rows {

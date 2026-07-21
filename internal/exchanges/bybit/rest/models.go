@@ -76,3 +76,30 @@ type createOrderResult struct {
 	OrderID     string `json:"orderId"`
 	OrderLinkID string `json:"orderLinkId"`
 }
+
+type orderRealtimeResult struct {
+	Category       string              `json:"category"`
+	NextPageCursor string              `json:"nextPageCursor"`
+	List           []orderRealtimeItem `json:"list"`
+}
+
+type orderRealtimeItem struct {
+	OrderID      string `json:"orderId"`
+	OrderLinkID  string `json:"orderLinkId"`
+	Symbol       string `json:"symbol"`
+	Price        string `json:"price"`
+	Qty          string `json:"qty"`
+	Side         string `json:"side"`
+	OrderStatus  string `json:"orderStatus"`
+	AvgPrice     string `json:"avgPrice"`
+	LeavesQty    string `json:"leavesQty"`
+	CumExecQty   string `json:"cumExecQty"`
+	CumExecValue string `json:"cumExecValue"`
+	CumExecFee   string `json:"cumExecFee"`
+	TimeInForce  string `json:"timeInForce"`
+	OrderType    string `json:"orderType"`
+	RejectReason string `json:"rejectReason"`
+	ReduceOnly   bool   `json:"reduceOnly"`
+	CreatedTime  string `json:"createdTime"`
+	UpdatedTime  string `json:"updatedTime"`
+}

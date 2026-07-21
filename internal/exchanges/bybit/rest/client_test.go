@@ -554,6 +554,213 @@ func TestSubmitOrderNormalizesBybitCreateOrderErrorEnvelope(t *testing.T) {
 	}
 }
 
+func TestGetOrderStatusSignsAuthenticatedQueryAndMapsResponse(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		if r.Method != http.MethodGet || r.URL.Path != "/v5/order/realtime" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		if r.URL.Query().Get("category") != "linear" ||
+			r.URL.Query().Get("symbol") != "BTCUSDT" ||
+			r.URL.Query().Get("orderLinkId") != "live_client_bybit_0001" ||
+			r.URL.Query().Get("limit") != "1" {
+			t.Fatalf("query mismatch: %s", r.URL.RawQuery)
+		}
+		timestamp := r.Header.Get("X-BAPI-TIMESTAMP")
+		recvWindow := r.Header.Get("X-BAPI-RECV-WINDOW")
+		if timestamp != "1784721600000" || recvWindow != "5000" {
+			t.Fatalf("timestamp/recv window mismatch: timestamp=%q recv=%q", timestamp, recvWindow)
+		}
+		wantSignature := testBybitHMAC("api-secret", timestamp+"api-key"+recvWindow+r.URL.RawQuery)
+		if r.Header.Get("X-BAPI-SIGN") != wantSignature {
+			t.Fatalf("signature mismatch: got %q want %q query=%s", r.Header.Get("X-BAPI-SIGN"), wantSignature, r.URL.RawQuery)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"retCode":0,
+			"retMsg":"OK",
+			"result":{
+				"category":"linear",
+				"list":[{
+					"orderId":"bybit_order_0001",
+					"orderLinkId":"live_client_bybit_0001",
+					"symbol":"BTCUSDT",
+					"price":"0",
+					"qty":"0.25",
+					"side":"Buy",
+					"orderStatus":"Filled",
+					"avgPrice":"100001",
+					"leavesQty":"0",
+					"cumExecQty":"0.25",
+					"cumExecValue":"25000.25",
+					"cumExecFee":"15",
+					"timeInForce":"IOC",
+					"orderType":"Market",
+					"rejectReason":"EC_NoError",
+					"reduceOnly":false,
+					"createdTime":"1784721599000",
+					"updatedTime":"1784721600000"
+				}]
+			},
+			"time":1784721600000
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := rest.New(
+		server.URL,
+		rest.WithHMACAuth("api-key", "api-secret"),
+		rest.WithClock(func() time.Time { return now }),
+		rest.WithRetry(0, time.Nanosecond),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	got, err := client.GetOrderStatus(context.Background(), domainlive.OrderStatusQuery{
+		Exchange:      "bybit",
+		Category:      "linear",
+		Symbol:        "BTCUSDT",
+		ClientOrderID: "live_client_bybit_0001",
+	})
+	if err != nil {
+		t.Fatalf("get order status: %v", err)
+	}
+	if !sawRequest {
+		t.Fatal("expected mock server to receive order status request")
+	}
+	if got.ClientOrderID != "live_client_bybit_0001" ||
+		got.ExchangeOrderID != "bybit_order_0001" ||
+		got.ExchangeStatus != domainlive.ExchangeOrderStatusFilled ||
+		got.Side != domainlive.OrderSideLong ||
+		got.Type != domainlive.OrderTypeMarket ||
+		got.TimeInForce != domainlive.TimeInForceIOC ||
+		!got.Quantity.Equal(decimal.RequireFromString("0.25")) ||
+		!got.CumulativeExecutedQuantity.Equal(decimal.RequireFromString("0.25")) ||
+		got.ObservedAt != now {
+		t.Fatalf("status snapshot mismatch: %#v", got)
+	}
+}
+
+func TestGetOrderStatusRejectsMissingCredentialsBeforeHTTPRequest(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+	}))
+	defer server.Close()
+
+	client, err := rest.New(server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.GetOrderStatus(context.Background(), domainlive.OrderStatusQuery{
+		Exchange:      "bybit",
+		Category:      "linear",
+		Symbol:        "BTCUSDT",
+		ClientOrderID: "live_client_bybit_0001",
+	})
+	if err == nil || !strings.Contains(err.Error(), "API key") {
+		t.Fatalf("expected missing credentials error, got %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("missing credentials must block before HTTP request, got calls=%d", calls)
+	}
+}
+
+func TestGetOrderStatusRejectsUnsafeExchangePayloadsTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		resultJSON string
+		wantErrSub string
+	}{
+		{
+			name:       "not found",
+			resultJSON: `{"category":"linear","list":[]}`,
+			wantErrSub: "not found",
+		},
+		{
+			name: "unknown status",
+			resultJSON: `{"category":"linear","list":[{
+				"orderId":"bybit_order_0001",
+				"orderLinkId":"live_client_bybit_0001",
+				"symbol":"BTCUSDT",
+				"price":"0",
+				"qty":"0.25",
+				"side":"Buy",
+				"orderStatus":"Pending",
+				"avgPrice":"0",
+				"leavesQty":"0.25",
+				"cumExecQty":"0",
+				"cumExecValue":"0",
+				"cumExecFee":"0",
+				"timeInForce":"IOC",
+				"orderType":"Market",
+				"rejectReason":"EC_NoError",
+				"createdTime":"1784721599000",
+				"updatedTime":"1784721600000"
+			}]}`,
+			wantErrSub: "orderStatus",
+		},
+		{
+			name: "bad quantity decimal",
+			resultJSON: `{"category":"linear","list":[{
+				"orderId":"bybit_order_0001",
+				"orderLinkId":"live_client_bybit_0001",
+				"symbol":"BTCUSDT",
+				"price":"0",
+				"qty":"nope",
+				"side":"Buy",
+				"orderStatus":"New",
+				"avgPrice":"0",
+				"leavesQty":"0.25",
+				"cumExecQty":"0",
+				"cumExecValue":"0",
+				"cumExecFee":"0",
+				"timeInForce":"IOC",
+				"orderType":"Market",
+				"rejectReason":"EC_NoError",
+				"createdTime":"1784721599000",
+				"updatedTime":"1784721600000"
+			}]}`,
+			wantErrSub: "qty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"retCode":0,"retMsg":"OK","result":` + tt.resultJSON + `,"time":1784721600000}`))
+			}))
+			defer server.Close()
+
+			client, err := rest.New(
+				server.URL,
+				rest.WithHMACAuth("api-key", "api-secret"),
+				rest.WithClock(func() time.Time { return time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC) }),
+				rest.WithRetry(0, time.Nanosecond),
+			)
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+
+			_, err = client.GetOrderStatus(context.Background(), domainlive.OrderStatusQuery{
+				Exchange:      "bybit",
+				Category:      "linear",
+				Symbol:        "BTCUSDT",
+				ClientOrderID: "live_client_bybit_0001",
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
+	}
+}
+
 func TestGetKlinesRejectsMalformedKlineRows(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

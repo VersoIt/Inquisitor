@@ -126,10 +126,15 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 	if err != nil {
 		return err
 	}
+	statusReader, ok := executor.(domainlive.OrderStatusReader)
+	if !ok {
+		return fmt.Errorf("live order executor must support post-submit order status reconciliation")
+	}
 
 	service := applive.NewService(
 		applive.WithRiskDecisionReader(postgres.NewRiskDecisionRepository(db)),
 		applive.WithOrderExecutor(executor),
+		applive.WithOrderStatusReader(statusReader),
 		applive.WithOrderJournal(postgres.NewLiveOrderJournalRepository(db)),
 		applive.WithKillSwitchRepository(killSwitch),
 	)
@@ -146,7 +151,18 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 	if err == nil || result.Decision.DecisionID != "" || result.Submission.SubmissionID != "" {
 		logLiveSubmitResult(log, result)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	reconciliation, err := service.ReconcileSubmittedOrderStatus(submitCtx, applive.ReconcileSubmittedOrderStatusRequest{
+		Submission:      result.Submission,
+		Acknowledgement: result.Acknowledgement,
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile live order status %q: %w", result.Submission.ClientOrderID, err)
+	}
+	logLiveSubmitReconciliation(log, reconciliation.Snapshot)
+	return nil
 }
 
 func (deps liveSubmitDependencies) withDefaults() liveSubmitDependencies {
@@ -349,5 +365,32 @@ func logLiveSubmitResult(log *slog.Logger, result applive.SubmitApprovedEntryOrd
 		"submission_skipped", result.SubmissionStats.Skipped,
 		"ack_inserted", result.AcknowledgementStats.Inserted,
 		"ack_skipped", result.AcknowledgementStats.Skipped,
+	)
+}
+
+func logLiveSubmitReconciliation(log *slog.Logger, snapshot domainlive.OrderStatusSnapshot) {
+	log.Info(
+		"live order status reconciled",
+		"client_order_id", snapshot.ClientOrderID,
+		"exchange_order_id", snapshot.ExchangeOrderID,
+		"exchange", snapshot.Exchange,
+		"category", snapshot.Category,
+		"symbol", snapshot.Symbol,
+		"side", snapshot.Side,
+		"order_type", snapshot.Type,
+		"time_in_force", snapshot.TimeInForce,
+		"exchange_status", snapshot.ExchangeStatus,
+		"reject_reason", snapshot.RejectReason,
+		"quantity", snapshot.Quantity.String(),
+		"price", snapshot.Price.String(),
+		"average_price", snapshot.AveragePrice.String(),
+		"leaves_quantity", snapshot.LeavesQuantity.String(),
+		"cumulative_executed_quantity", snapshot.CumulativeExecutedQuantity.String(),
+		"cumulative_executed_value", snapshot.CumulativeExecutedValue.String(),
+		"cumulative_fee", snapshot.CumulativeFee.String(),
+		"reduce_only", snapshot.ReduceOnly,
+		"exchange_created_at", snapshot.ExchangeCreatedAt.Format(time.RFC3339Nano),
+		"exchange_updated_at", snapshot.ExchangeUpdatedAt.Format(time.RFC3339Nano),
+		"observed_at", snapshot.ObservedAt.Format(time.RFC3339Nano),
 	)
 }

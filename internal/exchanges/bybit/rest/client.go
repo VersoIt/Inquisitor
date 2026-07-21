@@ -138,6 +138,39 @@ func (c *Client) SubmitOrder(ctx context.Context, submission domainlive.OrderSub
 	})
 }
 
+func (c *Client) GetOrderStatus(ctx context.Context, query domainlive.OrderStatusQuery) (domainlive.OrderStatusSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	if c == nil {
+		return domainlive.OrderStatusSnapshot{}, fmt.Errorf("bybit client is required")
+	}
+	if err := domainlive.ValidateOrderStatusQuery(query); err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	if query.Exchange != exchangeName {
+		return domainlive.OrderStatusSnapshot{}, fmt.Errorf("bybit order status requires exchange %q", exchangeName)
+	}
+
+	values := url.Values{}
+	values.Set("category", query.Category)
+	values.Set("symbol", query.Symbol)
+	values.Set("orderLinkId", query.ClientOrderID)
+	values.Set("limit", "1")
+
+	var result orderRealtimeResult
+	if err := c.getAuthenticated(ctx, "/v5/order/realtime", values, &result); err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	if len(result.List) == 0 {
+		return domainlive.OrderStatusSnapshot{}, fmt.Errorf("bybit order status not found for orderLinkId %q", query.ClientOrderID)
+	}
+	if len(result.List) > 1 {
+		return domainlive.OrderStatusSnapshot{}, fmt.Errorf("bybit order status for orderLinkId %q is not unique", query.ClientOrderID)
+	}
+	return c.mapOrderStatus(query, result.Category, result.List[0])
+}
+
 func (c *Client) GetServerTime(ctx context.Context) (time.Time, error) {
 	var result serverTimeResult
 	if err := c.get(ctx, "/v5/market/time", nil, &result); err != nil {
@@ -312,6 +345,91 @@ func (c *Client) postAuthenticated(ctx context.Context, path string, payload any
 	return lastErr
 }
 
+func (c *Client) getAuthenticated(ctx context.Context, path string, query url.Values, result any) error {
+	if strings.TrimSpace(c.apiKey) == "" || strings.TrimSpace(c.apiSecret) == "" {
+		return fmt.Errorf("bybit private request requires API key and API secret")
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(c.backoff * time.Duration(attempt))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		err := c.getAuthenticatedOnce(ctx, path, query, result)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRetryable(err) {
+			break
+		}
+	}
+
+	return lastErr
+}
+
+func (c *Client) getAuthenticatedOnce(ctx context.Context, path string, query url.Values, result any) error {
+	endpoint := *c.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
+	if query != nil {
+		endpoint.RawQuery = query.Encode()
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return fmt.Errorf("create bybit request: %w", err)
+	}
+	timestamp := strconv.FormatInt(c.now().UnixMilli(), 10)
+	recvWindow := strconv.FormatInt(c.recvWindow.Milliseconds(), 10)
+	// Bybit V5 signs GET requests as timestamp + apiKey + recvWindow + raw query string.
+	signature := signBybitHMAC(c.apiSecret, timestamp+c.apiKey+recvWindow+endpoint.RawQuery)
+
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", "Inquisitor/phase1")
+	request.Header.Set("X-BAPI-API-KEY", c.apiKey)
+	request.Header.Set("X-BAPI-TIMESTAMP", timestamp)
+	request.Header.Set("X-BAPI-RECV-WINDOW", recvWindow)
+	request.Header.Set("X-BAPI-SIGN", signature)
+
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode == http.StatusTooManyRequests {
+		return exchanges.ErrRateLimited
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		return fmt.Errorf("bybit http status %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var envelope responseEnvelope[json.RawMessage]
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		return fmt.Errorf("decode bybit response: %w", err)
+	}
+	if envelope.RetCode != 0 {
+		return exchanges.ExchangeError{
+			Exchange: exchangeName,
+			RetCode:  envelope.RetCode,
+			RetMsg:   envelope.RetMsg,
+		}
+	}
+	if err := json.Unmarshal(envelope.Result, result); err != nil {
+		return fmt.Errorf("decode bybit result: %w", err)
+	}
+
+	return nil
+}
+
 func (c *Client) postAuthenticatedOnce(ctx context.Context, path string, body []byte, result any) error {
 	endpoint := *c.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
@@ -482,6 +600,85 @@ func (c *Client) mapKline(req exchanges.KlinesRequest, item []string) (marketdat
 	}, nil
 }
 
+func (c *Client) mapOrderStatus(query domainlive.OrderStatusQuery, category string, item orderRealtimeItem) (domainlive.OrderStatusSnapshot, error) {
+	price, err := parseOptionalDecimal("price", item.Price)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	quantity, err := parseDecimal("qty", item.Qty)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	averagePrice, err := parseOptionalDecimal("avgPrice", item.AvgPrice)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	leavesQuantity, err := parseOptionalDecimal("leavesQty", item.LeavesQty)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	cumulativeExecutedQuantity, err := parseOptionalDecimal("cumExecQty", item.CumExecQty)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	cumulativeExecutedValue, err := parseOptionalDecimal("cumExecValue", item.CumExecValue)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	cumulativeFee, err := parseOptionalDecimal("cumExecFee", item.CumExecFee)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	exchangeCreatedAt, err := parseBybitUnixMilli("createdTime", item.CreatedTime)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	exchangeUpdatedAt, err := parseBybitUnixMilli("updatedTime", item.UpdatedTime)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	side, err := orderSideFromBybit(item.Side)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	orderType, err := orderTypeFromBybit(item.OrderType)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	timeInForce, err := timeInForceFromBybit(item.TimeInForce)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+	status, err := orderStatusFromBybit(item.OrderStatus)
+	if err != nil {
+		return domainlive.OrderStatusSnapshot{}, err
+	}
+
+	return domainlive.NewOrderStatusSnapshot(domainlive.OrderStatusSnapshotInput{
+		ClientOrderID:              item.OrderLinkID,
+		ExchangeOrderID:            item.OrderID,
+		Exchange:                   exchangeName,
+		Category:                   firstNonEmpty(category, query.Category),
+		Symbol:                     item.Symbol,
+		Side:                       side,
+		Type:                       orderType,
+		TimeInForce:                timeInForce,
+		ExchangeStatus:             status,
+		RejectReason:               item.RejectReason,
+		Quantity:                   quantity,
+		Price:                      price,
+		AveragePrice:               averagePrice,
+		LeavesQuantity:             leavesQuantity,
+		CumulativeExecutedQuantity: cumulativeExecutedQuantity,
+		CumulativeExecutedValue:    cumulativeExecutedValue,
+		CumulativeFee:              cumulativeFee,
+		ReduceOnly:                 item.ReduceOnly,
+		ExchangeCreatedAt:          exchangeCreatedAt,
+		ExchangeUpdatedAt:          exchangeUpdatedAt,
+		ObservedAt:                 c.now(),
+	})
+}
+
 func mapInstrument(category string, item instrumentInfo) (marketdata.Instrument, error) {
 	tickSize, err := parseDecimal("priceFilter.tickSize", item.PriceFilter.TickSize)
 	if err != nil {
@@ -560,6 +757,24 @@ func parseDecimal(field, value string) (decimal.Decimal, error) {
 		return decimal.Decimal{}, fmt.Errorf("parse %s as decimal: %w", field, err)
 	}
 	return parsed, nil
+}
+
+func parseOptionalDecimal(field, value string) (decimal.Decimal, error) {
+	if strings.TrimSpace(value) == "" {
+		return decimal.Zero, nil
+	}
+	return parseDecimal(field, value)
+}
+
+func parseBybitUnixMilli(field, value string) (time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, fmt.Errorf("%s is empty", field)
+	}
+	milliseconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse %s as unix milliseconds: %w", field, err)
+	}
+	return time.UnixMilli(milliseconds).UTC(), nil
 }
 
 func cloneValues(values url.Values) url.Values {
@@ -650,6 +865,77 @@ func bybitTimeInForce(timeInForce domainlive.TimeInForce) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported live time_in_force %q", timeInForce)
 	}
+}
+
+func orderSideFromBybit(side string) (domainlive.OrderSide, error) {
+	switch strings.TrimSpace(side) {
+	case "Buy":
+		return domainlive.OrderSideLong, nil
+	case "Sell":
+		return domainlive.OrderSideShort, nil
+	default:
+		return "", fmt.Errorf("unsupported bybit order side %q", side)
+	}
+}
+
+func orderTypeFromBybit(orderType string) (domainlive.OrderType, error) {
+	switch strings.TrimSpace(orderType) {
+	case "Market":
+		return domainlive.OrderTypeMarket, nil
+	case "Limit":
+		return domainlive.OrderTypeLimit, nil
+	default:
+		return "", fmt.Errorf("unsupported bybit order type %q", orderType)
+	}
+}
+
+func timeInForceFromBybit(timeInForce string) (domainlive.TimeInForce, error) {
+	switch strings.TrimSpace(timeInForce) {
+	case "GTC":
+		return domainlive.TimeInForceGTC, nil
+	case "IOC":
+		return domainlive.TimeInForceIOC, nil
+	case "FOK":
+		return domainlive.TimeInForceFOK, nil
+	case "PostOnly":
+		return domainlive.TimeInForcePostOnly, nil
+	default:
+		return "", fmt.Errorf("unsupported bybit timeInForce %q", timeInForce)
+	}
+}
+
+func orderStatusFromBybit(status string) (domainlive.ExchangeOrderStatus, error) {
+	switch strings.TrimSpace(status) {
+	case "New":
+		return domainlive.ExchangeOrderStatusNew, nil
+	case "PartiallyFilled":
+		return domainlive.ExchangeOrderStatusPartiallyFilled, nil
+	case "Untriggered":
+		return domainlive.ExchangeOrderStatusUntriggered, nil
+	case "Rejected":
+		return domainlive.ExchangeOrderStatusRejected, nil
+	case "PartiallyFilledCanceled", "PartiallyFilledCancelled":
+		return domainlive.ExchangeOrderStatusPartiallyFilledCancelled, nil
+	case "Filled":
+		return domainlive.ExchangeOrderStatusFilled, nil
+	case "Cancelled", "Canceled":
+		return domainlive.ExchangeOrderStatusCancelled, nil
+	case "Triggered":
+		return domainlive.ExchangeOrderStatusTriggered, nil
+	case "Deactivated":
+		return domainlive.ExchangeOrderStatusDeactivated, nil
+	default:
+		return "", fmt.Errorf("unsupported bybit orderStatus %q", status)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func signBybitHMAC(secret string, payload string) string {
