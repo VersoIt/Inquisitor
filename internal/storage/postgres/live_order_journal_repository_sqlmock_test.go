@@ -152,6 +152,62 @@ func TestLiveOrderJournalRepositorySQLMockTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records live order status snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLiveOrderStatusSnapshot(now.Add(2 * time.Second))
+				mock.ExpectExec("INSERT INTO live_order_status_snapshots").
+					WithArgs(liveOrderStatusSnapshotSQLDriverArgs(snapshot)...).
+					WillReturnResult(sqlmock.NewResult(1, 1))
+
+				stats, err := postgres.NewLiveOrderJournalRepository(db).RecordOrderStatusSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record live order status snapshot: %v", err)
+				}
+				if stats.Inserted != 1 || stats.Skipped != 0 || stats.Total() != 1 {
+					t.Fatalf("status snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "accepts exact idempotent live order status snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLiveOrderStatusSnapshot(now.Add(2 * time.Second))
+				args := liveOrderStatusSnapshotSQLDriverArgs(snapshot)
+				mock.ExpectExec("INSERT INTO live_order_status_snapshots").
+					WithArgs(args...).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery("SELECT 1\\s+FROM live_order_status_snapshots").
+					WithArgs(args...).
+					WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+
+				stats, err := postgres.NewLiveOrderJournalRepository(db).RecordOrderStatusSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record duplicate live order status snapshot: %v", err)
+				}
+				if stats.Inserted != 0 || stats.Skipped != 1 || stats.Total() != 1 {
+					t.Fatalf("status snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "rejects conflicting live order status snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLiveOrderStatusSnapshot(now.Add(2 * time.Second))
+				args := liveOrderStatusSnapshotSQLDriverArgs(snapshot)
+				mock.ExpectExec("INSERT INTO live_order_status_snapshots").
+					WithArgs(args...).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery("SELECT 1\\s+FROM live_order_status_snapshots").
+					WithArgs(args...).
+					WillReturnRows(sqlmock.NewRows([]string{"exists"}))
+
+				_, err := postgres.NewLiveOrderJournalRepository(db).RecordOrderStatusSnapshot(ctx, snapshot)
+				if err == nil || !strings.Contains(err.Error(), "different payload") {
+					t.Fatalf("expected conflict error, got %v", err)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -193,6 +249,16 @@ func TestLiveOrderJournalRepositoryRejectsInvalidInputsBeforeSQLTableDriven(t *t
 				return err
 			},
 			wantErrSub: "exchange_order_id",
+		},
+		{
+			name: "record status snapshot rejects invalid payload",
+			run: func(db *sql.DB) error {
+				snapshot := testLiveOrderStatusSnapshot(now.Add(2 * time.Second))
+				snapshot.CumulativeExecutedQuantity = snapshot.Quantity.Add(decimal.RequireFromString("0.1"))
+				_, err := postgres.NewLiveOrderJournalRepository(db).RecordOrderStatusSnapshot(ctx, snapshot)
+				return err
+			},
+			wantErrSub: "cumulative_executed_quantity",
 		},
 	}
 
@@ -253,6 +319,31 @@ func testLiveOrderAcknowledgement(receivedAt time.Time, status domainlive.OrderS
 	return ack
 }
 
+func testLiveOrderStatusSnapshot(observedAt time.Time) domainlive.OrderStatusSnapshot {
+	return domainlive.OrderStatusSnapshot{
+		ClientOrderID:              "live_client_sqlmock_0001",
+		ExchangeOrderID:            "bybit_order_sqlmock_0001",
+		Exchange:                   "bybit",
+		Category:                   "linear",
+		Symbol:                     "BTCUSDT",
+		Side:                       domainlive.OrderSideLong,
+		Type:                       domainlive.OrderTypeMarket,
+		TimeInForce:                domainlive.TimeInForceIOC,
+		ExchangeStatus:             domainlive.ExchangeOrderStatusFilled,
+		RejectReason:               "EC_NoError",
+		Quantity:                   decimal.RequireFromString("0.25"),
+		Price:                      decimal.Zero,
+		AveragePrice:               decimal.RequireFromString("100001"),
+		LeavesQuantity:             decimal.Zero,
+		CumulativeExecutedQuantity: decimal.RequireFromString("0.25"),
+		CumulativeExecutedValue:    decimal.RequireFromString("25000.25"),
+		CumulativeFee:              decimal.RequireFromString("15"),
+		ExchangeCreatedAt:          observedAt.Add(-2 * time.Second),
+		ExchangeUpdatedAt:          observedAt.Add(-time.Second),
+		ObservedAt:                 observedAt,
+	}
+}
+
 func liveOrderSubmissionSQLDriverArgs(submission domainlive.OrderSubmission) []driver.Value {
 	return []driver.Value{
 		submission.SubmissionID,
@@ -291,5 +382,31 @@ func liveOrderAcknowledgementSQLDriverArgs(ack domainlive.OrderAcknowledgement) 
 		string(ack.Status),
 		ack.RejectReason,
 		ack.ReceivedAt.UTC(),
+	}
+}
+
+func liveOrderStatusSnapshotSQLDriverArgs(snapshot domainlive.OrderStatusSnapshot) []driver.Value {
+	return []driver.Value{
+		snapshot.ClientOrderID,
+		snapshot.ExchangeOrderID,
+		snapshot.Exchange,
+		snapshot.Category,
+		snapshot.Symbol,
+		string(snapshot.Side),
+		string(snapshot.Type),
+		string(snapshot.TimeInForce),
+		string(snapshot.ExchangeStatus),
+		snapshot.RejectReason,
+		snapshot.Quantity.String(),
+		snapshot.Price.String(),
+		snapshot.AveragePrice.String(),
+		snapshot.LeavesQuantity.String(),
+		snapshot.CumulativeExecutedQuantity.String(),
+		snapshot.CumulativeExecutedValue.String(),
+		snapshot.CumulativeFee.String(),
+		snapshot.ReduceOnly,
+		snapshot.ExchangeCreatedAt.UTC(),
+		snapshot.ExchangeUpdatedAt.UTC(),
+		snapshot.ObservedAt.UTC(),
 	}
 }

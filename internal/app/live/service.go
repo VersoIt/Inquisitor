@@ -15,6 +15,7 @@ import (
 type Service struct {
 	executor      domainlive.OrderExecutor
 	statusReader  domainlive.OrderStatusReader
+	statusJournal domainlive.OrderStatusJournal
 	journal       domainlive.OrderJournal
 	killSwitch    domainrisk.KillSwitchRepository
 	riskDecisions RiskDecisionReader
@@ -62,6 +63,12 @@ func WithOrderExecutor(executor domainlive.OrderExecutor) Option {
 func WithOrderStatusReader(reader domainlive.OrderStatusReader) Option {
 	return func(service *Service) {
 		service.statusReader = reader
+	}
+}
+
+func WithOrderStatusJournal(journal domainlive.OrderStatusJournal) Option {
+	return func(service *Service) {
+		service.statusJournal = journal
 	}
 }
 

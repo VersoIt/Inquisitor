@@ -20,7 +20,11 @@ func TestServiceReconcileSubmittedOrderStatusReadsAndMatchesExchangeSnapshot(t *
 	reader := &fakeLiveOrderStatusReader{
 		snapshot: validReconciliationSnapshot(t, submission, acknowledgement.ExchangeOrderID, now.Add(2*time.Second)),
 	}
-	service := applive.NewService(applive.WithOrderStatusReader(reader))
+	journal := &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}}
+	service := applive.NewService(
+		applive.WithOrderStatusReader(reader),
+		applive.WithOrderStatusJournal(journal),
+	)
 
 	got, err := service.ReconcileSubmittedOrderStatus(context.Background(), applive.ReconcileSubmittedOrderStatusRequest{
 		Submission:      submission,
@@ -38,9 +42,13 @@ func TestServiceReconcileSubmittedOrderStatusReadsAndMatchesExchangeSnapshot(t *
 		t.Fatalf("status query mismatch: calls=%d query=%#v", reader.calls, reader.query)
 	}
 	if got.Snapshot.ExchangeStatus != domainlive.ExchangeOrderStatusFilled ||
+		got.SnapshotStats.Inserted != 1 ||
 		got.Submission.ClientOrderID != submission.ClientOrderID ||
 		got.Acknowledgement.ExchangeOrderID != acknowledgement.ExchangeOrderID {
 		t.Fatalf("reconciliation result mismatch: %#v", got)
+	}
+	if journal.calls != 1 || journal.snapshot.ClientOrderID != submission.ClientOrderID {
+		t.Fatalf("status journal mismatch: calls=%d snapshot=%#v", journal.calls, journal.snapshot)
 	}
 }
 
@@ -50,7 +58,11 @@ func TestServiceReconcileSubmittedOrderStatusAllowsMissingAcknowledgementForIdem
 	reader := &fakeLiveOrderStatusReader{
 		snapshot: validReconciliationSnapshot(t, submission, "bybit_order_recovered_after_retry", now.Add(time.Second)),
 	}
-	service := applive.NewService(applive.WithOrderStatusReader(reader))
+	journal := &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Skipped: 1}}
+	service := applive.NewService(
+		applive.WithOrderStatusReader(reader),
+		applive.WithOrderStatusJournal(journal),
+	)
 
 	got, err := service.ReconcileSubmittedOrderStatus(context.Background(), applive.ReconcileSubmittedOrderStatusRequest{
 		Submission: submission,
@@ -58,7 +70,10 @@ func TestServiceReconcileSubmittedOrderStatusAllowsMissingAcknowledgementForIdem
 	if err != nil {
 		t.Fatalf("reconcile submitted order status without acknowledgement: %v", err)
 	}
-	if got.Snapshot.ExchangeOrderID != "bybit_order_recovered_after_retry" || reader.calls != 1 {
+	if got.Snapshot.ExchangeOrderID != "bybit_order_recovered_after_retry" ||
+		got.SnapshotStats.Skipped != 1 ||
+		reader.calls != 1 ||
+		journal.calls != 1 {
 		t.Fatalf("idempotent retry reconciliation mismatch: calls=%d result=%#v", reader.calls, got)
 	}
 }
@@ -73,14 +88,17 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 	cancel()
 
 	tests := []struct {
-		name          string
-		ctx           context.Context
-		withoutSvc    bool
-		withoutReader bool
-		reader        *fakeLiveOrderStatusReader
-		mutateReq     func(*applive.ReconcileSubmittedOrderStatusRequest)
-		wantErrSub    string
-		wantCalls     int
+		name             string
+		ctx              context.Context
+		withoutSvc       bool
+		withoutReader    bool
+		withoutJournal   bool
+		reader           *fakeLiveOrderStatusReader
+		journal          *fakeLiveOrderStatusJournal
+		mutateReq        func(*applive.ReconcileSubmittedOrderStatusRequest)
+		wantErrSub       string
+		wantCalls        int
+		wantJournalCalls int
 	}{
 		{
 			name:       "cancelled context",
@@ -100,10 +118,17 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 			wantErrSub:    "order status reader",
 		},
 		{
+			name:           "missing status journal",
+			withoutJournal: true,
+			reader:         &fakeLiveOrderStatusReader{snapshot: validSnapshot},
+			wantErrSub:     "order status journal",
+		},
+		{
 			name: "invalid submission",
 			reader: &fakeLiveOrderStatusReader{
 				snapshot: validSnapshot,
 			},
+			journal: &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}},
 			mutateReq: func(req *applive.ReconcileSubmittedOrderStatusRequest) {
 				req.Submission.Quantity = decimal.Zero
 			},
@@ -114,6 +139,7 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 			reader: &fakeLiveOrderStatusReader{
 				snapshot: validSnapshot,
 			},
+			journal: &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}},
 			mutateReq: func(req *applive.ReconcileSubmittedOrderStatusRequest) {
 				req.Acknowledgement.ClientOrderID = "other"
 			},
@@ -122,6 +148,7 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 		{
 			name:       "reader error",
 			reader:     &fakeLiveOrderStatusReader{err: readerErr},
+			journal:    &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}},
 			wantErrSub: "read live order status",
 			wantCalls:  1,
 		},
@@ -132,6 +159,7 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 					s.ExchangeStatus = "PENDING"
 				}),
 			},
+			journal:    &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}},
 			wantErrSub: "exchange_status",
 			wantCalls:  1,
 		},
@@ -142,6 +170,7 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 					s.ClientOrderID = "other"
 				}),
 			},
+			journal:    &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}},
 			wantErrSub: "client_order_id",
 			wantCalls:  1,
 		},
@@ -152,6 +181,7 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 					s.Symbol = "ETHUSDT"
 				}),
 			},
+			journal:    &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}},
 			wantErrSub: "symbol",
 			wantCalls:  1,
 		},
@@ -162,6 +192,7 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 					s.Side = domainlive.OrderSideShort
 				}),
 			},
+			journal:    &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}},
 			wantErrSub: "side",
 			wantCalls:  1,
 		},
@@ -172,6 +203,7 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 					s.Quantity = decimal.RequireFromString("0.25")
 				}),
 			},
+			journal:    &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}},
 			wantErrSub: "quantity",
 			wantCalls:  1,
 		},
@@ -182,8 +214,29 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 					s.ExchangeOrderID = "other"
 				}),
 			},
+			journal:    &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}},
 			wantErrSub: "exchange_order_id",
 			wantCalls:  1,
+		},
+		{
+			name: "journal error",
+			reader: &fakeLiveOrderStatusReader{
+				snapshot: validSnapshot,
+			},
+			journal:          &fakeLiveOrderStatusJournal{err: errors.New("postgres unavailable")},
+			wantErrSub:       "record live order status snapshot",
+			wantCalls:        1,
+			wantJournalCalls: 1,
+		},
+		{
+			name: "journal zero rows",
+			reader: &fakeLiveOrderStatusReader{
+				snapshot: validSnapshot,
+			},
+			journal:          &fakeLiveOrderStatusJournal{},
+			wantErrSub:       "did not record",
+			wantCalls:        1,
+			wantJournalCalls: 1,
 		},
 	}
 
@@ -205,9 +258,19 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 			switch {
 			case tt.withoutSvc:
 			case tt.withoutReader:
-				service = applive.NewService()
-			default:
+				service = applive.NewService(applive.WithOrderStatusJournal(tt.journal))
+			case tt.withoutJournal:
 				service = applive.NewService(applive.WithOrderStatusReader(tt.reader))
+			default:
+				journal := tt.journal
+				if journal == nil {
+					journal = &fakeLiveOrderStatusJournal{stats: domainlive.OrderStatusSnapshotStats{Inserted: 1}}
+				}
+				tt.journal = journal
+				service = applive.NewService(
+					applive.WithOrderStatusReader(tt.reader),
+					applive.WithOrderStatusJournal(journal),
+				)
 			}
 
 			_, err := service.ReconcileSubmittedOrderStatus(ctx, req)
@@ -216,6 +279,9 @@ func TestServiceReconcileSubmittedOrderStatusRejectsUnsafeInputsTableDriven(t *t
 			}
 			if tt.reader != nil && tt.reader.calls != tt.wantCalls {
 				t.Fatalf("status reader calls mismatch: got %d want %d", tt.reader.calls, tt.wantCalls)
+			}
+			if tt.journal != nil && tt.journal.calls != tt.wantJournalCalls {
+				t.Fatalf("status journal calls mismatch: got %d want %d", tt.journal.calls, tt.wantJournalCalls)
 			}
 		})
 	}
@@ -235,6 +301,22 @@ func (r *fakeLiveOrderStatusReader) GetOrderStatus(_ context.Context, query doma
 		return domainlive.OrderStatusSnapshot{}, r.err
 	}
 	return r.snapshot, nil
+}
+
+type fakeLiveOrderStatusJournal struct {
+	snapshot domainlive.OrderStatusSnapshot
+	stats    domainlive.OrderStatusSnapshotStats
+	calls    int
+	err      error
+}
+
+func (j *fakeLiveOrderStatusJournal) RecordOrderStatusSnapshot(_ context.Context, snapshot domainlive.OrderStatusSnapshot) (domainlive.OrderStatusSnapshotStats, error) {
+	j.calls++
+	j.snapshot = snapshot
+	if j.err != nil {
+		return domainlive.OrderStatusSnapshotStats{}, j.err
+	}
+	return j.stats, nil
 }
 
 func validReconciliationSubmission(t *testing.T, now time.Time) domainlive.OrderSubmission {

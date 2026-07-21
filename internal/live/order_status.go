@@ -79,8 +79,21 @@ type OrderStatusSnapshotInput struct {
 	ObservedAt                 time.Time
 }
 
+type OrderStatusSnapshotStats struct {
+	Inserted int
+	Skipped  int
+}
+
 type OrderStatusReader interface {
 	GetOrderStatus(ctx context.Context, query OrderStatusQuery) (OrderStatusSnapshot, error)
+}
+
+type OrderStatusJournal interface {
+	RecordOrderStatusSnapshot(ctx context.Context, snapshot OrderStatusSnapshot) (OrderStatusSnapshotStats, error)
+}
+
+func (s OrderStatusSnapshotStats) Total() int {
+	return s.Inserted + s.Skipped
 }
 
 func NewOrderStatusSnapshot(input OrderStatusSnapshotInput) (OrderStatusSnapshot, error) {

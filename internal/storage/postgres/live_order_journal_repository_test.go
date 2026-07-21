@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
@@ -158,6 +160,54 @@ func TestLiveOrderJournalRepositoryIntegrationTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records live order status snapshot",
+			run: func(t *testing.T) {
+				snapshot := testLiveOrderStatusSnapshot(now.Add(2 * time.Second))
+				stats, err := repo.RecordOrderStatusSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record live order status snapshot: %v", err)
+				}
+				if stats.Inserted != 1 || stats.Skipped != 0 {
+					t.Fatalf("status snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "accepts exact idempotent live order status snapshot",
+			run: func(t *testing.T) {
+				snapshot := testLiveOrderStatusSnapshot(now.Add(2 * time.Second))
+				stats, err := repo.RecordOrderStatusSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record duplicate live order status snapshot: %v", err)
+				}
+				if stats.Inserted != 0 || stats.Skipped != 1 {
+					t.Fatalf("status snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "rejects conflicting live order status snapshot",
+			run: func(t *testing.T) {
+				conflict := testLiveOrderStatusSnapshot(now.Add(2 * time.Second))
+				conflict.CumulativeFee = decimal.RequireFromString("16")
+				_, err := repo.RecordOrderStatusSnapshot(ctx, conflict)
+				if err == nil || !strings.Contains(err.Error(), "different payload") {
+					t.Fatalf("expected conflict error, got %v", err)
+				}
+			},
+		},
+		{
+			name: "rejects status snapshot without matching submission",
+			run: func(t *testing.T) {
+				missing := testLiveOrderStatusSnapshot(now.Add(3 * time.Second))
+				missing.ClientOrderID = "live_client_sqlmock_missing"
+				_, err := repo.RecordOrderStatusSnapshot(ctx, missing)
+				if err == nil || !strings.Contains(err.Error(), "insert live order status snapshot") {
+					t.Fatalf("expected status snapshot foreign key error, got %v", err)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -188,6 +238,13 @@ func testLiveRiskDecisionForSubmission(now time.Time, submission domainlive.Orde
 
 func cleanupLiveOrderJournal(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM live_order_status_snapshots
+		WHERE client_order_id IN ('live_client_sqlmock_0001', 'live_client_sqlmock_0002', 'live_client_sqlmock_mismatch', 'live_client_sqlmock_missing')
+		   OR exchange_order_id IN ('bybit_order_sqlmock_0001', 'bybit_order_sqlmock_0002')
+	`); err != nil {
+		t.Fatalf("cleanup live order status snapshots: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `
 		DELETE FROM live_order_acknowledgements
 		WHERE submission_id IN ('live_submission_sqlmock_0001', 'live_submission_sqlmock_0002', 'live_submission_sqlmock_0003')

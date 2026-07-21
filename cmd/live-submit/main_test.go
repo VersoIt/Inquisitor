@@ -135,6 +135,8 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO live_order_acknowledgements").
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO live_order_status_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	identity, err := deterministicLiveSubmissionIdentity("risk_decision_live_cli_0001")
 	if err != nil {
@@ -193,6 +195,7 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 		`"ack_status":"ACCEPTED"`,
 		`"msg":"live order status reconciled"`,
 		`"exchange_status":"FILLED"`,
+		`"snapshot_inserted":1`,
 	} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)

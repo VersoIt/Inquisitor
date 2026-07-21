@@ -131,11 +131,13 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 		return fmt.Errorf("live order executor must support post-submit order status reconciliation")
 	}
 
+	liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
 	service := applive.NewService(
 		applive.WithRiskDecisionReader(postgres.NewRiskDecisionRepository(db)),
 		applive.WithOrderExecutor(executor),
 		applive.WithOrderStatusReader(statusReader),
-		applive.WithOrderJournal(postgres.NewLiveOrderJournalRepository(db)),
+		applive.WithOrderJournal(liveOrderJournal),
+		applive.WithOrderStatusJournal(liveOrderJournal),
 		applive.WithKillSwitchRepository(killSwitch),
 	)
 	result, err := service.SubmitPersistedDecisionEntryOrder(submitCtx, applive.SubmitPersistedDecisionEntryOrderRequest{
@@ -161,7 +163,7 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 	if err != nil {
 		return fmt.Errorf("reconcile live order status %q: %w", result.Submission.ClientOrderID, err)
 	}
-	logLiveSubmitReconciliation(log, reconciliation.Snapshot)
+	logLiveSubmitReconciliation(log, reconciliation)
 	return nil
 }
 
@@ -368,7 +370,8 @@ func logLiveSubmitResult(log *slog.Logger, result applive.SubmitApprovedEntryOrd
 	)
 }
 
-func logLiveSubmitReconciliation(log *slog.Logger, snapshot domainlive.OrderStatusSnapshot) {
+func logLiveSubmitReconciliation(log *slog.Logger, result applive.ReconcileSubmittedOrderStatusResult) {
+	snapshot := result.Snapshot
 	log.Info(
 		"live order status reconciled",
 		"client_order_id", snapshot.ClientOrderID,
@@ -392,5 +395,7 @@ func logLiveSubmitReconciliation(log *slog.Logger, snapshot domainlive.OrderStat
 		"exchange_created_at", snapshot.ExchangeCreatedAt.Format(time.RFC3339Nano),
 		"exchange_updated_at", snapshot.ExchangeUpdatedAt.Format(time.RFC3339Nano),
 		"observed_at", snapshot.ObservedAt.Format(time.RFC3339Nano),
+		"snapshot_inserted", result.SnapshotStats.Inserted,
+		"snapshot_skipped", result.SnapshotStats.Skipped,
 	)
 }

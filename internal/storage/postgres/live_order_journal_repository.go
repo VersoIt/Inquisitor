@@ -80,6 +80,41 @@ func (r *LiveOrderJournalRepository) RecordOrderAcknowledgement(ctx context.Cont
 	return domainlive.OrderAcknowledgementStats{Skipped: 1}, nil
 }
 
+func (r *LiveOrderJournalRepository) RecordOrderStatusSnapshot(ctx context.Context, snapshot domainlive.OrderStatusSnapshot) (domainlive.OrderStatusSnapshotStats, error) {
+	if err := domainlive.ValidateOrderStatusSnapshot(snapshot); err != nil {
+		return domainlive.OrderStatusSnapshotStats{}, err
+	}
+	args := liveOrderStatusSnapshotSQLArgs(snapshot)
+	result, err := r.db.ExecContext(ctx, `
+		INSERT INTO live_order_status_snapshots (
+			client_order_id, exchange_order_id, exchange, category, symbol, side, order_type,
+			time_in_force, exchange_status, reject_reason, quantity, price, average_price,
+			leaves_quantity, cumulative_executed_quantity, cumulative_executed_value, cumulative_fee,
+			reduce_only, exchange_created_at, exchange_updated_at, observed_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, $11, $12, $13,
+			$14, $15, $16, $17,
+			$18, $19, $20, $21
+		)
+		ON CONFLICT (exchange, client_order_id, observed_at) DO NOTHING
+	`, args...)
+	if err != nil {
+		return domainlive.OrderStatusSnapshotStats{}, fmt.Errorf("insert live order status snapshot %s: %w", snapshot.ClientOrderID, err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return domainlive.OrderStatusSnapshotStats{}, fmt.Errorf("read live order status snapshot insert rows affected: %w", err)
+	}
+	if inserted == 1 {
+		return domainlive.OrderStatusSnapshotStats{Inserted: 1}, nil
+	}
+	if err := r.assertExistingLiveOrderStatusSnapshotMatches(ctx, args); err != nil {
+		return domainlive.OrderStatusSnapshotStats{}, err
+	}
+	return domainlive.OrderStatusSnapshotStats{Skipped: 1}, nil
+}
+
 func (r *LiveOrderJournalRepository) assertExistingLiveOrderSubmissionMatches(ctx context.Context, args []any) error {
 	var exists int
 	if err := r.db.QueryRowContext(ctx, `
@@ -139,6 +174,41 @@ func (r *LiveOrderJournalRepository) assertExistingLiveOrderAcknowledgementMatch
 	return nil
 }
 
+func (r *LiveOrderJournalRepository) assertExistingLiveOrderStatusSnapshotMatches(ctx context.Context, args []any) error {
+	var exists int
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT 1
+		FROM live_order_status_snapshots
+		WHERE client_order_id = $1
+		  AND exchange_order_id = $2
+		  AND exchange = $3
+		  AND category = $4
+		  AND symbol = $5
+		  AND side = $6
+		  AND order_type = $7
+		  AND time_in_force = $8
+		  AND exchange_status = $9
+		  AND reject_reason = $10
+		  AND quantity = $11::numeric
+		  AND price = $12::numeric
+		  AND average_price = $13::numeric
+		  AND leaves_quantity = $14::numeric
+		  AND cumulative_executed_quantity = $15::numeric
+		  AND cumulative_executed_value = $16::numeric
+		  AND cumulative_fee = $17::numeric
+		  AND reduce_only = $18
+		  AND exchange_created_at = $19
+		  AND exchange_updated_at = $20
+		  AND observed_at = $21
+	`, args...).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("live order status snapshot %s already exists with different payload", args[0])
+		}
+		return fmt.Errorf("verify existing live order status snapshot %s: %w", args[0], err)
+	}
+	return nil
+}
+
 func liveOrderSubmissionSQLArgs(submission domainlive.OrderSubmission) []any {
 	return []any{
 		submission.SubmissionID,
@@ -165,6 +235,32 @@ func liveOrderSubmissionSQLArgs(submission domainlive.OrderSubmission) []any {
 		submission.Confidence,
 		submission.Reason,
 		submission.CreatedAt.UTC(),
+	}
+}
+
+func liveOrderStatusSnapshotSQLArgs(snapshot domainlive.OrderStatusSnapshot) []any {
+	return []any{
+		snapshot.ClientOrderID,
+		snapshot.ExchangeOrderID,
+		snapshot.Exchange,
+		snapshot.Category,
+		snapshot.Symbol,
+		string(snapshot.Side),
+		string(snapshot.Type),
+		string(snapshot.TimeInForce),
+		string(snapshot.ExchangeStatus),
+		snapshot.RejectReason,
+		snapshot.Quantity.String(),
+		snapshot.Price.String(),
+		snapshot.AveragePrice.String(),
+		snapshot.LeavesQuantity.String(),
+		snapshot.CumulativeExecutedQuantity.String(),
+		snapshot.CumulativeExecutedValue.String(),
+		snapshot.CumulativeFee.String(),
+		snapshot.ReduceOnly,
+		snapshot.ExchangeCreatedAt.UTC(),
+		snapshot.ExchangeUpdatedAt.UTC(),
+		snapshot.ObservedAt.UTC(),
 	}
 }
 

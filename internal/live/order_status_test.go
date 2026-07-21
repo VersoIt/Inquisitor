@@ -132,6 +132,12 @@ func TestKnownExchangeOrderStatusCoversBybitLifecycle(t *testing.T) {
 	}
 }
 
+func TestOrderStatusSnapshotStatsTotal(t *testing.T) {
+	if got := (live.OrderStatusSnapshotStats{Inserted: 2, Skipped: 3}).Total(); got != 5 {
+		t.Fatalf("total mismatch: got %d", got)
+	}
+}
+
 func validOrderStatusQuery() live.OrderStatusQuery {
 	return live.OrderStatusQuery{
 		Exchange:      "bybit",

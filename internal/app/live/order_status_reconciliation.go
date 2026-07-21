@@ -17,6 +17,7 @@ type ReconcileSubmittedOrderStatusResult struct {
 	Submission      domainlive.OrderSubmission
 	Acknowledgement domainlive.OrderAcknowledgement
 	Snapshot        domainlive.OrderStatusSnapshot
+	SnapshotStats   domainlive.OrderStatusSnapshotStats
 }
 
 func (s *Service) ReconcileSubmittedOrderStatus(ctx context.Context, req ReconcileSubmittedOrderStatusRequest) (ReconcileSubmittedOrderStatusResult, error) {
@@ -25,6 +26,9 @@ func (s *Service) ReconcileSubmittedOrderStatus(ctx context.Context, req Reconci
 	}
 	if s == nil || s.statusReader == nil {
 		return ReconcileSubmittedOrderStatusResult{}, fmt.Errorf("live order status reconciliation requires order status reader")
+	}
+	if s.statusJournal == nil {
+		return ReconcileSubmittedOrderStatusResult{}, fmt.Errorf("live order status reconciliation requires order status journal")
 	}
 	if err := domainlive.ValidateOrderSubmission(req.Submission); err != nil {
 		return ReconcileSubmittedOrderStatusResult{}, err
@@ -50,11 +54,19 @@ func (s *Service) ReconcileSubmittedOrderStatus(ctx context.Context, req Reconci
 	if err := ensureOrderStatusMatchesSubmission(req.Submission, req.Acknowledgement, snapshot); err != nil {
 		return ReconcileSubmittedOrderStatusResult{}, err
 	}
+	stats, err := s.statusJournal.RecordOrderStatusSnapshot(ctx, snapshot)
+	if err != nil {
+		return ReconcileSubmittedOrderStatusResult{}, fmt.Errorf("record live order status snapshot %q: %w", snapshot.ClientOrderID, err)
+	}
+	if stats.Total() == 0 {
+		return ReconcileSubmittedOrderStatusResult{}, fmt.Errorf("live order status snapshot journal did not record %q", snapshot.ClientOrderID)
+	}
 
 	return ReconcileSubmittedOrderStatusResult{
 		Submission:      req.Submission,
 		Acknowledgement: req.Acknowledgement,
 		Snapshot:        snapshot,
+		SnapshotStats:   stats,
 	}, nil
 }
 
