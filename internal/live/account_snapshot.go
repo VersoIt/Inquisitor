@@ -67,8 +67,21 @@ type AccountSnapshotInput struct {
 	ObservedAt             time.Time
 }
 
+type AccountSnapshotStats struct {
+	Inserted int
+	Skipped  int
+}
+
 type AccountSnapshotReader interface {
 	GetAccountSnapshot(ctx context.Context, query AccountSnapshotQuery) (AccountSnapshot, error)
+}
+
+type AccountSnapshotJournal interface {
+	RecordAccountSnapshot(ctx context.Context, snapshot AccountSnapshot) (AccountSnapshotStats, error)
+}
+
+func (s AccountSnapshotStats) Total() int {
+	return s.Inserted + s.Skipped
 }
 
 func NewAccountSnapshot(input AccountSnapshotInput) (AccountSnapshot, error) {

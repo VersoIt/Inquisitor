@@ -73,14 +73,14 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 automated paper entry/exit reconciliation, bounded execution-cycle CLI, app-layer explicit-scope guard, locked preflight guard, active Kill Switch entry guard, and Docker-backed smoke script that selects pending tickets/open positions, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, verifies duplicate-entry prevention, and settles triggered stop-loss/take-profit exits without sending exchange orders.
 - Initial Phase 7 live order submission boundary for approved LIVE risk decisions only, with deterministic client order IDs, durable pre-exchange journaling, exchange acknowledgement journaling, and duplicate-decision prevention.
 - Bybit V5 private order-create adapter with HMAC signing, config-driven REST base URL, internal live-domain mapping, and tests that never place real orders.
-- Live startup preflight use case and CLI that checks explicit live config, env confirmation, API credential presence, dedicated subaccount confirmation, withdrawal-disabled policy, initial-capital cap, inactive Kill Switch, fresh `UNIFIED` wallet-balance readiness, and fresh flat live positions for configured symbols before live startup.
-- Armed live-submit CLI that refuses to send unless `-execute=true` is provided, reruns live startup preflight including fresh account-readiness and flat-position checks, loads a persisted approved LIVE risk decision from PostgreSQL, records the submission before exchange I/O, submits through the exchange adapter, immediately reconciles the submitted order status by deterministic client order ID, and persists the status snapshot.
+- Live startup preflight use case and CLI that checks explicit live config, env confirmation, API credential presence, dedicated subaccount confirmation, withdrawal-disabled policy, initial-capital cap, inactive Kill Switch, fresh `UNIFIED` wallet-balance readiness, and fresh flat live positions for configured symbols before live startup, while persisting account and position readiness snapshots for audit.
+- Armed live-submit CLI that refuses to send unless `-execute=true` is provided, reruns live startup preflight including fresh account-readiness and flat-position checks with durable audit snapshots, loads a persisted approved LIVE risk decision from PostgreSQL, records the submission before exchange I/O, submits through the exchange adapter, immediately reconciles the submitted order status by deterministic client order ID, and persists the status snapshot.
 - Bybit V5 private wallet-balance adapter with HMAC-signed read-back of `UNIFIED` account equity, available balance, margin usage, coin-level liabilities, and collateral details for fail-closed live startup checks.
 - Bybit V5 private position-list adapter with HMAC-signed read-back of live position snapshots by symbol, including flat-position handling and fail-closed detection of non-unique hedge-mode rows.
 - App-layer live position reconciliation that compares exchange position size with submitted order executed quantity, persists durable position snapshots, and fails closed on unexpected flat/open/side/size mismatches.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially durable account-readiness audit snapshots, bounded live-loop orchestration, and operator-visible health reporting before any autonomous live loop exists.
+The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially bounded live-loop orchestration and operator-visible health reporting before any autonomous live loop exists.
 
 ## What This Is Not
 
@@ -165,8 +165,9 @@ Initial migrations are in `migrations/`:
 - `021_live_order_journal.sql`
 - `022_live_order_status_snapshots.sql`
 - `023_live_position_snapshots.sql`
+- `024_live_account_snapshots.sql`
 
-They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position/equity, Kill Switch, live order journal, live order status snapshot, and live position snapshot tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position/equity, Kill Switch, live order journal, live order status snapshot, live position snapshot, and live account snapshot tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 
@@ -478,7 +479,7 @@ go run ./cmd/paper-execute -config configs/config.example.yaml -action settle -e
 
 Live trading remains disabled by default. Use a separate local live config, not `configs/config.example.yaml`, and keep API keys scoped to a dedicated subaccount with withdrawals disabled.
 
-Run live startup preflight before any live submission. It reads the Bybit `UNIFIED` wallet balance, requires a fresh small account with no margin, borrow, locked funds, non-base assets, or open PnL, then checks every configured `exchange.symbols` position, requires a fresh flat snapshot, and records each position snapshot in PostgreSQL:
+Run live startup preflight before any live submission. It reads the Bybit `UNIFIED` wallet balance, requires a fresh small account with no margin, borrow, locked funds, non-base assets, or open PnL, persists the account snapshot, then checks every configured `exchange.symbols` position, requires a fresh flat snapshot, and records each position snapshot in PostgreSQL:
 
 ```powershell
 $env:TRADING_LIVE_CONFIRM="true"

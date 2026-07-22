@@ -87,19 +87,22 @@ func runLivePreflight(ctx context.Context, args []string, deps livePreflightDepe
 	serviceOptions := []applive.Option{
 		applive.WithKillSwitchRepository(postgres.NewRiskKillSwitchRepository(db)),
 	}
+	liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
 	if liveStartupAccountPreflightEnabled(request.ExpectedAccount) {
 		accountReader, err := deps.newAccountReader(cfg)
 		if err != nil {
 			return fmt.Errorf("create live account reader for startup preflight: %w", err)
 		}
-		serviceOptions = append(serviceOptions, applive.WithAccountSnapshotReader(accountReader))
+		serviceOptions = append(serviceOptions,
+			applive.WithAccountSnapshotReader(accountReader),
+			applive.WithAccountSnapshotJournal(liveOrderJournal),
+		)
 	}
 	if len(request.ExpectedFlatPositions) > 0 {
 		positionReader, err := deps.newPositionReader(cfg)
 		if err != nil {
 			return fmt.Errorf("create live position reader for startup preflight: %w", err)
 		}
-		liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
 		serviceOptions = append(serviceOptions,
 			applive.WithPositionSnapshotReader(positionReader),
 			applive.WithPositionSnapshotJournal(liveOrderJournal),
@@ -271,6 +274,8 @@ func logLiveStartupPreflightResult(log *slog.Logger, result applive.PreflightLiv
 		"account_total_maintenance_margin", result.AccountSnapshot.TotalMaintenanceMargin.String(),
 		"account_coin_count", len(result.AccountSnapshot.Coins),
 		"max_account_snapshot_age_ms", result.MaxAccountSnapshotAge.Milliseconds(),
+		"account_snapshot_inserted", result.AccountSnapshotStats.Inserted,
+		"account_snapshot_skipped", result.AccountSnapshotStats.Skipped,
 		"position_checks", len(result.ExpectedFlatPositions),
 		"position_symbols", liveStartupPositionQuerySymbols(result.ExpectedFlatPositions),
 		"position_snapshots", len(result.PositionSnapshots),

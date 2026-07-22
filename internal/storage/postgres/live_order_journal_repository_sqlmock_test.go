@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -285,6 +286,62 @@ func TestLiveOrderJournalRepositorySQLMockTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records live account snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLiveAccountSnapshot(now.Add(5 * time.Second))
+				mock.ExpectExec("INSERT INTO live_account_snapshots").
+					WithArgs(liveAccountSnapshotSQLDriverArgs(t, snapshot)...).
+					WillReturnResult(sqlmock.NewResult(1, 1))
+
+				stats, err := postgres.NewLiveOrderJournalRepository(db).RecordAccountSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record live account snapshot: %v", err)
+				}
+				if stats.Inserted != 1 || stats.Skipped != 0 || stats.Total() != 1 {
+					t.Fatalf("account snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "accepts exact idempotent live account snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLiveAccountSnapshot(now.Add(5 * time.Second))
+				args := liveAccountSnapshotSQLDriverArgs(t, snapshot)
+				mock.ExpectExec("INSERT INTO live_account_snapshots").
+					WithArgs(args...).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery("SELECT 1\\s+FROM live_account_snapshots").
+					WithArgs(args...).
+					WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+
+				stats, err := postgres.NewLiveOrderJournalRepository(db).RecordAccountSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record duplicate live account snapshot: %v", err)
+				}
+				if stats.Inserted != 0 || stats.Skipped != 1 || stats.Total() != 1 {
+					t.Fatalf("account snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "rejects conflicting live account snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLiveAccountSnapshot(now.Add(5 * time.Second))
+				args := liveAccountSnapshotSQLDriverArgs(t, snapshot)
+				mock.ExpectExec("INSERT INTO live_account_snapshots").
+					WithArgs(args...).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery("SELECT 1\\s+FROM live_account_snapshots").
+					WithArgs(args...).
+					WillReturnRows(sqlmock.NewRows([]string{"exists"}))
+
+				_, err := postgres.NewLiveOrderJournalRepository(db).RecordAccountSnapshot(ctx, snapshot)
+				if err == nil || !strings.Contains(err.Error(), "different payload") {
+					t.Fatalf("expected conflict error, got %v", err)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -346,6 +403,16 @@ func TestLiveOrderJournalRepositoryRejectsInvalidInputsBeforeSQLTableDriven(t *t
 				return err
 			},
 			wantErrSub: "open",
+		},
+		{
+			name: "record account snapshot rejects invalid payload",
+			run: func(db *sql.DB) error {
+				snapshot := testLiveAccountSnapshot(now.Add(5 * time.Second))
+				snapshot.Coins[0].BorrowAmount = decimal.RequireFromString("-1")
+				_, err := postgres.NewLiveOrderJournalRepository(db).RecordAccountSnapshot(ctx, snapshot)
+				return err
+			},
+			wantErrSub: "borrow_amount",
 		},
 	}
 
@@ -471,6 +538,29 @@ func testFlatLivePositionSnapshot(observedAt time.Time) domainlive.PositionSnaps
 	}
 }
 
+func testLiveAccountSnapshot(observedAt time.Time) domainlive.AccountSnapshot {
+	return domainlive.AccountSnapshot{
+		Exchange:               "bybit",
+		AccountType:            domainlive.AccountTypeUnified,
+		TotalEquity:            decimal.RequireFromString("50"),
+		TotalWalletBalance:     decimal.RequireFromString("50"),
+		TotalMarginBalance:     decimal.RequireFromString("50"),
+		TotalAvailableBalance:  decimal.RequireFromString("50"),
+		TotalPerpUPL:           decimal.Zero,
+		TotalInitialMargin:     decimal.Zero,
+		TotalMaintenanceMargin: decimal.Zero,
+		Coins: []domainlive.AccountCoinSnapshot{{
+			Coin:             "USDT",
+			Equity:           decimal.RequireFromString("50"),
+			USDValue:         decimal.RequireFromString("50"),
+			WalletBalance:    decimal.RequireFromString("50"),
+			MarginCollateral: true,
+			CollateralSwitch: true,
+		}},
+		ObservedAt: observedAt,
+	}
+}
+
 func liveOrderSubmissionSQLDriverArgs(submission domainlive.OrderSubmission) []driver.Value {
 	return []driver.Value{
 		submission.SubmissionID,
@@ -562,6 +652,72 @@ func livePositionSnapshotSQLDriverArgs(snapshot domainlive.PositionSnapshot) []d
 		nullableLivePositionDriverTime(snapshot.ExchangeUpdatedAt),
 		snapshot.ObservedAt.UTC(),
 	}
+}
+
+func liveAccountSnapshotSQLDriverArgs(t *testing.T, snapshot domainlive.AccountSnapshot) []driver.Value {
+	t.Helper()
+
+	return []driver.Value{
+		snapshot.Exchange,
+		string(snapshot.AccountType),
+		snapshot.TotalEquity.String(),
+		snapshot.TotalWalletBalance.String(),
+		snapshot.TotalMarginBalance.String(),
+		snapshot.TotalAvailableBalance.String(),
+		snapshot.TotalPerpUPL.String(),
+		snapshot.TotalInitialMargin.String(),
+		snapshot.TotalMaintenanceMargin.String(),
+		liveAccountCoinsDriverJSON(t, snapshot.Coins),
+		snapshot.ObservedAt.UTC(),
+	}
+}
+
+type liveAccountCoinDriverPayload struct {
+	Coin                  string `json:"coin"`
+	Equity                string `json:"equity"`
+	USDValue              string `json:"usd_value"`
+	WalletBalance         string `json:"wallet_balance"`
+	Locked                string `json:"locked"`
+	BorrowAmount          string `json:"borrow_amount"`
+	AccruedInterest       string `json:"accrued_interest"`
+	TotalOrderIM          string `json:"total_order_im"`
+	TotalPositionIM       string `json:"total_position_im"`
+	TotalPositionMM       string `json:"total_position_mm"`
+	UnrealisedPnL         string `json:"unrealised_pnl"`
+	CumulativeRealisedPnL string `json:"cumulative_realised_pnl"`
+	SpotBorrow            string `json:"spot_borrow"`
+	MarginCollateral      bool   `json:"margin_collateral"`
+	CollateralSwitch      bool   `json:"collateral_switch"`
+}
+
+func liveAccountCoinsDriverJSON(t *testing.T, coins []domainlive.AccountCoinSnapshot) string {
+	t.Helper()
+
+	payload := make([]liveAccountCoinDriverPayload, 0, len(coins))
+	for _, coin := range coins {
+		payload = append(payload, liveAccountCoinDriverPayload{
+			Coin:                  coin.Coin,
+			Equity:                coin.Equity.String(),
+			USDValue:              coin.USDValue.String(),
+			WalletBalance:         coin.WalletBalance.String(),
+			Locked:                coin.Locked.String(),
+			BorrowAmount:          coin.BorrowAmount.String(),
+			AccruedInterest:       coin.AccruedInterest.String(),
+			TotalOrderIM:          coin.TotalOrderIM.String(),
+			TotalPositionIM:       coin.TotalPositionIM.String(),
+			TotalPositionMM:       coin.TotalPositionMM.String(),
+			UnrealisedPnL:         coin.UnrealisedPnL.String(),
+			CumulativeRealisedPnL: coin.CumulativeRealisedPnL.String(),
+			SpotBorrow:            coin.SpotBorrow.String(),
+			MarginCollateral:      coin.MarginCollateral,
+			CollateralSwitch:      coin.CollateralSwitch,
+		})
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal account coins json: %v", err)
+	}
+	return string(encoded)
 }
 
 func nullableLivePositionDriverTime(value time.Time) driver.Value {

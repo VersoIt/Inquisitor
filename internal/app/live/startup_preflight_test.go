@@ -120,7 +120,8 @@ func TestServicePreflightLiveStartupChecksAccountReadiness(t *testing.T) {
 	reader := &fakeLiveAccountSnapshotReader{
 		snapshot: validLiveStartupAccountSnapshot(t, query, now.Add(-time.Second)),
 	}
-	service := liveStartupAccountService(now, reader, &fakeLiveKillSwitchRepository{}, validLiveStartupEnvironment())
+	journal := &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}}
+	service := liveStartupAccountService(now, reader, journal, &fakeLiveKillSwitchRepository{}, validLiveStartupEnvironment())
 
 	got, err := service.PreflightLiveStartup(context.Background(), mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 		req.ExpectedAccount = query
@@ -137,6 +138,9 @@ func TestServicePreflightLiveStartupChecksAccountReadiness(t *testing.T) {
 	if reader.calls != 1 || reader.query != query {
 		t.Fatalf("account reader mismatch: calls=%d query=%#v", reader.calls, reader.query)
 	}
+	if journal.calls != 1 || got.AccountSnapshotStats.Inserted != 1 || got.AccountSnapshotStats.Skipped != 0 {
+		t.Fatalf("account journal/stats mismatch: calls=%d result=%#v", journal.calls, got.AccountSnapshotStats)
+	}
 	if got.ExpectedAccount != query || got.AccountBaseCurrency != "USDT" || got.MaxAccountSnapshotAge != 5*time.Second {
 		t.Fatalf("account preflight metadata mismatch: %#v", got)
 	}
@@ -150,19 +154,25 @@ func TestServicePreflightLiveStartupRejectsUnsafeAccountReadinessTableDriven(t *
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	query := validLiveStartupAccountQuery()
 	readerErr := errors.New("bybit unavailable")
+	journalErr := errors.New("postgres unavailable")
 
 	tests := []struct {
-		name            string
-		reader          *fakeLiveAccountSnapshotReader
-		withReader      bool
-		withClock       bool
-		req             applive.PreflightLiveStartupRequest
-		wantErrSub      string
-		wantReaderCalls int
+		name             string
+		reader           *fakeLiveAccountSnapshotReader
+		journal          *fakeLiveAccountSnapshotJournal
+		withReader       bool
+		withJournal      bool
+		withClock        bool
+		req              applive.PreflightLiveStartupRequest
+		wantErrSub       string
+		wantReaderCalls  int
+		wantJournalCalls int
 	}{
 		{
-			name:      "missing account reader",
-			withClock: true,
+			name:        "missing account reader",
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
@@ -171,9 +181,23 @@ func TestServicePreflightLiveStartupRejectsUnsafeAccountReadinessTableDriven(t *
 			wantErrSub: "account snapshot reader",
 		},
 		{
-			name:       "missing clock",
+			name:       "missing account journal",
 			reader:     &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now)},
 			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub: "account snapshot journal",
+		},
+		{
+			name:        "missing clock",
+			reader:      &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now)},
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
@@ -216,10 +240,12 @@ func TestServicePreflightLiveStartupRejectsUnsafeAccountReadinessTableDriven(t *
 			wantErrSub: "max account snapshot age",
 		},
 		{
-			name:       "reader error",
-			reader:     &fakeLiveAccountSnapshotReader{err: readerErr},
-			withReader: true,
-			withClock:  true,
+			name:        "reader error",
+			reader:      &fakeLiveAccountSnapshotReader{err: readerErr},
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
@@ -229,90 +255,140 @@ func TestServicePreflightLiveStartupRejectsUnsafeAccountReadinessTableDriven(t *
 			wantReaderCalls: 1,
 		},
 		{
-			name:       "stale account snapshot",
-			reader:     &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now.Add(-10*time.Second))},
-			withReader: true,
-			withClock:  true,
-			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
-				req.ExpectedAccount = query
-				req.AccountBaseCurrency = "USDT"
-				req.MaxAccountSnapshotAge = time.Second
-			}),
-			wantErrSub:      "stale",
-			wantReaderCalls: 1,
-		},
-		{
-			name:       "future account snapshot",
-			reader:     &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now.Add(time.Second))},
-			withReader: true,
-			withClock:  true,
+			name:        "journal error",
+			reader:      &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now)},
+			journal:     &fakeLiveAccountSnapshotJournal{err: journalErr},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
 				req.MaxAccountSnapshotAge = 5 * time.Second
 			}),
-			wantErrSub:      "future",
-			wantReaderCalls: 1,
+			wantErrSub:       journalErr.Error(),
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
+		},
+		{
+			name:        "journal zero stats",
+			reader:      &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now)},
+			journal:     &fakeLiveAccountSnapshotJournal{},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:       "did not record",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
+		},
+		{
+			name:        "stale account snapshot",
+			reader:      &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now.Add(-10*time.Second))},
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = time.Second
+			}),
+			wantErrSub:       "stale",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
+		},
+		{
+			name:        "future account snapshot",
+			reader:      &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now.Add(time.Second))},
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:       "future",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
 		},
 		{
 			name: "over max equity",
 			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
 				s.TotalEquity = decimal.RequireFromString("101")
 			})},
-			withReader: true,
-			withClock:  true,
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
 				req.MaxAccountSnapshotAge = 5 * time.Second
 			}),
-			wantErrSub:      "exceeds",
-			wantReaderCalls: 1,
+			wantErrSub:       "exceeds",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
 		},
 		{
 			name: "zero total equity",
 			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
 				s.TotalEquity = decimal.Zero
 			})},
-			withReader: true,
-			withClock:  true,
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
 				req.MaxAccountSnapshotAge = 5 * time.Second
 			}),
-			wantErrSub:      "total equity",
-			wantReaderCalls: 1,
+			wantErrSub:       "total equity",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
 		},
 		{
 			name: "initial margin",
 			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
 				s.TotalInitialMargin = decimal.RequireFromString("1")
 			})},
-			withReader: true,
-			withClock:  true,
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
 				req.MaxAccountSnapshotAge = 5 * time.Second
 			}),
-			wantErrSub:      "initial margin",
-			wantReaderCalls: 1,
+			wantErrSub:       "initial margin",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
 		},
 		{
 			name: "perp upl",
 			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
 				s.TotalPerpUPL = decimal.RequireFromString("-0.01")
 			})},
-			withReader: true,
-			withClock:  true,
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
 				req.MaxAccountSnapshotAge = 5 * time.Second
 			}),
-			wantErrSub:      "perp UPL",
-			wantReaderCalls: 1,
+			wantErrSub:       "perp UPL",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
 		},
 		{
 			name: "non base asset",
@@ -324,45 +400,54 @@ func TestServicePreflightLiveStartupRejectsUnsafeAccountReadinessTableDriven(t *
 					WalletBalance: decimal.RequireFromString("0.001"),
 				})
 			})},
-			withReader: true,
-			withClock:  true,
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
 				req.MaxAccountSnapshotAge = 5 * time.Second
 			}),
-			wantErrSub:      "non-base asset",
-			wantReaderCalls: 1,
+			wantErrSub:       "non-base asset",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
 		},
 		{
 			name: "locked balance",
 			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
 				s.Coins[0].Locked = decimal.RequireFromString("1")
 			})},
-			withReader: true,
-			withClock:  true,
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
 				req.MaxAccountSnapshotAge = 5 * time.Second
 			}),
-			wantErrSub:      "locked",
-			wantReaderCalls: 1,
+			wantErrSub:       "locked",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
 		},
 		{
 			name: "borrow amount",
 			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
 				s.Coins[0].BorrowAmount = decimal.RequireFromString("1")
 			})},
-			withReader: true,
-			withClock:  true,
+			journal:     &fakeLiveAccountSnapshotJournal{stats: domainlive.AccountSnapshotStats{Inserted: 1}},
+			withReader:  true,
+			withJournal: true,
+			withClock:   true,
 			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
 				req.ExpectedAccount = query
 				req.AccountBaseCurrency = "USDT"
 				req.MaxAccountSnapshotAge = 5 * time.Second
 			}),
-			wantErrSub:      "borrow",
-			wantReaderCalls: 1,
+			wantErrSub:       "borrow",
+			wantReaderCalls:  1,
+			wantJournalCalls: 1,
 		},
 	}
 
@@ -374,6 +459,9 @@ func TestServicePreflightLiveStartupRejectsUnsafeAccountReadinessTableDriven(t *
 			}
 			if tt.withReader {
 				options = append(options, applive.WithAccountSnapshotReader(tt.reader))
+			}
+			if tt.withJournal {
+				options = append(options, applive.WithAccountSnapshotJournal(tt.journal))
 			}
 			if tt.withClock {
 				options = append(options, applive.WithClock(clock.FixedClock{Time: now}))
@@ -391,6 +479,9 @@ func TestServicePreflightLiveStartupRejectsUnsafeAccountReadinessTableDriven(t *
 			}
 			if tt.reader != nil && tt.reader.calls != tt.wantReaderCalls {
 				t.Fatalf("account reader calls mismatch: got %d want %d", tt.reader.calls, tt.wantReaderCalls)
+			}
+			if tt.journal != nil && tt.journal.calls != tt.wantJournalCalls {
+				t.Fatalf("account journal calls mismatch: got %d want %d", tt.journal.calls, tt.wantJournalCalls)
 			}
 		})
 	}
@@ -876,6 +967,7 @@ func liveStartupPositionService(
 func liveStartupAccountService(
 	now time.Time,
 	reader domainlive.AccountSnapshotReader,
+	journal domainlive.AccountSnapshotJournal,
 	killSwitch *fakeLiveKillSwitchRepository,
 	env applive.EnvironmentReader,
 ) *applive.Service {
@@ -883,6 +975,7 @@ func liveStartupAccountService(
 		applive.WithKillSwitchRepository(killSwitch),
 		applive.WithEnvironmentReader(env),
 		applive.WithAccountSnapshotReader(reader),
+		applive.WithAccountSnapshotJournal(journal),
 		applive.WithClock(clock.FixedClock{Time: now}),
 	)
 }
@@ -901,6 +994,22 @@ func (r *fakeLiveAccountSnapshotReader) GetAccountSnapshot(_ context.Context, qu
 		return domainlive.AccountSnapshot{}, r.err
 	}
 	return r.snapshot, nil
+}
+
+type fakeLiveAccountSnapshotJournal struct {
+	snapshot domainlive.AccountSnapshot
+	stats    domainlive.AccountSnapshotStats
+	calls    int
+	err      error
+}
+
+func (j *fakeLiveAccountSnapshotJournal) RecordAccountSnapshot(_ context.Context, snapshot domainlive.AccountSnapshot) (domainlive.AccountSnapshotStats, error) {
+	j.calls++
+	j.snapshot = snapshot
+	if j.err != nil {
+		return domainlive.AccountSnapshotStats{}, j.err
+	}
+	return j.stats, nil
 }
 
 func validLiveStartupAccountQuery() domainlive.AccountSnapshotQuery {

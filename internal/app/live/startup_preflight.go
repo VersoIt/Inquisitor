@@ -58,6 +58,7 @@ type PreflightLiveStartupResult struct {
 	AccountBaseCurrency        string
 	MaxAccountSnapshotAge      time.Duration
 	AccountSnapshot            domainlive.AccountSnapshot
+	AccountSnapshotStats       domainlive.AccountSnapshotStats
 	ExpectedFlatPositions      []domainlive.PositionSnapshotQuery
 	MaxPositionSnapshotAge     time.Duration
 	PositionSnapshots          []domainlive.PositionSnapshot
@@ -132,7 +133,7 @@ func (s *Service) PreflightLiveStartup(ctx context.Context, req PreflightLiveSta
 
 	result.WithdrawalPermissionDenied = !req.WithdrawalPermissionAllowed
 	if len(result.Problems) == 0 && liveAccountPreflightEnabled(req.ExpectedAccount) {
-		snapshot, problems, err := s.preflightExpectedLiveAccount(
+		snapshot, stats, problems, err := s.preflightExpectedLiveAccount(
 			ctx,
 			req.ExpectedAccount,
 			req.AccountBaseCurrency,
@@ -140,6 +141,7 @@ func (s *Service) PreflightLiveStartup(ctx context.Context, req PreflightLiveSta
 			req.MaxInitialLiveCapitalUSDT,
 		)
 		result.AccountSnapshot = snapshot
+		result.AccountSnapshotStats = stats
 		if err != nil {
 			return result, err
 		}
@@ -206,7 +208,7 @@ func (s *Service) preflightExpectedLiveAccount(
 	baseCurrency string,
 	maxAge time.Duration,
 	maxEquity decimal.Decimal,
-) (domainlive.AccountSnapshot, []string, error) {
+) (domainlive.AccountSnapshot, domainlive.AccountSnapshotStats, []string, error) {
 	var problems []string
 	if err := domainlive.ValidateAccountSnapshotQuery(query); err != nil {
 		problems = append(problems, err.Error())
@@ -222,26 +224,36 @@ func (s *Service) preflightExpectedLiveAccount(
 		problems = append(problems, "max account equity must be positive")
 	}
 	if len(problems) > 0 {
-		return domainlive.AccountSnapshot{}, problems, nil
+		return domainlive.AccountSnapshot{}, domainlive.AccountSnapshotStats{}, problems, nil
 	}
 
 	if s.accountReader == nil {
-		return domainlive.AccountSnapshot{}, nil, fmt.Errorf("live startup preflight requires account snapshot reader")
+		return domainlive.AccountSnapshot{}, domainlive.AccountSnapshotStats{}, nil, fmt.Errorf("live startup preflight requires account snapshot reader")
+	}
+	if s.accountJournal == nil {
+		return domainlive.AccountSnapshot{}, domainlive.AccountSnapshotStats{}, nil, fmt.Errorf("live startup preflight requires account snapshot journal")
 	}
 	if s.clock == nil {
-		return domainlive.AccountSnapshot{}, nil, fmt.Errorf("live startup preflight requires clock")
+		return domainlive.AccountSnapshot{}, domainlive.AccountSnapshotStats{}, nil, fmt.Errorf("live startup preflight requires clock")
 	}
 
 	snapshot, err := s.accountReader.GetAccountSnapshot(ctx, query)
 	if err != nil {
-		return domainlive.AccountSnapshot{}, problems, fmt.Errorf("read live startup account snapshot %q: %w", query.AccountType, err)
+		return domainlive.AccountSnapshot{}, domainlive.AccountSnapshotStats{}, problems, fmt.Errorf("read live startup account snapshot %q: %w", query.AccountType, err)
 	}
 	if err := ensureAccountSnapshotMatchesQuery(snapshot, query); err != nil {
-		return domainlive.AccountSnapshot{}, problems, err
+		return domainlive.AccountSnapshot{}, domainlive.AccountSnapshotStats{}, problems, err
+	}
+	stats, err := s.accountJournal.RecordAccountSnapshot(ctx, snapshot)
+	if err != nil {
+		return domainlive.AccountSnapshot{}, domainlive.AccountSnapshotStats{}, problems, fmt.Errorf("record live startup account snapshot %q: %w", snapshot.AccountType, err)
+	}
+	if stats.Total() == 0 {
+		return domainlive.AccountSnapshot{}, domainlive.AccountSnapshotStats{}, problems, fmt.Errorf("live startup account snapshot journal did not record %q", snapshot.AccountType)
 	}
 
 	problems = append(problems, validateStartupAccountReadiness(snapshot, normalizedBaseCurrency, maxEquity, s.clock.Now(), maxAge)...)
-	return snapshot, problems, nil
+	return snapshot, stats, problems, nil
 }
 
 func liveAccountPreflightEnabled(query domainlive.AccountSnapshotQuery) bool {

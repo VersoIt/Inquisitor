@@ -258,6 +258,43 @@ func TestLiveOrderJournalRepositoryIntegrationTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records live account snapshot",
+			run: func(t *testing.T) {
+				snapshot := testLiveAccountSnapshot(now.Add(6 * time.Second))
+				stats, err := repo.RecordAccountSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record live account snapshot: %v", err)
+				}
+				if stats.Inserted != 1 || stats.Skipped != 0 {
+					t.Fatalf("account snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "accepts exact idempotent live account snapshot",
+			run: func(t *testing.T) {
+				snapshot := testLiveAccountSnapshot(now.Add(6 * time.Second))
+				stats, err := repo.RecordAccountSnapshot(ctx, snapshot)
+				if err != nil {
+					t.Fatalf("record duplicate live account snapshot: %v", err)
+				}
+				if stats.Inserted != 0 || stats.Skipped != 1 {
+					t.Fatalf("account snapshot stats mismatch: %#v", stats)
+				}
+			},
+		},
+		{
+			name: "rejects conflicting live account snapshot",
+			run: func(t *testing.T) {
+				conflict := testLiveAccountSnapshot(now.Add(6 * time.Second))
+				conflict.TotalAvailableBalance = decimal.RequireFromString("49")
+				_, err := repo.RecordAccountSnapshot(ctx, conflict)
+				if err == nil || !strings.Contains(err.Error(), "different payload") {
+					t.Fatalf("expected conflict error, got %v", err)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -288,6 +325,15 @@ func testLiveRiskDecisionForSubmission(now time.Time, submission domainlive.Orde
 
 func cleanupLiveOrderJournal(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM live_account_snapshots
+		WHERE exchange = 'bybit'
+		  AND account_type = 'UNIFIED'
+		  AND observed_at >= '2026-07-19T12:00:00Z'::timestamptz
+		  AND observed_at < '2026-07-19T12:10:00Z'::timestamptz
+	`); err != nil {
+		t.Fatalf("cleanup live account snapshots: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `
 		DELETE FROM live_position_snapshots
 		WHERE exchange = 'bybit'

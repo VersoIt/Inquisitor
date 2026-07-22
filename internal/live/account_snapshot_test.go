@@ -115,6 +115,12 @@ func TestKnownAccountTypeCoversUnifiedAccount(t *testing.T) {
 	}
 }
 
+func TestAccountSnapshotStatsTotal(t *testing.T) {
+	if got := (live.AccountSnapshotStats{Inserted: 2, Skipped: 3}).Total(); got != 5 {
+		t.Fatalf("total mismatch: got %d", got)
+	}
+}
+
 func validAccountSnapshotQuery() live.AccountSnapshotQuery {
 	return live.AccountSnapshotQuery{
 		Exchange:    "bybit",

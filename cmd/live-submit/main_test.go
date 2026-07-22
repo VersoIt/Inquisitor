@@ -127,6 +127,8 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 	}
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_account_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO live_position_snapshots").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery("SELECT decision_id, intent_id, mode").
@@ -222,6 +224,7 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 		`"ready":true`,
 		`"account_type":"UNIFIED"`,
 		`"account_total_equity":"50"`,
+		`"account_snapshot_inserted":1`,
 		`"position_checks":1`,
 		`"position_snapshots":1`,
 		`"msg":"live order submit checked"`,
@@ -253,6 +256,8 @@ func TestRunLiveSubmitRequiresStatusReaderBeforeOrderSideEffects(t *testing.T) {
 	}
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_account_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO live_position_snapshots").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
@@ -306,6 +311,8 @@ func TestRunLiveSubmitRequiresPositionReaderBeforeOrderSideEffects(t *testing.T)
 	}
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_account_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO live_position_snapshots").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
@@ -359,6 +366,8 @@ func TestRunLiveSubmitBlocksOpenStartupPositionBeforeOrderSideEffects(t *testing
 	}
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_account_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO live_position_snapshots").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
@@ -416,6 +425,8 @@ func TestRunLiveSubmitBlocksUnsafeStartupAccountBeforeOrderSideEffects(t *testin
 	}
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_account_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	var executorCreated bool
 	preflightAccountReader := &fakeLiveSubmitPreflightAccountReader{

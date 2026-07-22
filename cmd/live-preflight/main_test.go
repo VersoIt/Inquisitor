@@ -103,6 +103,8 @@ func TestRunLivePreflightUsesConfigEnvAndKillSwitch(t *testing.T) {
 	}
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_account_snapshots").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO live_position_snapshots").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	accountReader := &fakeLivePreflightAccountReader{
@@ -148,6 +150,7 @@ func TestRunLivePreflightUsesConfigEnvAndKillSwitch(t *testing.T) {
 		`"api_secret_present":true`,
 		`"account_type":"UNIFIED"`,
 		`"account_total_equity":"50"`,
+		`"account_snapshot_inserted":1`,
 		`"position_checks":1`,
 		`"position_snapshots":1`,
 		`"position_snapshot_inserted":1`,

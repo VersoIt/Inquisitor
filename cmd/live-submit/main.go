@@ -124,7 +124,10 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 		if err != nil {
 			return fmt.Errorf("create live account reader for submit preflight: %w", err)
 		}
-		preflightOptions = append(preflightOptions, applive.WithAccountSnapshotReader(accountReader))
+		preflightOptions = append(preflightOptions,
+			applive.WithAccountSnapshotReader(accountReader),
+			applive.WithAccountSnapshotJournal(liveOrderJournal),
+		)
 	}
 	if len(preflightRequest.ExpectedFlatPositions) > 0 {
 		positionReader, err := deps.newPositionReader(cfg)
@@ -452,6 +455,8 @@ func logLiveSubmitPreflightResult(log *slog.Logger, result applive.PreflightLive
 		"account_total_maintenance_margin", result.AccountSnapshot.TotalMaintenanceMargin.String(),
 		"account_coin_count", len(result.AccountSnapshot.Coins),
 		"max_account_snapshot_age_ms", result.MaxAccountSnapshotAge.Milliseconds(),
+		"account_snapshot_inserted", result.AccountSnapshotStats.Inserted,
+		"account_snapshot_skipped", result.AccountSnapshotStats.Skipped,
 		"position_checks", len(result.ExpectedFlatPositions),
 		"position_symbols", liveSubmitPositionQuerySymbols(result.ExpectedFlatPositions),
 		"position_snapshots", len(result.PositionSnapshots),

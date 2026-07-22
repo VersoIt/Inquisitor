@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -151,6 +152,42 @@ func (r *LiveOrderJournalRepository) RecordPositionSnapshot(ctx context.Context,
 	return domainlive.PositionSnapshotStats{Skipped: 1}, nil
 }
 
+func (r *LiveOrderJournalRepository) RecordAccountSnapshot(ctx context.Context, snapshot domainlive.AccountSnapshot) (domainlive.AccountSnapshotStats, error) {
+	if err := domainlive.ValidateAccountSnapshot(snapshot); err != nil {
+		return domainlive.AccountSnapshotStats{}, err
+	}
+	args, err := liveAccountSnapshotSQLArgs(snapshot)
+	if err != nil {
+		return domainlive.AccountSnapshotStats{}, err
+	}
+	result, err := r.db.ExecContext(ctx, `
+		INSERT INTO live_account_snapshots (
+			exchange, account_type, total_equity, total_wallet_balance, total_margin_balance,
+			total_available_balance, total_perp_upl, total_initial_margin,
+			total_maintenance_margin, coins_json, observed_at
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, $8,
+			$9, $10::jsonb, $11
+		)
+		ON CONFLICT (exchange, account_type, observed_at) DO NOTHING
+	`, args...)
+	if err != nil {
+		return domainlive.AccountSnapshotStats{}, fmt.Errorf("insert live account snapshot %s: %w", snapshot.AccountType, err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return domainlive.AccountSnapshotStats{}, fmt.Errorf("read live account snapshot insert rows affected: %w", err)
+	}
+	if inserted == 1 {
+		return domainlive.AccountSnapshotStats{Inserted: 1}, nil
+	}
+	if err := r.assertExistingLiveAccountSnapshotMatches(ctx, args); err != nil {
+		return domainlive.AccountSnapshotStats{}, err
+	}
+	return domainlive.AccountSnapshotStats{Skipped: 1}, nil
+}
+
 func (r *LiveOrderJournalRepository) assertExistingLiveOrderSubmissionMatches(ctx context.Context, args []any) error {
 	var exists int
 	if err := r.db.QueryRowContext(ctx, `
@@ -280,6 +317,31 @@ func (r *LiveOrderJournalRepository) assertExistingLivePositionSnapshotMatches(c
 	return nil
 }
 
+func (r *LiveOrderJournalRepository) assertExistingLiveAccountSnapshotMatches(ctx context.Context, args []any) error {
+	var exists int
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT 1
+		FROM live_account_snapshots
+		WHERE exchange = $1
+		  AND account_type = $2
+		  AND total_equity = $3::numeric
+		  AND total_wallet_balance = $4::numeric
+		  AND total_margin_balance = $5::numeric
+		  AND total_available_balance = $6::numeric
+		  AND total_perp_upl = $7::numeric
+		  AND total_initial_margin = $8::numeric
+		  AND total_maintenance_margin = $9::numeric
+		  AND coins_json = $10::jsonb
+		  AND observed_at = $11
+	`, args...).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("live account snapshot %s already exists with different payload", args[1])
+		}
+		return fmt.Errorf("verify existing live account snapshot %s: %w", args[1], err)
+	}
+	return nil
+}
+
 func liveOrderSubmissionSQLArgs(submission domainlive.OrderSubmission) []any {
 	return []any{
 		submission.SubmissionID,
@@ -359,6 +421,72 @@ func livePositionSnapshotSQLArgs(snapshot domainlive.PositionSnapshot) []any {
 		nullableUTC(snapshot.ExchangeUpdatedAt),
 		snapshot.ObservedAt.UTC(),
 	}
+}
+
+func liveAccountSnapshotSQLArgs(snapshot domainlive.AccountSnapshot) ([]any, error) {
+	coinsJSON, err := liveAccountCoinsJSON(snapshot.Coins)
+	if err != nil {
+		return nil, err
+	}
+	return []any{
+		snapshot.Exchange,
+		string(snapshot.AccountType),
+		snapshot.TotalEquity.String(),
+		snapshot.TotalWalletBalance.String(),
+		snapshot.TotalMarginBalance.String(),
+		snapshot.TotalAvailableBalance.String(),
+		snapshot.TotalPerpUPL.String(),
+		snapshot.TotalInitialMargin.String(),
+		snapshot.TotalMaintenanceMargin.String(),
+		coinsJSON,
+		snapshot.ObservedAt.UTC(),
+	}, nil
+}
+
+type liveAccountCoinSQLPayload struct {
+	Coin                  string `json:"coin"`
+	Equity                string `json:"equity"`
+	USDValue              string `json:"usd_value"`
+	WalletBalance         string `json:"wallet_balance"`
+	Locked                string `json:"locked"`
+	BorrowAmount          string `json:"borrow_amount"`
+	AccruedInterest       string `json:"accrued_interest"`
+	TotalOrderIM          string `json:"total_order_im"`
+	TotalPositionIM       string `json:"total_position_im"`
+	TotalPositionMM       string `json:"total_position_mm"`
+	UnrealisedPnL         string `json:"unrealised_pnl"`
+	CumulativeRealisedPnL string `json:"cumulative_realised_pnl"`
+	SpotBorrow            string `json:"spot_borrow"`
+	MarginCollateral      bool   `json:"margin_collateral"`
+	CollateralSwitch      bool   `json:"collateral_switch"`
+}
+
+func liveAccountCoinsJSON(coins []domainlive.AccountCoinSnapshot) (string, error) {
+	payload := make([]liveAccountCoinSQLPayload, 0, len(coins))
+	for _, coin := range coins {
+		payload = append(payload, liveAccountCoinSQLPayload{
+			Coin:                  coin.Coin,
+			Equity:                coin.Equity.String(),
+			USDValue:              coin.USDValue.String(),
+			WalletBalance:         coin.WalletBalance.String(),
+			Locked:                coin.Locked.String(),
+			BorrowAmount:          coin.BorrowAmount.String(),
+			AccruedInterest:       coin.AccruedInterest.String(),
+			TotalOrderIM:          coin.TotalOrderIM.String(),
+			TotalPositionIM:       coin.TotalPositionIM.String(),
+			TotalPositionMM:       coin.TotalPositionMM.String(),
+			UnrealisedPnL:         coin.UnrealisedPnL.String(),
+			CumulativeRealisedPnL: coin.CumulativeRealisedPnL.String(),
+			SpotBorrow:            coin.SpotBorrow.String(),
+			MarginCollateral:      coin.MarginCollateral,
+			CollateralSwitch:      coin.CollateralSwitch,
+		})
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal live account coins json: %w", err)
+	}
+	return string(encoded), nil
 }
 
 func nullableUTC(value time.Time) any {
