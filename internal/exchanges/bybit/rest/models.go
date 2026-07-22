@@ -129,3 +129,37 @@ type positionListItem struct {
 	CreatedTime    string `json:"createdTime"`
 	UpdatedTime    string `json:"updatedTime"`
 }
+
+type walletBalanceResult struct {
+	List []walletBalanceAccount `json:"list"`
+}
+
+type walletBalanceAccount struct {
+	AccountType            string              `json:"accountType"`
+	TotalEquity            string              `json:"totalEquity"`
+	TotalWalletBalance     string              `json:"totalWalletBalance"`
+	TotalMarginBalance     string              `json:"totalMarginBalance"`
+	TotalAvailableBalance  string              `json:"totalAvailableBalance"`
+	TotalPerpUPL           string              `json:"totalPerpUPL"`
+	TotalInitialMargin     string              `json:"totalInitialMargin"`
+	TotalMaintenanceMargin string              `json:"totalMaintenanceMargin"`
+	Coin                   []walletBalanceCoin `json:"coin"`
+}
+
+type walletBalanceCoin struct {
+	Coin                  string `json:"coin"`
+	Equity                string `json:"equity"`
+	USDValue              string `json:"usdValue"`
+	WalletBalance         string `json:"walletBalance"`
+	Locked                string `json:"locked"`
+	BorrowAmount          string `json:"borrowAmount"`
+	AccruedInterest       string `json:"accruedInterest"`
+	TotalOrderIM          string `json:"totalOrderIM"`
+	TotalPositionIM       string `json:"totalPositionIM"`
+	TotalPositionMM       string `json:"totalPositionMM"`
+	UnrealisedPnL         string `json:"unrealisedPnl"`
+	CumulativeRealisedPnL string `json:"cumRealisedPnl"`
+	SpotBorrow            string `json:"spotBorrow"`
+	MarginCollateral      bool   `json:"marginCollateral"`
+	CollateralSwitch      bool   `json:"collateralSwitch"`
+}

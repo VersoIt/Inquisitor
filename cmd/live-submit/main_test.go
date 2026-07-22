@@ -147,6 +147,9 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 		t.Fatalf("identity: %v", err)
 	}
 	fakeExecutor := &fakeLiveSubmitExecutor{receivedAt: now.Add(time.Second)}
+	preflightAccountReader := &fakeLiveSubmitPreflightAccountReader{
+		snapshot: validLiveSubmitPreflightAccountSnapshot(t),
+	}
 	preflightPositionReader := &fakeLiveSubmitPreflightPositionReader{
 		snapshot: validLiveSubmitFlatPreflightPositionSnapshot(t),
 	}
@@ -167,6 +170,9 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 			}
 			return fakeExecutor, nil
 		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			return preflightAccountReader, nil
+		},
 		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
 			return preflightPositionReader, nil
 		},
@@ -180,6 +186,9 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 	}
 	if fakeExecutor.calls != 1 {
 		t.Fatalf("executor calls mismatch: got %d", fakeExecutor.calls)
+	}
+	if preflightAccountReader.calls != 1 || preflightAccountReader.query.AccountType != domainlive.AccountTypeUnified {
+		t.Fatalf("preflight account reader mismatch: calls=%d query=%#v", preflightAccountReader.calls, preflightAccountReader.query)
 	}
 	if preflightPositionReader.calls != 1 || preflightPositionReader.query.Symbol != "BTCUSDT" {
 		t.Fatalf("preflight position reader mismatch: calls=%d query=%#v", preflightPositionReader.calls, preflightPositionReader.query)
@@ -211,6 +220,8 @@ func TestRunLiveSubmitSubmitsPersistedDecisionThroughJournalAndExecutor(t *testi
 	for _, want := range []string{
 		`"msg":"live submit preflight checked"`,
 		`"ready":true`,
+		`"account_type":"UNIFIED"`,
+		`"account_total_equity":"50"`,
 		`"position_checks":1`,
 		`"position_snapshots":1`,
 		`"msg":"live order submit checked"`,
@@ -246,6 +257,9 @@ func TestRunLiveSubmitRequiresStatusReaderBeforeOrderSideEffects(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	executor := &fakeLiveSubmitSubmitOnlyExecutor{}
+	preflightAccountReader := &fakeLiveSubmitPreflightAccountReader{
+		snapshot: validLiveSubmitPreflightAccountSnapshot(t),
+	}
 	preflightPositionReader := &fakeLiveSubmitPreflightPositionReader{
 		snapshot: validLiveSubmitFlatPreflightPositionSnapshot(t),
 	}
@@ -261,6 +275,9 @@ func TestRunLiveSubmitRequiresStatusReaderBeforeOrderSideEffects(t *testing.T) {
 		},
 		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
 			return executor, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			return preflightAccountReader, nil
 		},
 		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
 			return preflightPositionReader, nil
@@ -293,6 +310,9 @@ func TestRunLiveSubmitRequiresPositionReaderBeforeOrderSideEffects(t *testing.T)
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	executor := &fakeLiveSubmitStatusOnlyExecutor{}
+	preflightAccountReader := &fakeLiveSubmitPreflightAccountReader{
+		snapshot: validLiveSubmitPreflightAccountSnapshot(t),
+	}
 	preflightPositionReader := &fakeLiveSubmitPreflightPositionReader{
 		snapshot: validLiveSubmitFlatPreflightPositionSnapshot(t),
 	}
@@ -308,6 +328,9 @@ func TestRunLiveSubmitRequiresPositionReaderBeforeOrderSideEffects(t *testing.T)
 		},
 		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
 			return executor, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			return preflightAccountReader, nil
 		},
 		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
 			return preflightPositionReader, nil
@@ -340,6 +363,9 @@ func TestRunLiveSubmitBlocksOpenStartupPositionBeforeOrderSideEffects(t *testing
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	var executorCreated bool
+	preflightAccountReader := &fakeLiveSubmitPreflightAccountReader{
+		snapshot: validLiveSubmitPreflightAccountSnapshot(t),
+	}
 	preflightPositionReader := &fakeLiveSubmitPreflightPositionReader{
 		snapshot: validLiveSubmitOpenPreflightPositionSnapshot(t),
 	}
@@ -356,6 +382,9 @@ func TestRunLiveSubmitBlocksOpenStartupPositionBeforeOrderSideEffects(t *testing
 		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
 			executorCreated = true
 			return &fakeLiveSubmitExecutor{}, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			return preflightAccountReader, nil
 		},
 		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
 			return preflightPositionReader, nil
@@ -376,6 +405,76 @@ func TestRunLiveSubmitBlocksOpenStartupPositionBeforeOrderSideEffects(t *testing
 	}
 }
 
+func TestRunLiveSubmitBlocksUnsafeStartupAccountBeforeOrderSideEffects(t *testing.T) {
+	t.Setenv("TRADING_LIVE_CONFIRM", "true")
+	t.Setenv("BYBIT_API_KEY", "actual-live-api-key-value")
+	t.Setenv("BYBIT_API_SECRET", "actual-live-api-secret-value")
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	mock.ExpectQuery("SELECT active, reason, source, created_at").
+		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+
+	var executorCreated bool
+	preflightAccountReader := &fakeLiveSubmitPreflightAccountReader{
+		snapshot: mutateLiveSubmitPreflightAccountSnapshot(validLiveSubmitPreflightAccountSnapshot(t), func(s *domainlive.AccountSnapshot) {
+			s.TotalEquity = decimal.RequireFromString("101")
+		}),
+	}
+	err = runLiveSubmit(context.Background(), []string{
+		"-config", writeLiveSubmitConfig(t),
+		"-decision-id", "risk_decision_live_cli_0001",
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+		"-execute",
+	}, liveSubmitDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
+			executorCreated = true
+			return &fakeLiveSubmitExecutor{}, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			return preflightAccountReader, nil
+		},
+		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
+			return &fakeLiveSubmitPreflightPositionReader{snapshot: validLiveSubmitFlatPreflightPositionSnapshot(t)}, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected account cap preflight error, got %v", err)
+	}
+	if executorCreated {
+		t.Fatal("order executor must not be created after failed startup account preflight")
+	}
+	if preflightAccountReader.calls != 1 {
+		t.Fatalf("account reader calls mismatch: got %d", preflightAccountReader.calls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+}
+
+type fakeLiveSubmitPreflightAccountReader struct {
+	query    domainlive.AccountSnapshotQuery
+	snapshot domainlive.AccountSnapshot
+	calls    int
+	err      error
+}
+
+func (r *fakeLiveSubmitPreflightAccountReader) GetAccountSnapshot(_ context.Context, query domainlive.AccountSnapshotQuery) (domainlive.AccountSnapshot, error) {
+	r.calls++
+	r.query = query
+	if r.err != nil {
+		return domainlive.AccountSnapshot{}, r.err
+	}
+	return r.snapshot, nil
+}
+
 type fakeLiveSubmitPreflightPositionReader struct {
 	query    domainlive.PositionSnapshotQuery
 	snapshot domainlive.PositionSnapshot
@@ -390,6 +489,40 @@ func (r *fakeLiveSubmitPreflightPositionReader) GetPositionSnapshot(_ context.Co
 		return domainlive.PositionSnapshot{}, r.err
 	}
 	return r.snapshot, nil
+}
+
+func validLiveSubmitPreflightAccountSnapshot(t *testing.T) domainlive.AccountSnapshot {
+	t.Helper()
+
+	snapshot, err := domainlive.NewAccountSnapshot(domainlive.AccountSnapshotInput{
+		Exchange:               "bybit",
+		AccountType:            domainlive.AccountTypeUnified,
+		TotalEquity:            decimal.RequireFromString("50"),
+		TotalWalletBalance:     decimal.RequireFromString("50"),
+		TotalMarginBalance:     decimal.RequireFromString("50"),
+		TotalAvailableBalance:  decimal.RequireFromString("50"),
+		TotalPerpUPL:           decimal.Zero,
+		TotalInitialMargin:     decimal.Zero,
+		TotalMaintenanceMargin: decimal.Zero,
+		Coins: []domainlive.AccountCoinSnapshot{{
+			Coin:             "USDT",
+			Equity:           decimal.RequireFromString("50"),
+			USDValue:         decimal.RequireFromString("50"),
+			WalletBalance:    decimal.RequireFromString("50"),
+			MarginCollateral: true,
+			CollateralSwitch: true,
+		}},
+		ObservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("new live submit preflight account snapshot: %v", err)
+	}
+	return snapshot
+}
+
+func mutateLiveSubmitPreflightAccountSnapshot(snapshot domainlive.AccountSnapshot, mutate func(*domainlive.AccountSnapshot)) domainlive.AccountSnapshot {
+	mutate(&snapshot)
+	return snapshot
 }
 
 type fakeLiveSubmitExecutor struct {

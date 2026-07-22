@@ -29,6 +29,9 @@ type PreflightLiveStartupRequest struct {
 	WithdrawalPermissionAllowed bool
 	InitialLiveCapitalUSDT      decimal.Decimal
 	MaxInitialLiveCapitalUSDT   decimal.Decimal
+	ExpectedAccount             domainlive.AccountSnapshotQuery
+	AccountBaseCurrency         string
+	MaxAccountSnapshotAge       time.Duration
 	ExpectedFlatPositions       []domainlive.PositionSnapshotQuery
 	MaxPositionSnapshotAge      time.Duration
 }
@@ -51,6 +54,10 @@ type PreflightLiveStartupResult struct {
 	KillSwitchActive           bool
 	KillSwitchReason           string
 	KillSwitchSource           string
+	ExpectedAccount            domainlive.AccountSnapshotQuery
+	AccountBaseCurrency        string
+	MaxAccountSnapshotAge      time.Duration
+	AccountSnapshot            domainlive.AccountSnapshot
 	ExpectedFlatPositions      []domainlive.PositionSnapshotQuery
 	MaxPositionSnapshotAge     time.Duration
 	PositionSnapshots          []domainlive.PositionSnapshot
@@ -91,6 +98,9 @@ func (s *Service) PreflightLiveStartup(ctx context.Context, req PreflightLiveSta
 		SubaccountConfirmed:       req.SubaccountConfirmed,
 		InitialLiveCapitalUSDT:    req.InitialLiveCapitalUSDT,
 		MaxInitialLiveCapitalUSDT: req.MaxInitialLiveCapitalUSDT,
+		ExpectedAccount:           req.ExpectedAccount,
+		AccountBaseCurrency:       strings.ToUpper(strings.TrimSpace(req.AccountBaseCurrency)),
+		MaxAccountSnapshotAge:     req.MaxAccountSnapshotAge,
 		ExpectedFlatPositions:     append([]domainlive.PositionSnapshotQuery(nil), req.ExpectedFlatPositions...),
 		MaxPositionSnapshotAge:    req.MaxPositionSnapshotAge,
 	}
@@ -121,6 +131,20 @@ func (s *Service) PreflightLiveStartup(ctx context.Context, req PreflightLiveSta
 	}
 
 	result.WithdrawalPermissionDenied = !req.WithdrawalPermissionAllowed
+	if len(result.Problems) == 0 && liveAccountPreflightEnabled(req.ExpectedAccount) {
+		snapshot, problems, err := s.preflightExpectedLiveAccount(
+			ctx,
+			req.ExpectedAccount,
+			req.AccountBaseCurrency,
+			req.MaxAccountSnapshotAge,
+			req.MaxInitialLiveCapitalUSDT,
+		)
+		result.AccountSnapshot = snapshot
+		if err != nil {
+			return result, err
+		}
+		result.Problems = append(result.Problems, problems...)
+	}
 	if len(result.Problems) == 0 && len(req.ExpectedFlatPositions) > 0 {
 		snapshots, stats, problems, err := s.preflightExpectedFlatLivePositions(ctx, req.ExpectedFlatPositions, req.MaxPositionSnapshotAge)
 		result.PositionSnapshots = snapshots
@@ -172,6 +196,138 @@ func validateLiveStartupPolicy(req PreflightLiveStartupRequest) []string {
 	}
 	if req.InitialLiveCapitalUSDT.GreaterThan(req.MaxInitialLiveCapitalUSDT) {
 		problems = append(problems, "initial live capital must not exceed max initial live capital")
+	}
+	return problems
+}
+
+func (s *Service) preflightExpectedLiveAccount(
+	ctx context.Context,
+	query domainlive.AccountSnapshotQuery,
+	baseCurrency string,
+	maxAge time.Duration,
+	maxEquity decimal.Decimal,
+) (domainlive.AccountSnapshot, []string, error) {
+	var problems []string
+	if err := domainlive.ValidateAccountSnapshotQuery(query); err != nil {
+		problems = append(problems, err.Error())
+	}
+	normalizedBaseCurrency := strings.ToUpper(strings.TrimSpace(baseCurrency))
+	if normalizedBaseCurrency == "" {
+		problems = append(problems, "account base currency is required")
+	}
+	if maxAge <= 0 {
+		problems = append(problems, "max account snapshot age must be positive")
+	}
+	if maxEquity.LessThanOrEqual(decimal.Zero) {
+		problems = append(problems, "max account equity must be positive")
+	}
+	if len(problems) > 0 {
+		return domainlive.AccountSnapshot{}, problems, nil
+	}
+
+	if s.accountReader == nil {
+		return domainlive.AccountSnapshot{}, nil, fmt.Errorf("live startup preflight requires account snapshot reader")
+	}
+	if s.clock == nil {
+		return domainlive.AccountSnapshot{}, nil, fmt.Errorf("live startup preflight requires clock")
+	}
+
+	snapshot, err := s.accountReader.GetAccountSnapshot(ctx, query)
+	if err != nil {
+		return domainlive.AccountSnapshot{}, problems, fmt.Errorf("read live startup account snapshot %q: %w", query.AccountType, err)
+	}
+	if err := ensureAccountSnapshotMatchesQuery(snapshot, query); err != nil {
+		return domainlive.AccountSnapshot{}, problems, err
+	}
+
+	problems = append(problems, validateStartupAccountReadiness(snapshot, normalizedBaseCurrency, maxEquity, s.clock.Now(), maxAge)...)
+	return snapshot, problems, nil
+}
+
+func liveAccountPreflightEnabled(query domainlive.AccountSnapshotQuery) bool {
+	return strings.TrimSpace(query.Exchange) != "" || strings.TrimSpace(string(query.AccountType)) != ""
+}
+
+func ensureAccountSnapshotMatchesQuery(snapshot domainlive.AccountSnapshot, query domainlive.AccountSnapshotQuery) error {
+	if err := domainlive.ValidateAccountSnapshot(snapshot); err != nil {
+		return err
+	}
+	if snapshot.Exchange != query.Exchange {
+		return fmt.Errorf("live startup account exchange %q does not match query %q", snapshot.Exchange, query.Exchange)
+	}
+	if snapshot.AccountType != query.AccountType {
+		return fmt.Errorf("live startup account type %q does not match query %q", snapshot.AccountType, query.AccountType)
+	}
+	return nil
+}
+
+func validateStartupAccountReadiness(
+	snapshot domainlive.AccountSnapshot,
+	baseCurrency string,
+	maxEquity decimal.Decimal,
+	now time.Time,
+	maxAge time.Duration,
+) []string {
+	var problems []string
+	age := now.Sub(snapshot.ObservedAt)
+	if age < 0 {
+		problems = append(problems, "live account snapshot observed_at must not be in the future")
+	}
+	if age > maxAge {
+		problems = append(problems, fmt.Sprintf("live account snapshot is stale: age=%s max=%s", age, maxAge))
+	}
+	if snapshot.TotalEquity.LessThanOrEqual(decimal.Zero) {
+		problems = append(problems, "live account total equity must be positive before startup")
+	}
+	if snapshot.TotalEquity.GreaterThan(maxEquity) {
+		problems = append(problems, fmt.Sprintf("live account total equity %s exceeds max %s", snapshot.TotalEquity, maxEquity))
+	}
+	if snapshot.TotalAvailableBalance.LessThanOrEqual(decimal.Zero) {
+		problems = append(problems, "live account total available balance must be positive before startup")
+	}
+	if !snapshot.TotalPerpUPL.IsZero() {
+		problems = append(problems, fmt.Sprintf("live account total perp UPL must be zero before startup: %s", snapshot.TotalPerpUPL))
+	}
+	if snapshot.TotalInitialMargin.IsPositive() {
+		problems = append(problems, fmt.Sprintf("live account initial margin must be zero before startup: %s", snapshot.TotalInitialMargin))
+	}
+	if snapshot.TotalMaintenanceMargin.IsPositive() {
+		problems = append(problems, fmt.Sprintf("live account maintenance margin must be zero before startup: %s", snapshot.TotalMaintenanceMargin))
+	}
+	if len(snapshot.Coins) == 0 {
+		problems = append(problems, "live account coin details are required before startup")
+	}
+	for _, coin := range snapshot.Coins {
+		problems = append(problems, validateStartupAccountCoinReadiness(coin, baseCurrency)...)
+	}
+	return problems
+}
+
+func validateStartupAccountCoinReadiness(coin domainlive.AccountCoinSnapshot, baseCurrency string) []string {
+	var problems []string
+	if coin.Coin != baseCurrency && (coin.Equity.IsPositive() || coin.USDValue.IsPositive() || coin.WalletBalance.IsPositive()) {
+		problems = append(problems, fmt.Sprintf("live account non-base asset %s must be zero before startup", coin.Coin))
+	}
+	if coin.Locked.IsPositive() {
+		problems = append(problems, fmt.Sprintf("live account %s locked balance must be zero before startup: %s", coin.Coin, coin.Locked))
+	}
+	if coin.BorrowAmount.IsPositive() {
+		problems = append(problems, fmt.Sprintf("live account %s borrow amount must be zero before startup: %s", coin.Coin, coin.BorrowAmount))
+	}
+	if coin.AccruedInterest.IsPositive() {
+		problems = append(problems, fmt.Sprintf("live account %s accrued interest must be zero before startup: %s", coin.Coin, coin.AccruedInterest))
+	}
+	if coin.TotalOrderIM.IsPositive() {
+		problems = append(problems, fmt.Sprintf("live account %s order initial margin must be zero before startup: %s", coin.Coin, coin.TotalOrderIM))
+	}
+	if coin.TotalPositionIM.IsPositive() {
+		problems = append(problems, fmt.Sprintf("live account %s position initial margin must be zero before startup: %s", coin.Coin, coin.TotalPositionIM))
+	}
+	if coin.TotalPositionMM.IsPositive() {
+		problems = append(problems, fmt.Sprintf("live account %s position maintenance margin must be zero before startup: %s", coin.Coin, coin.TotalPositionMM))
+	}
+	if coin.SpotBorrow.IsPositive() {
+		problems = append(problems, fmt.Sprintf("live account %s spot borrow must be zero before startup: %s", coin.Coin, coin.SpotBorrow))
 	}
 	return problems
 }

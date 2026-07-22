@@ -203,6 +203,36 @@ func (c *Client) GetPositionSnapshot(ctx context.Context, query domainlive.Posit
 	return c.mapPositionSnapshot(query, result.Category, result.List[0])
 }
 
+func (c *Client) GetAccountSnapshot(ctx context.Context, query domainlive.AccountSnapshotQuery) (domainlive.AccountSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+	if c == nil {
+		return domainlive.AccountSnapshot{}, fmt.Errorf("bybit client is required")
+	}
+	if err := domainlive.ValidateAccountSnapshotQuery(query); err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+	if query.Exchange != exchangeName {
+		return domainlive.AccountSnapshot{}, fmt.Errorf("bybit account snapshot requires exchange %q", exchangeName)
+	}
+
+	values := url.Values{}
+	values.Set("accountType", string(query.AccountType))
+
+	var result walletBalanceResult
+	if err := c.getAuthenticated(ctx, "/v5/account/wallet-balance", values, &result); err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+	if len(result.List) == 0 {
+		return domainlive.AccountSnapshot{}, fmt.Errorf("bybit account snapshot not found for accountType %q", query.AccountType)
+	}
+	if len(result.List) > 1 {
+		return domainlive.AccountSnapshot{}, fmt.Errorf("bybit account snapshot for accountType %q is not unique", query.AccountType)
+	}
+	return c.mapAccountSnapshot(query, result.List[0])
+}
+
 func (c *Client) GetServerTime(ctx context.Context) (time.Time, error) {
 	var result serverTimeResult
 	if err := c.get(ctx, "/v5/market/time", nil, &result); err != nil {
@@ -787,6 +817,129 @@ func (c *Client) mapPositionSnapshot(query domainlive.PositionSnapshotQuery, cat
 		ExchangeUpdatedAt:     exchangeUpdatedAt,
 		ObservedAt:            c.now(),
 	})
+}
+
+func (c *Client) mapAccountSnapshot(query domainlive.AccountSnapshotQuery, item walletBalanceAccount) (domainlive.AccountSnapshot, error) {
+	totalEquity, err := parseOptionalDecimal("totalEquity", item.TotalEquity)
+	if err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+	totalWalletBalance, err := parseOptionalDecimal("totalWalletBalance", item.TotalWalletBalance)
+	if err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+	totalMarginBalance, err := parseOptionalDecimal("totalMarginBalance", item.TotalMarginBalance)
+	if err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+	totalAvailableBalance, err := parseOptionalDecimal("totalAvailableBalance", item.TotalAvailableBalance)
+	if err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+	totalPerpUPL, err := parseOptionalDecimal("totalPerpUPL", item.TotalPerpUPL)
+	if err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+	totalInitialMargin, err := parseOptionalDecimal("totalInitialMargin", item.TotalInitialMargin)
+	if err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+	totalMaintenanceMargin, err := parseOptionalDecimal("totalMaintenanceMargin", item.TotalMaintenanceMargin)
+	if err != nil {
+		return domainlive.AccountSnapshot{}, err
+	}
+
+	coins := make([]domainlive.AccountCoinSnapshot, 0, len(item.Coin))
+	for _, coin := range item.Coin {
+		snapshot, err := mapWalletBalanceCoin(coin)
+		if err != nil {
+			return domainlive.AccountSnapshot{}, err
+		}
+		coins = append(coins, snapshot)
+	}
+
+	return domainlive.NewAccountSnapshot(domainlive.AccountSnapshotInput{
+		Exchange:               exchangeName,
+		AccountType:            domainlive.AccountType(firstNonEmpty(item.AccountType, string(query.AccountType))),
+		TotalEquity:            totalEquity,
+		TotalWalletBalance:     totalWalletBalance,
+		TotalMarginBalance:     totalMarginBalance,
+		TotalAvailableBalance:  totalAvailableBalance,
+		TotalPerpUPL:           totalPerpUPL,
+		TotalInitialMargin:     totalInitialMargin,
+		TotalMaintenanceMargin: totalMaintenanceMargin,
+		Coins:                  coins,
+		ObservedAt:             c.now(),
+	})
+}
+
+func mapWalletBalanceCoin(item walletBalanceCoin) (domainlive.AccountCoinSnapshot, error) {
+	equity, err := parseOptionalDecimal("coin.equity", item.Equity)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	usdValue, err := parseOptionalDecimal("coin.usdValue", item.USDValue)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	walletBalance, err := parseOptionalDecimal("coin.walletBalance", item.WalletBalance)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	locked, err := parseOptionalDecimal("coin.locked", item.Locked)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	borrowAmount, err := parseOptionalDecimal("coin.borrowAmount", item.BorrowAmount)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	accruedInterest, err := parseOptionalDecimal("coin.accruedInterest", item.AccruedInterest)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	totalOrderIM, err := parseOptionalDecimal("coin.totalOrderIM", item.TotalOrderIM)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	totalPositionIM, err := parseOptionalDecimal("coin.totalPositionIM", item.TotalPositionIM)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	totalPositionMM, err := parseOptionalDecimal("coin.totalPositionMM", item.TotalPositionMM)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	unrealisedPnL, err := parseOptionalDecimal("coin.unrealisedPnl", item.UnrealisedPnL)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	cumulativeRealisedPnL, err := parseOptionalDecimal("coin.cumRealisedPnl", item.CumulativeRealisedPnL)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+	spotBorrow, err := parseOptionalDecimal("coin.spotBorrow", item.SpotBorrow)
+	if err != nil {
+		return domainlive.AccountCoinSnapshot{}, err
+	}
+
+	return domainlive.AccountCoinSnapshot{
+		Coin:                  item.Coin,
+		Equity:                equity,
+		USDValue:              usdValue,
+		WalletBalance:         walletBalance,
+		Locked:                locked,
+		BorrowAmount:          borrowAmount,
+		AccruedInterest:       accruedInterest,
+		TotalOrderIM:          totalOrderIM,
+		TotalPositionIM:       totalPositionIM,
+		TotalPositionMM:       totalPositionMM,
+		UnrealisedPnL:         unrealisedPnL,
+		CumulativeRealisedPnL: cumulativeRealisedPnL,
+		SpotBorrow:            spotBorrow,
+		MarginCollateral:      item.MarginCollateral,
+		CollateralSwitch:      item.CollateralSwitch,
+	}, nil
 }
 
 func mapInstrument(category string, item instrumentInfo) (marketdata.Instrument, error) {

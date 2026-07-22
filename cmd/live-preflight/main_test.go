@@ -40,6 +40,12 @@ func TestLiveStartupRequestFromConfigMapsSafetyFields(t *testing.T) {
 		WithdrawalPermissionAllowed: false,
 		InitialLiveCapitalUSDT:      decimal.RequireFromString("50.25"),
 		MaxInitialLiveCapitalUSDT:   maxCapital,
+		ExpectedAccount: domainlive.AccountSnapshotQuery{
+			Exchange:    "bybit",
+			AccountType: domainlive.AccountTypeUnified,
+		},
+		AccountBaseCurrency:   "USDT",
+		MaxAccountSnapshotAge: defaultMaxAccountSnapshotAge,
 		ExpectedFlatPositions: []domainlive.PositionSnapshotQuery{{
 			Exchange: "bybit",
 			Category: "linear",
@@ -99,6 +105,9 @@ func TestRunLivePreflightUsesConfigEnvAndKillSwitch(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
 	mock.ExpectExec("INSERT INTO live_position_snapshots").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	accountReader := &fakeLivePreflightAccountReader{
+		snapshot: validLivePreflightAccountSnapshot(t),
+	}
 	positionReader := &fakeLivePreflightPositionReader{
 		snapshot: validLivePreflightFlatPositionSnapshot(t, domainlive.PositionSnapshotQuery{
 			Exchange: "bybit",
@@ -115,6 +124,9 @@ func TestRunLivePreflightUsesConfigEnvAndKillSwitch(t *testing.T) {
 	}, livePreflightDependencies{
 		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
 			return db, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			return accountReader, nil
 		},
 		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
 			return positionReader, nil
@@ -134,6 +146,8 @@ func TestRunLivePreflightUsesConfigEnvAndKillSwitch(t *testing.T) {
 		`"ready":true`,
 		`"api_key_present":true`,
 		`"api_secret_present":true`,
+		`"account_type":"UNIFIED"`,
+		`"account_total_equity":"50"`,
 		`"position_checks":1`,
 		`"position_snapshots":1`,
 		`"position_snapshot_inserted":1`,
@@ -142,6 +156,9 @@ func TestRunLivePreflightUsesConfigEnvAndKillSwitch(t *testing.T) {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
 		}
+	}
+	if accountReader.calls != 1 || accountReader.query.AccountType != domainlive.AccountTypeUnified {
+		t.Fatalf("account reader mismatch: calls=%d query=%#v", accountReader.calls, accountReader.query)
 	}
 	if positionReader.calls != 1 || positionReader.query.Symbol != "BTCUSDT" {
 		t.Fatalf("position reader mismatch: calls=%d query=%#v", positionReader.calls, positionReader.query)
@@ -205,9 +222,10 @@ func safeLivePreflightConfig() config.Config {
 			Symbols:     []string{"BTCUSDT"},
 		},
 		Trading: config.TradingConfig{
-			Enabled:   true,
-			Mode:      "live",
-			AllowLive: true,
+			Enabled:      true,
+			Mode:         "live",
+			AllowLive:    true,
+			BaseCurrency: "USDT",
 		},
 		Live: config.LiveConfig{
 			RequireEnvConfirmation:      true,
@@ -334,6 +352,15 @@ func assertLivePreflightRequest(t *testing.T, got applive.PreflightLiveStartupRe
 	if !got.MaxInitialLiveCapitalUSDT.Equal(want.MaxInitialLiveCapitalUSDT) {
 		t.Fatalf("max capital mismatch: got %s, want %s", got.MaxInitialLiveCapitalUSDT, want.MaxInitialLiveCapitalUSDT)
 	}
+	if got.ExpectedAccount != want.ExpectedAccount {
+		t.Fatalf("account query mismatch: got %#v, want %#v", got.ExpectedAccount, want.ExpectedAccount)
+	}
+	if got.AccountBaseCurrency != want.AccountBaseCurrency {
+		t.Fatalf("account base currency mismatch: got %q, want %q", got.AccountBaseCurrency, want.AccountBaseCurrency)
+	}
+	if got.MaxAccountSnapshotAge != want.MaxAccountSnapshotAge {
+		t.Fatalf("max account snapshot age mismatch: got %s, want %s", got.MaxAccountSnapshotAge, want.MaxAccountSnapshotAge)
+	}
 	if got.MaxPositionSnapshotAge != want.MaxPositionSnapshotAge {
 		t.Fatalf("max position snapshot age mismatch: got %s, want %s", got.MaxPositionSnapshotAge, want.MaxPositionSnapshotAge)
 	}
@@ -345,6 +372,22 @@ func assertLivePreflightRequest(t *testing.T, got applive.PreflightLiveStartupRe
 			t.Fatalf("position query[%d] mismatch: got %#v, want %#v", index, got.ExpectedFlatPositions[index], want.ExpectedFlatPositions[index])
 		}
 	}
+}
+
+type fakeLivePreflightAccountReader struct {
+	query    domainlive.AccountSnapshotQuery
+	snapshot domainlive.AccountSnapshot
+	calls    int
+	err      error
+}
+
+func (r *fakeLivePreflightAccountReader) GetAccountSnapshot(_ context.Context, query domainlive.AccountSnapshotQuery) (domainlive.AccountSnapshot, error) {
+	r.calls++
+	r.query = query
+	if r.err != nil {
+		return domainlive.AccountSnapshot{}, r.err
+	}
+	return r.snapshot, nil
 }
 
 type fakeLivePreflightPositionReader struct {
@@ -361,6 +404,35 @@ func (r *fakeLivePreflightPositionReader) GetPositionSnapshot(_ context.Context,
 		return domainlive.PositionSnapshot{}, r.err
 	}
 	return r.snapshot, nil
+}
+
+func validLivePreflightAccountSnapshot(t *testing.T) domainlive.AccountSnapshot {
+	t.Helper()
+
+	snapshot, err := domainlive.NewAccountSnapshot(domainlive.AccountSnapshotInput{
+		Exchange:               "bybit",
+		AccountType:            domainlive.AccountTypeUnified,
+		TotalEquity:            decimal.RequireFromString("50"),
+		TotalWalletBalance:     decimal.RequireFromString("50"),
+		TotalMarginBalance:     decimal.RequireFromString("50"),
+		TotalAvailableBalance:  decimal.RequireFromString("50"),
+		TotalPerpUPL:           decimal.Zero,
+		TotalInitialMargin:     decimal.Zero,
+		TotalMaintenanceMargin: decimal.Zero,
+		Coins: []domainlive.AccountCoinSnapshot{{
+			Coin:             "USDT",
+			Equity:           decimal.RequireFromString("50"),
+			USDValue:         decimal.RequireFromString("50"),
+			WalletBalance:    decimal.RequireFromString("50"),
+			MarginCollateral: true,
+			CollateralSwitch: true,
+		}},
+		ObservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("new live preflight account snapshot: %v", err)
+	}
+	return snapshot
 }
 
 func validLivePreflightFlatPositionSnapshot(t *testing.T, query domainlive.PositionSnapshotQuery) domainlive.PositionSnapshot {

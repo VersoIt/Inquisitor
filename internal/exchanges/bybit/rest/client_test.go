@@ -1026,6 +1026,207 @@ func TestGetPositionSnapshotRejectsUnsafeExchangePayloadsTableDriven(t *testing.
 	}
 }
 
+func TestGetAccountSnapshotSignsAuthenticatedQueryAndMapsUnifiedWalletBalance(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		if r.Method != http.MethodGet || r.URL.Path != "/v5/account/wallet-balance" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		if r.URL.Query().Get("accountType") != "UNIFIED" {
+			t.Fatalf("query mismatch: %s", r.URL.RawQuery)
+		}
+		timestamp := r.Header.Get("X-BAPI-TIMESTAMP")
+		recvWindow := r.Header.Get("X-BAPI-RECV-WINDOW")
+		if timestamp != "1784721600000" || recvWindow != "5000" {
+			t.Fatalf("timestamp/recv window mismatch: timestamp=%q recv=%q", timestamp, recvWindow)
+		}
+		wantSignature := testBybitHMAC("api-secret", timestamp+"api-key"+recvWindow+r.URL.RawQuery)
+		if r.Header.Get("X-BAPI-SIGN") != wantSignature {
+			t.Fatalf("signature mismatch: got %q want %q query=%s", r.Header.Get("X-BAPI-SIGN"), wantSignature, r.URL.RawQuery)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"retCode":0,
+			"retMsg":"OK",
+			"result":{
+				"list":[{
+					"accountType":"UNIFIED",
+					"totalEquity":"50.25",
+					"totalWalletBalance":"50.25",
+					"totalMarginBalance":"50.25",
+					"totalAvailableBalance":"50.25",
+					"totalPerpUPL":"0",
+					"totalInitialMargin":"0",
+					"totalMaintenanceMargin":"0",
+					"coin":[{
+						"coin":"USDT",
+						"equity":"50.25",
+						"usdValue":"50.25",
+						"walletBalance":"50.25",
+						"locked":"0",
+						"borrowAmount":"0",
+						"accruedInterest":"0",
+						"totalOrderIM":"0",
+						"totalPositionIM":"0",
+						"totalPositionMM":"0",
+						"unrealisedPnl":"0",
+						"cumRealisedPnl":"0",
+						"spotBorrow":"0",
+						"marginCollateral":true,
+						"collateralSwitch":true
+					}]
+				}]
+			},
+			"time":1784721600000
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := rest.New(
+		server.URL,
+		rest.WithHMACAuth("api-key", "api-secret"),
+		rest.WithClock(func() time.Time { return now }),
+		rest.WithRetry(0, time.Nanosecond),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	got, err := client.GetAccountSnapshot(context.Background(), domainlive.AccountSnapshotQuery{
+		Exchange:    "bybit",
+		AccountType: domainlive.AccountTypeUnified,
+	})
+	if err != nil {
+		t.Fatalf("get account snapshot: %v", err)
+	}
+	if !sawRequest {
+		t.Fatal("expected mock server to receive account request")
+	}
+	if got.Exchange != "bybit" ||
+		got.AccountType != domainlive.AccountTypeUnified ||
+		!got.TotalEquity.Equal(decimal.RequireFromString("50.25")) ||
+		!got.TotalAvailableBalance.Equal(decimal.RequireFromString("50.25")) ||
+		got.ObservedAt != now ||
+		len(got.Coins) != 1 ||
+		got.Coins[0].Coin != "USDT" ||
+		!got.Coins[0].WalletBalance.Equal(decimal.RequireFromString("50.25")) ||
+		!got.Coins[0].MarginCollateral ||
+		!got.Coins[0].CollateralSwitch {
+		t.Fatalf("account snapshot mismatch: %#v", got)
+	}
+}
+
+func TestGetAccountSnapshotRejectsMissingCredentialsBeforeHTTPRequest(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+	}))
+	defer server.Close()
+
+	client, err := rest.New(server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.GetAccountSnapshot(context.Background(), domainlive.AccountSnapshotQuery{
+		Exchange:    "bybit",
+		AccountType: domainlive.AccountTypeUnified,
+	})
+	if err == nil || !strings.Contains(err.Error(), "API key") {
+		t.Fatalf("expected missing credentials error, got %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("missing credentials must block before HTTP request, got calls=%d", calls)
+	}
+}
+
+func TestGetAccountSnapshotRejectsUnsafeExchangePayloadsTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		resultJSON string
+		wantErrSub string
+	}{
+		{
+			name:       "not found",
+			resultJSON: `{"list":[]}`,
+			wantErrSub: "not found",
+		},
+		{
+			name: "multiple rows",
+			resultJSON: `{"list":[
+				{"accountType":"UNIFIED","totalEquity":"50","totalInitialMargin":"0","totalMaintenanceMargin":"0"},
+				{"accountType":"UNIFIED","totalEquity":"50","totalInitialMargin":"0","totalMaintenanceMargin":"0"}
+			]}`,
+			wantErrSub: "not unique",
+		},
+		{
+			name: "unsupported account type",
+			resultJSON: `{"list":[{
+				"accountType":"SPOT",
+				"totalEquity":"50",
+				"totalInitialMargin":"0",
+				"totalMaintenanceMargin":"0"
+			}]}`,
+			wantErrSub: "account_type",
+		},
+		{
+			name: "bad total equity decimal",
+			resultJSON: `{"list":[{
+				"accountType":"UNIFIED",
+				"totalEquity":"nope",
+				"totalInitialMargin":"0",
+				"totalMaintenanceMargin":"0"
+			}]}`,
+			wantErrSub: "totalEquity",
+		},
+		{
+			name: "negative borrow amount",
+			resultJSON: `{"list":[{
+				"accountType":"UNIFIED",
+				"totalEquity":"50",
+				"totalInitialMargin":"0",
+				"totalMaintenanceMargin":"0",
+				"coin":[{
+					"coin":"USDT",
+					"borrowAmount":"-1"
+				}]
+			}]}`,
+			wantErrSub: "borrow_amount",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"retCode":0,"retMsg":"OK","result":` + tt.resultJSON + `,"time":1784721600000}`))
+			}))
+			defer server.Close()
+
+			client, err := rest.New(
+				server.URL,
+				rest.WithHMACAuth("api-key", "api-secret"),
+				rest.WithClock(func() time.Time { return time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC) }),
+				rest.WithRetry(0, time.Nanosecond),
+			)
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+
+			_, err = client.GetAccountSnapshot(context.Background(), domainlive.AccountSnapshotQuery{
+				Exchange:    "bybit",
+				AccountType: domainlive.AccountTypeUnified,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
+	}
+}
+
 func TestGetKlinesRejectsMalformedKlineRows(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

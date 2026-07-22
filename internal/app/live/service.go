@@ -18,6 +18,7 @@ type Service struct {
 	statusJournal   domainlive.OrderStatusJournal
 	positionReader  domainlive.PositionSnapshotReader
 	positionJournal domainlive.PositionSnapshotJournal
+	accountReader   domainlive.AccountSnapshotReader
 	journal         domainlive.OrderJournal
 	killSwitch      domainrisk.KillSwitchRepository
 	riskDecisions   RiskDecisionReader
@@ -83,6 +84,12 @@ func WithPositionSnapshotReader(reader domainlive.PositionSnapshotReader) Option
 func WithPositionSnapshotJournal(journal domainlive.PositionSnapshotJournal) Option {
 	return func(service *Service) {
 		service.positionJournal = journal
+	}
+}
+
+func WithAccountSnapshotReader(reader domainlive.AccountSnapshotReader) Option {
+	return func(service *Service) {
+		service.accountReader = reader
 	}
 }
 

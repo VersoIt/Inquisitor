@@ -26,8 +26,11 @@ const defaultMaxInitialLiveCapitalUSDT = "100"
 
 const defaultMaxPositionSnapshotAge = 5 * time.Second
 
+const defaultMaxAccountSnapshotAge = 5 * time.Second
+
 type livePreflightDependencies struct {
 	openDB            func(context.Context, config.DatabaseConfig) (*sql.DB, error)
+	newAccountReader  func(*config.Config) (domainlive.AccountSnapshotReader, error)
 	newPositionReader func(*config.Config) (domainlive.PositionSnapshotReader, error)
 	output            io.Writer
 }
@@ -84,6 +87,13 @@ func runLivePreflight(ctx context.Context, args []string, deps livePreflightDepe
 	serviceOptions := []applive.Option{
 		applive.WithKillSwitchRepository(postgres.NewRiskKillSwitchRepository(db)),
 	}
+	if liveStartupAccountPreflightEnabled(request.ExpectedAccount) {
+		accountReader, err := deps.newAccountReader(cfg)
+		if err != nil {
+			return fmt.Errorf("create live account reader for startup preflight: %w", err)
+		}
+		serviceOptions = append(serviceOptions, applive.WithAccountSnapshotReader(accountReader))
+	}
 	if len(request.ExpectedFlatPositions) > 0 {
 		positionReader, err := deps.newPositionReader(cfg)
 		if err != nil {
@@ -109,6 +119,9 @@ func (deps livePreflightDependencies) withDefaults() livePreflightDependencies {
 	if deps.openDB == nil {
 		deps.openDB = postgres.Open
 	}
+	if deps.newAccountReader == nil {
+		deps.newAccountReader = newBybitLiveAccountReader
+	}
 	if deps.newPositionReader == nil {
 		deps.newPositionReader = newBybitLivePositionReader
 	}
@@ -116,6 +129,18 @@ func (deps livePreflightDependencies) withDefaults() livePreflightDependencies {
 		deps.output = os.Stdout
 	}
 	return deps
+}
+
+func newBybitLiveAccountReader(cfg *config.Config) (domainlive.AccountSnapshotReader, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	apiKey := lookupEnvValue(cfg.Live.APIKeyEnv)
+	apiSecret := lookupEnvValue(cfg.Live.APISecretEnv)
+	return bybitrest.New(
+		cfg.Exchange.RestBaseURL,
+		bybitrest.WithHMACAuth(apiKey, apiSecret),
+	)
 }
 
 func newBybitLivePositionReader(cfg *config.Config) (domainlive.PositionSnapshotReader, error) {
@@ -151,9 +176,26 @@ func liveStartupRequestFromConfig(cfg *config.Config, subaccountConfirmed bool, 
 		WithdrawalPermissionAllowed: cfg.Live.WithdrawalPermissionAllowed,
 		InitialLiveCapitalUSDT:      initialCapital,
 		MaxInitialLiveCapitalUSDT:   maxInitialCapital,
+		ExpectedAccount:             liveStartupExpectedAccountFromConfig(cfg),
+		AccountBaseCurrency:         cfg.Trading.BaseCurrency,
+		MaxAccountSnapshotAge:       defaultMaxAccountSnapshotAge,
 		ExpectedFlatPositions:       liveStartupExpectedFlatPositionsFromConfig(cfg),
 		MaxPositionSnapshotAge:      defaultMaxPositionSnapshotAge,
 	}, nil
+}
+
+func liveStartupExpectedAccountFromConfig(cfg *config.Config) domainlive.AccountSnapshotQuery {
+	if cfg == nil {
+		return domainlive.AccountSnapshotQuery{}
+	}
+	return domainlive.AccountSnapshotQuery{
+		Exchange:    strings.ToLower(strings.TrimSpace(cfg.Exchange.Primary)),
+		AccountType: domainlive.AccountTypeUnified,
+	}
+}
+
+func liveStartupAccountPreflightEnabled(query domainlive.AccountSnapshotQuery) bool {
+	return strings.TrimSpace(query.Exchange) != "" || strings.TrimSpace(string(query.AccountType)) != ""
 }
 
 func liveStartupExpectedFlatPositionsFromConfig(cfg *config.Config) []domainlive.PositionSnapshotQuery {
@@ -219,6 +261,16 @@ func logLiveStartupPreflightResult(log *slog.Logger, result applive.PreflightLiv
 		"kill_switch_active", result.KillSwitchActive,
 		"kill_switch_reason", result.KillSwitchReason,
 		"kill_switch_source", result.KillSwitchSource,
+		"account_exchange", result.ExpectedAccount.Exchange,
+		"account_type", result.ExpectedAccount.AccountType,
+		"account_base_currency", result.AccountBaseCurrency,
+		"account_snapshot_present", result.AccountSnapshot.Exchange != "",
+		"account_total_equity", result.AccountSnapshot.TotalEquity.String(),
+		"account_total_available_balance", result.AccountSnapshot.TotalAvailableBalance.String(),
+		"account_total_initial_margin", result.AccountSnapshot.TotalInitialMargin.String(),
+		"account_total_maintenance_margin", result.AccountSnapshot.TotalMaintenanceMargin.String(),
+		"account_coin_count", len(result.AccountSnapshot.Coins),
+		"max_account_snapshot_age_ms", result.MaxAccountSnapshotAge.Milliseconds(),
 		"position_checks", len(result.ExpectedFlatPositions),
 		"position_symbols", liveStartupPositionQuerySymbols(result.ExpectedFlatPositions),
 		"position_snapshots", len(result.PositionSnapshots),

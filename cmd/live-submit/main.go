@@ -28,6 +28,8 @@ const defaultMaxInitialLiveCapitalUSDT = "100"
 
 const defaultMaxPositionSnapshotAge = 5 * time.Second
 
+const defaultMaxAccountSnapshotAge = 5 * time.Second
+
 type liveSubmissionIdentity struct {
 	SubmissionID  string
 	ClientOrderID string
@@ -36,6 +38,7 @@ type liveSubmissionIdentity struct {
 type liveSubmitDependencies struct {
 	openDB            func(context.Context, config.DatabaseConfig) (*sql.DB, error)
 	newExecutor       func(*config.Config, string, string) (domainlive.OrderExecutor, error)
+	newAccountReader  func(*config.Config) (domainlive.AccountSnapshotReader, error)
 	newPositionReader func(*config.Config) (domainlive.PositionSnapshotReader, error)
 	output            io.Writer
 }
@@ -116,6 +119,13 @@ func runLiveSubmit(ctx context.Context, args []string, deps liveSubmitDependenci
 		return err
 	}
 	preflightOptions := []applive.Option{applive.WithKillSwitchRepository(killSwitch)}
+	if liveSubmitAccountPreflightEnabled(preflightRequest.ExpectedAccount) {
+		accountReader, err := deps.newAccountReader(cfg)
+		if err != nil {
+			return fmt.Errorf("create live account reader for submit preflight: %w", err)
+		}
+		preflightOptions = append(preflightOptions, applive.WithAccountSnapshotReader(accountReader))
+	}
 	if len(preflightRequest.ExpectedFlatPositions) > 0 {
 		positionReader, err := deps.newPositionReader(cfg)
 		if err != nil {
@@ -202,6 +212,9 @@ func (deps liveSubmitDependencies) withDefaults() liveSubmitDependencies {
 	if deps.newExecutor == nil {
 		deps.newExecutor = newBybitLiveOrderExecutor
 	}
+	if deps.newAccountReader == nil {
+		deps.newAccountReader = newBybitLiveAccountReader
+	}
 	if deps.newPositionReader == nil {
 		deps.newPositionReader = newBybitLivePositionReader
 	}
@@ -215,6 +228,16 @@ func newBybitLiveOrderExecutor(cfg *config.Config, apiKey string, apiSecret stri
 	return bybitrest.New(
 		cfg.Exchange.RestBaseURL,
 		bybitrest.WithHMACAuth(apiKey, apiSecret),
+	)
+}
+
+func newBybitLiveAccountReader(cfg *config.Config) (domainlive.AccountSnapshotReader, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	return bybitrest.New(
+		cfg.Exchange.RestBaseURL,
+		bybitrest.WithHMACAuth(lookupEnvValue(cfg.Live.APIKeyEnv), lookupEnvValue(cfg.Live.APISecretEnv)),
 	)
 }
 
@@ -259,9 +282,26 @@ func liveSubmitPreflightRequestFromConfig(cfg *config.Config, subaccountConfirme
 		WithdrawalPermissionAllowed: cfg.Live.WithdrawalPermissionAllowed,
 		InitialLiveCapitalUSDT:      initialCapital,
 		MaxInitialLiveCapitalUSDT:   maxInitialCapital,
+		ExpectedAccount:             liveSubmitExpectedAccountFromConfig(cfg),
+		AccountBaseCurrency:         cfg.Trading.BaseCurrency,
+		MaxAccountSnapshotAge:       defaultMaxAccountSnapshotAge,
 		ExpectedFlatPositions:       liveSubmitExpectedFlatPositionsFromConfig(cfg),
 		MaxPositionSnapshotAge:      defaultMaxPositionSnapshotAge,
 	}, nil
+}
+
+func liveSubmitExpectedAccountFromConfig(cfg *config.Config) domainlive.AccountSnapshotQuery {
+	if cfg == nil {
+		return domainlive.AccountSnapshotQuery{}
+	}
+	return domainlive.AccountSnapshotQuery{
+		Exchange:    strings.ToLower(strings.TrimSpace(cfg.Exchange.Primary)),
+		AccountType: domainlive.AccountTypeUnified,
+	}
+}
+
+func liveSubmitAccountPreflightEnabled(query domainlive.AccountSnapshotQuery) bool {
+	return strings.TrimSpace(query.Exchange) != "" || strings.TrimSpace(string(query.AccountType)) != ""
 }
 
 func liveSubmitExpectedFlatPositionsFromConfig(cfg *config.Config) []domainlive.PositionSnapshotQuery {
@@ -402,6 +442,16 @@ func logLiveSubmitPreflightResult(log *slog.Logger, result applive.PreflightLive
 		"kill_switch_active", result.KillSwitchActive,
 		"kill_switch_reason", result.KillSwitchReason,
 		"kill_switch_source", result.KillSwitchSource,
+		"account_exchange", result.ExpectedAccount.Exchange,
+		"account_type", result.ExpectedAccount.AccountType,
+		"account_base_currency", result.AccountBaseCurrency,
+		"account_snapshot_present", result.AccountSnapshot.Exchange != "",
+		"account_total_equity", result.AccountSnapshot.TotalEquity.String(),
+		"account_total_available_balance", result.AccountSnapshot.TotalAvailableBalance.String(),
+		"account_total_initial_margin", result.AccountSnapshot.TotalInitialMargin.String(),
+		"account_total_maintenance_margin", result.AccountSnapshot.TotalMaintenanceMargin.String(),
+		"account_coin_count", len(result.AccountSnapshot.Coins),
+		"max_account_snapshot_age_ms", result.MaxAccountSnapshotAge.Milliseconds(),
 		"position_checks", len(result.ExpectedFlatPositions),
 		"position_symbols", liveSubmitPositionQuerySymbols(result.ExpectedFlatPositions),
 		"position_snapshots", len(result.PositionSnapshots),

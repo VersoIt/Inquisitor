@@ -114,6 +114,288 @@ func TestServicePreflightLiveStartupBlocksUnexpectedOpenPosition(t *testing.T) {
 	}
 }
 
+func TestServicePreflightLiveStartupChecksAccountReadiness(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	query := validLiveStartupAccountQuery()
+	reader := &fakeLiveAccountSnapshotReader{
+		snapshot: validLiveStartupAccountSnapshot(t, query, now.Add(-time.Second)),
+	}
+	service := liveStartupAccountService(now, reader, &fakeLiveKillSwitchRepository{}, validLiveStartupEnvironment())
+
+	got, err := service.PreflightLiveStartup(context.Background(), mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+		req.ExpectedAccount = query
+		req.AccountBaseCurrency = " usdt "
+		req.MaxAccountSnapshotAge = 5 * time.Second
+	}))
+	if err != nil {
+		t.Fatalf("preflight live startup with account readiness: %v", err)
+	}
+
+	if !got.Ready || len(got.Problems) != 0 {
+		t.Fatalf("expected ready startup, got %#v", got)
+	}
+	if reader.calls != 1 || reader.query != query {
+		t.Fatalf("account reader mismatch: calls=%d query=%#v", reader.calls, reader.query)
+	}
+	if got.ExpectedAccount != query || got.AccountBaseCurrency != "USDT" || got.MaxAccountSnapshotAge != 5*time.Second {
+		t.Fatalf("account preflight metadata mismatch: %#v", got)
+	}
+	if got.AccountSnapshot.AccountType != domainlive.AccountTypeUnified ||
+		!got.AccountSnapshot.TotalEquity.Equal(decimal.RequireFromString("50")) {
+		t.Fatalf("account snapshot mismatch: %#v", got.AccountSnapshot)
+	}
+}
+
+func TestServicePreflightLiveStartupRejectsUnsafeAccountReadinessTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	query := validLiveStartupAccountQuery()
+	readerErr := errors.New("bybit unavailable")
+
+	tests := []struct {
+		name            string
+		reader          *fakeLiveAccountSnapshotReader
+		withReader      bool
+		withClock       bool
+		req             applive.PreflightLiveStartupRequest
+		wantErrSub      string
+		wantReaderCalls int
+	}{
+		{
+			name:      "missing account reader",
+			withClock: true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub: "account snapshot reader",
+		},
+		{
+			name:       "missing clock",
+			reader:     &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now)},
+			withReader: true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub: "clock",
+		},
+		{
+			name:       "invalid account query",
+			reader:     &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now)},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = domainlive.AccountSnapshotQuery{Exchange: "BYBIT", AccountType: domainlive.AccountTypeUnified}
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub: "exchange",
+		},
+		{
+			name:       "missing base currency",
+			reader:     &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now)},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub: "base currency",
+		},
+		{
+			name:       "non positive max age",
+			reader:     &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now)},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+			}),
+			wantErrSub: "max account snapshot age",
+		},
+		{
+			name:       "reader error",
+			reader:     &fakeLiveAccountSnapshotReader{err: readerErr},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:      readerErr.Error(),
+			wantReaderCalls: 1,
+		},
+		{
+			name:       "stale account snapshot",
+			reader:     &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now.Add(-10*time.Second))},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = time.Second
+			}),
+			wantErrSub:      "stale",
+			wantReaderCalls: 1,
+		},
+		{
+			name:       "future account snapshot",
+			reader:     &fakeLiveAccountSnapshotReader{snapshot: validLiveStartupAccountSnapshot(t, query, now.Add(time.Second))},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:      "future",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "over max equity",
+			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
+				s.TotalEquity = decimal.RequireFromString("101")
+			})},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:      "exceeds",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "zero total equity",
+			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
+				s.TotalEquity = decimal.Zero
+			})},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:      "total equity",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "initial margin",
+			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
+				s.TotalInitialMargin = decimal.RequireFromString("1")
+			})},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:      "initial margin",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "perp upl",
+			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
+				s.TotalPerpUPL = decimal.RequireFromString("-0.01")
+			})},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:      "perp UPL",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "non base asset",
+			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
+				s.Coins = append(s.Coins, domainlive.AccountCoinSnapshot{
+					Coin:          "BTC",
+					Equity:        decimal.RequireFromString("0.001"),
+					USDValue:      decimal.RequireFromString("100"),
+					WalletBalance: decimal.RequireFromString("0.001"),
+				})
+			})},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:      "non-base asset",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "locked balance",
+			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
+				s.Coins[0].Locked = decimal.RequireFromString("1")
+			})},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:      "locked",
+			wantReaderCalls: 1,
+		},
+		{
+			name: "borrow amount",
+			reader: &fakeLiveAccountSnapshotReader{snapshot: mutateLiveStartupAccountSnapshot(validLiveStartupAccountSnapshot(t, query, now), func(s *domainlive.AccountSnapshot) {
+				s.Coins[0].BorrowAmount = decimal.RequireFromString("1")
+			})},
+			withReader: true,
+			withClock:  true,
+			req: mutateLiveStartupRequest(func(req *applive.PreflightLiveStartupRequest) {
+				req.ExpectedAccount = query
+				req.AccountBaseCurrency = "USDT"
+				req.MaxAccountSnapshotAge = 5 * time.Second
+			}),
+			wantErrSub:      "borrow",
+			wantReaderCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			options := []applive.Option{
+				applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
+				applive.WithEnvironmentReader(validLiveStartupEnvironment()),
+			}
+			if tt.withReader {
+				options = append(options, applive.WithAccountSnapshotReader(tt.reader))
+			}
+			if tt.withClock {
+				options = append(options, applive.WithClock(clock.FixedClock{Time: now}))
+			} else {
+				options = append(options, applive.WithClock(nil))
+			}
+			service := applive.NewService(options...)
+
+			got, err := service.PreflightLiveStartup(context.Background(), tt.req)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+			if got.Ready {
+				t.Fatalf("unsafe account startup must not be ready: %#v", got)
+			}
+			if tt.reader != nil && tt.reader.calls != tt.wantReaderCalls {
+				t.Fatalf("account reader calls mismatch: got %d want %d", tt.reader.calls, tt.wantReaderCalls)
+			}
+		})
+	}
+}
+
 func TestServicePreflightLiveStartupBlocksActiveKillSwitch(t *testing.T) {
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	killSwitch := &fakeLiveKillSwitchRepository{state: domainrisk.KillSwitchState{
@@ -589,6 +871,77 @@ func liveStartupPositionService(
 		applive.WithPositionSnapshotJournal(journal),
 		applive.WithClock(clock.FixedClock{Time: now}),
 	)
+}
+
+func liveStartupAccountService(
+	now time.Time,
+	reader domainlive.AccountSnapshotReader,
+	killSwitch *fakeLiveKillSwitchRepository,
+	env applive.EnvironmentReader,
+) *applive.Service {
+	return applive.NewService(
+		applive.WithKillSwitchRepository(killSwitch),
+		applive.WithEnvironmentReader(env),
+		applive.WithAccountSnapshotReader(reader),
+		applive.WithClock(clock.FixedClock{Time: now}),
+	)
+}
+
+type fakeLiveAccountSnapshotReader struct {
+	query    domainlive.AccountSnapshotQuery
+	snapshot domainlive.AccountSnapshot
+	calls    int
+	err      error
+}
+
+func (r *fakeLiveAccountSnapshotReader) GetAccountSnapshot(_ context.Context, query domainlive.AccountSnapshotQuery) (domainlive.AccountSnapshot, error) {
+	r.calls++
+	r.query = query
+	if r.err != nil {
+		return domainlive.AccountSnapshot{}, r.err
+	}
+	return r.snapshot, nil
+}
+
+func validLiveStartupAccountQuery() domainlive.AccountSnapshotQuery {
+	return domainlive.AccountSnapshotQuery{
+		Exchange:    "bybit",
+		AccountType: domainlive.AccountTypeUnified,
+	}
+}
+
+func validLiveStartupAccountSnapshot(t *testing.T, query domainlive.AccountSnapshotQuery, observedAt time.Time) domainlive.AccountSnapshot {
+	t.Helper()
+
+	snapshot, err := domainlive.NewAccountSnapshot(domainlive.AccountSnapshotInput{
+		Exchange:               query.Exchange,
+		AccountType:            query.AccountType,
+		TotalEquity:            decimal.RequireFromString("50"),
+		TotalWalletBalance:     decimal.RequireFromString("50"),
+		TotalMarginBalance:     decimal.RequireFromString("50"),
+		TotalAvailableBalance:  decimal.RequireFromString("50"),
+		TotalPerpUPL:           decimal.Zero,
+		TotalInitialMargin:     decimal.Zero,
+		TotalMaintenanceMargin: decimal.Zero,
+		Coins: []domainlive.AccountCoinSnapshot{{
+			Coin:             "USDT",
+			Equity:           decimal.RequireFromString("50"),
+			USDValue:         decimal.RequireFromString("50"),
+			WalletBalance:    decimal.RequireFromString("50"),
+			MarginCollateral: true,
+			CollateralSwitch: true,
+		}},
+		ObservedAt: observedAt,
+	})
+	if err != nil {
+		t.Fatalf("new startup account snapshot: %v", err)
+	}
+	return snapshot
+}
+
+func mutateLiveStartupAccountSnapshot(snapshot domainlive.AccountSnapshot, mutate func(*domainlive.AccountSnapshot)) domainlive.AccountSnapshot {
+	mutate(&snapshot)
+	return snapshot
 }
 
 func validLiveStartupPositionQuery() domainlive.PositionSnapshotQuery {
