@@ -79,9 +79,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Bybit V5 private position-list adapter with HMAC-signed read-back of live position snapshots by symbol, including flat-position handling and fail-closed detection of non-unique hedge-mode rows.
 - App-layer live position reconciliation that compares exchange position size with submitted order executed quantity, persists durable position snapshots, and fails closed on unexpected flat/open/side/size mismatches.
 - App-layer bounded live-loop orchestration guard that runs live startup preflight before the first iteration, enforces explicit max-iteration/runtime/iteration-timeout limits, checks the Kill Switch before every iteration, and exposes operator-visible stop reasons without creating signals or placing orders by itself.
+- Operator-facing live-health CLI that runs the bounded live-loop guard with a no-op iteration, persists the same account/position preflight audit snapshots, reports health/stop reasons, and still cannot create signals or place orders.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should expose the bounded live-loop status through an operator-facing health command or endpoint, then wire a real iteration source only after the health/reporting layer is visible and fail-closed.
+The next Phase 7 slices should wire a real bounded live-loop iteration source only after every operator-facing health and stop reason remains visible and fail-closed.
 
 ## What This Is Not
 
@@ -489,6 +490,12 @@ $env:BYBIT_API_SECRET="..."
 go run ./cmd/live-preflight -config configs/live.local.yaml -subaccount-confirmed -max-initial-live-capital-usdt 100
 ```
 
+Run the bounded live-loop health command before wiring any autonomous iteration source. It reruns the same startup preflight, records the same audit snapshots, checks the Kill Switch before a no-op loop iteration, and logs `healthy`, `stop_reason`, and iteration counters without creating signals or placing orders:
+
+```powershell
+go run ./cmd/live-health -config configs/live.local.yaml -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_health_001 -max-iterations 1
+```
+
 Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight including the same fresh account and flat-position guards, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
 
 ```powershell
@@ -503,7 +510,7 @@ go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decis
 
 The live submit command does not create signals, does not run strategies, does not size positions, and does not accept raw order payloads. It can only submit an already persisted approved LIVE risk-decision audit record.
 
-The app layer now has a bounded live-loop guardrail for future automation. It requires startup preflight before iteration one, finite runtime and iteration limits, per-iteration timeouts, and a fresh Kill Switch check before every iteration; it still does not create signals or place orders by itself.
+The app layer now has a bounded live-loop guardrail for future automation. It requires startup preflight before iteration one, finite runtime and iteration limits, per-iteration timeouts, and a fresh Kill Switch check before every iteration; the current health command uses only a no-op iteration and still does not create signals or place orders by itself.
 
 ## Regime Classification
 
@@ -557,6 +564,7 @@ make paper-cycle-preflight VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUS
 make paper-auto-cycle VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PAPER_INTERVAL=1 PAPER_CYCLE_LIMIT=1
 make paper-cycle-smoke
 make paper-cycle-smoke-sh
+make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-settle PAPER_EVENT_ID=paper_equity_001 PAPER_CLOSE_ID=paper_close_001 PAPER_POSITION_ID=paper_position_001 PAPER_MID_PRICE=101000 PAPER_CLOSE_REASON=TAKE_PROFIT PAPER_EXECUTION_AT=2026-07-16T13:00:00Z

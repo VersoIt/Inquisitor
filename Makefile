@@ -59,8 +59,12 @@ LIVE_EXECUTE ?=
 LIVE_ORDER_TYPE ?= MARKET
 LIVE_TIME_IN_FORCE ?=
 LIVE_LIMIT_PRICE ?=
+LIVE_HEALTH_RUN_ID ?= live_loop_health
+LIVE_HEALTH_MAX_ITERATIONS ?= 1
+LIVE_HEALTH_MAX_RUNTIME ?= 5s
+LIVE_HEALTH_ITERATION_TIMEOUT ?= 2s
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-submit docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-submit docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -162,6 +166,9 @@ paper-settle:
 
 live-preflight:
 	$(GO) run ./cmd/live-preflight -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
+
+live-health:
+	$(GO) run ./cmd/live-health -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -run-id $(LIVE_HEALTH_RUN_ID) -max-iterations $(LIVE_HEALTH_MAX_ITERATIONS) -max-runtime $(LIVE_HEALTH_MAX_RUNTIME) -iteration-timeout $(LIVE_HEALTH_ITERATION_TIMEOUT) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
 
 live-submit:
 	$(GO) run ./cmd/live-submit -config $(CONFIG) -decision-id $(LIVE_DECISION_ID) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)
