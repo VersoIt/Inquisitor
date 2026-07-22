@@ -20,6 +20,7 @@ type Service struct {
 	positionJournal domainlive.PositionSnapshotJournal
 	accountReader   domainlive.AccountSnapshotReader
 	accountJournal  domainlive.AccountSnapshotJournal
+	loopRunner      LiveLoopIterationRunner
 	journal         domainlive.OrderJournal
 	killSwitch      domainrisk.KillSwitchRepository
 	riskDecisions   RiskDecisionReader
@@ -97,6 +98,12 @@ func WithAccountSnapshotReader(reader domainlive.AccountSnapshotReader) Option {
 func WithAccountSnapshotJournal(journal domainlive.AccountSnapshotJournal) Option {
 	return func(service *Service) {
 		service.accountJournal = journal
+	}
+}
+
+func WithLiveLoopIterationRunner(runner LiveLoopIterationRunner) Option {
+	return func(service *Service) {
+		service.loopRunner = runner
 	}
 }
 

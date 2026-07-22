@@ -648,7 +648,9 @@ func (j *fakeLiveOrderJournal) RecordOrderAcknowledgement(_ context.Context, ack
 
 type fakeLiveKillSwitchRepository struct {
 	state        domainrisk.KillSwitchState
+	states       []domainrisk.KillSwitchState
 	currentCalls int
+	errAt        int
 	err          error
 }
 
@@ -657,9 +659,17 @@ func (r *fakeLiveKillSwitchRepository) AppendKillSwitchEvent(context.Context, do
 }
 
 func (r *fakeLiveKillSwitchRepository) CurrentKillSwitchState(context.Context) (domainrisk.KillSwitchState, error) {
+	callIndex := r.currentCalls
 	r.currentCalls++
-	if r.err != nil {
+	if r.err != nil && (r.errAt == 0 || r.errAt == r.currentCalls) {
 		return domainrisk.KillSwitchState{}, r.err
+	}
+	if len(r.states) > 0 {
+		index := callIndex
+		if index >= len(r.states) {
+			index = len(r.states) - 1
+		}
+		return r.states[index], nil
 	}
 	return r.state, nil
 }

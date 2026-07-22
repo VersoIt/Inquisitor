@@ -78,9 +78,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Bybit V5 private wallet-balance adapter with HMAC-signed read-back of `UNIFIED` account equity, available balance, margin usage, coin-level liabilities, and collateral details for fail-closed live startup checks.
 - Bybit V5 private position-list adapter with HMAC-signed read-back of live position snapshots by symbol, including flat-position handling and fail-closed detection of non-unique hedge-mode rows.
 - App-layer live position reconciliation that compares exchange position size with submitted order executed quantity, persists durable position snapshots, and fails closed on unexpected flat/open/side/size mismatches.
+- App-layer bounded live-loop orchestration guard that runs live startup preflight before the first iteration, enforces explicit max-iteration/runtime/iteration-timeout limits, checks the Kill Switch before every iteration, and exposes operator-visible stop reasons without creating signals or placing orders by itself.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add stronger operational guardrails around live micro-size operations, especially bounded live-loop orchestration and operator-visible health reporting before any autonomous live loop exists.
+The next Phase 7 slices should expose the bounded live-loop status through an operator-facing health command or endpoint, then wire a real iteration source only after the health/reporting layer is visible and fail-closed.
 
 ## What This Is Not
 
@@ -501,6 +502,8 @@ go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decis
 ```
 
 The live submit command does not create signals, does not run strategies, does not size positions, and does not accept raw order payloads. It can only submit an already persisted approved LIVE risk-decision audit record.
+
+The app layer now has a bounded live-loop guardrail for future automation. It requires startup preflight before iteration one, finite runtime and iteration limits, per-iteration timeouts, and a fresh Kill Switch check before every iteration; it still does not create signals or place orders by itself.
 
 ## Regime Classification
 
