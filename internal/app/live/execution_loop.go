@@ -42,12 +42,18 @@ type LiveLoopIterationRequest struct {
 }
 
 type LiveLoopIterationResult struct {
-	RunID      string
-	Iteration  int
-	Action     LiveLoopIterationAction
-	Reason     string
-	StartedAt  time.Time
-	FinishedAt time.Time
+	RunID             string
+	Iteration         int
+	Action            LiveLoopIterationAction
+	RequestStop       bool
+	Reason            string
+	DecisionID        string
+	SubmissionID      string
+	ClientOrderID     string
+	ExchangeSubmitted bool
+	AlreadySubmitted  bool
+	StartedAt         time.Time
+	FinishedAt        time.Time
 }
 
 type LiveLoopIterationRunner interface {
@@ -167,7 +173,7 @@ func (s *Service) RunBoundedLiveLoop(ctx context.Context, req RunBoundedLiveLoop
 		}
 		result.Iterations = append(result.Iterations, normalized)
 		result.IterationsSucceeded++
-		if normalized.Action == LiveLoopIterationActionStop {
+		if normalized.RequestStop || normalized.Action == LiveLoopIterationActionStop {
 			result.StopReason = LiveLoopStopIterationRequested
 			result.StopDetails = normalized.Reason
 			result.FinishedAt = normalized.FinishedAt
@@ -254,6 +260,9 @@ func normalizeLiveLoopIterationResult(
 	if result.Action == "" {
 		result.Action = LiveLoopIterationActionNone
 	}
+	if result.Action == LiveLoopIterationActionStop {
+		result.RequestStop = true
+	}
 	if result.StartedAt.IsZero() {
 		result.StartedAt = startedAt
 	}
@@ -261,6 +270,9 @@ func normalizeLiveLoopIterationResult(
 		result.FinishedAt = finishedAt
 	}
 	result.Reason = strings.TrimSpace(result.Reason)
+	result.DecisionID = strings.TrimSpace(result.DecisionID)
+	result.SubmissionID = strings.TrimSpace(result.SubmissionID)
+	result.ClientOrderID = strings.TrimSpace(result.ClientOrderID)
 
 	var problems []string
 	if result.RunID != runID {
@@ -281,8 +293,8 @@ func normalizeLiveLoopIterationResult(
 	if !result.StartedAt.IsZero() && !result.FinishedAt.IsZero() && result.FinishedAt.Before(result.StartedAt) {
 		problems = append(problems, "iteration result finished_at must not be before started_at")
 	}
-	if result.Action == LiveLoopIterationActionStop && result.Reason == "" {
-		problems = append(problems, "STOP iteration result requires reason")
+	if result.RequestStop && result.Reason == "" {
+		problems = append(problems, "stopping iteration result requires reason")
 	}
 	if len(problems) > 0 {
 		return LiveLoopIterationResult{}, errors.New("live loop iteration result validation failed: " + strings.Join(problems, "; "))

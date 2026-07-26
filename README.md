@@ -80,9 +80,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - App-layer live position reconciliation that compares exchange position size with submitted order executed quantity, persists durable position snapshots, and fails closed on unexpected flat/open/side/size mismatches.
 - App-layer bounded live-loop orchestration guard that runs live startup preflight before the first iteration, enforces explicit max-iteration/runtime/iteration-timeout limits, checks the Kill Switch before every iteration, and exposes operator-visible stop reasons without creating signals or placing orders by itself.
 - Operator-facing live-health CLI that runs the bounded live-loop guard with a no-op iteration, persists the same account/position preflight audit snapshots, reports health/stop reasons, and still cannot create signals or place orders.
+- App-layer persisted LIVE decision loop iteration runner that can process one explicitly selected approved risk decision through the existing submit, order-status reconciliation, and position reconciliation pipeline, then requests bounded-loop stop; it is not wired to an autonomous CLI yet.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should wire a real bounded live-loop iteration source only after every operator-facing health and stop reason remains visible and fail-closed.
+The next Phase 7 slices should wire the persisted-decision iteration runner into an explicitly armed bounded live-loop CLI while keeping operator-facing health and stop reasons visible and fail-closed.
 
 ## What This Is Not
 
@@ -510,7 +511,7 @@ go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decis
 
 The live submit command does not create signals, does not run strategies, does not size positions, and does not accept raw order payloads. It can only submit an already persisted approved LIVE risk-decision audit record.
 
-The app layer now has a bounded live-loop guardrail for future automation. It requires startup preflight before iteration one, finite runtime and iteration limits, per-iteration timeouts, and a fresh Kill Switch check before every iteration; the current health command uses only a no-op iteration and still does not create signals or place orders by itself.
+The app layer now has a bounded live-loop guardrail for future automation. It requires startup preflight before iteration one, finite runtime and iteration limits, per-iteration timeouts, and a fresh Kill Switch check before every iteration. A persisted-decision iteration runner exists in the app layer, but the current operator command still uses only a no-op iteration and does not create signals or place orders by itself.
 
 ## Regime Classification
 
