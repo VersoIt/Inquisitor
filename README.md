@@ -82,9 +82,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Operator-facing live-health CLI that runs the bounded live-loop guard with a no-op iteration, persists the same account/position preflight audit snapshots, reports health/stop reasons, and still cannot create signals or place orders.
 - App-layer persisted LIVE decision loop iteration runner that can process one explicitly selected approved risk decision through the existing submit, order-status reconciliation, and position reconciliation pipeline, then requests bounded-loop stop.
 - Explicitly armed live-loop CLI that refuses to run unless `-execute=true` is provided, reruns bounded startup preflight, checks the Kill Switch before iteration, processes exactly one operator-provided persisted LIVE risk decision, reconciles order status and position, and cannot discover signals or scan decisions by itself.
+- Durable live-loop run and iteration audit records for operator-facing health/live-loop commands, including run bounds, preflight readiness, iteration actions, stop reasons, completion status, and errors.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add richer live-loop audit persistence and only then consider a tightly scoped decision-source scanner, while keeping operator-facing health and stop reasons visible and fail-closed.
+The next Phase 7 slices should add a deployment smoke around the armed live loop and only then consider a tightly scoped decision-source scanner, while keeping operator-facing health and stop reasons visible and fail-closed.
 
 ## What This Is Not
 
@@ -170,8 +171,9 @@ Initial migrations are in `migrations/`:
 - `022_live_order_status_snapshots.sql`
 - `023_live_position_snapshots.sql`
 - `024_live_account_snapshots.sql`
+- `025_live_loop_audit.sql`
 
-They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position/equity, Kill Switch, live order journal, live order status snapshot, live position snapshot, and live account snapshot tables and enforce core data-quality constraints directly in PostgreSQL.
+They define the first market-data, realtime, regime-state, hypothesis, research-run, research-result, paper-validation lifecycle, trade journal, daily performance, risk-decision audit, executable intent snapshot, paper order ticket/fill/open/close-position/equity, Kill Switch, live order journal, live order status snapshot, live position snapshot, live account snapshot, and live-loop audit tables and enforce core data-quality constraints directly in PostgreSQL.
 
 Apply them with the built-in migration command:
 
@@ -519,6 +521,8 @@ go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decis
 The live submit command does not create signals, does not run strategies, does not size positions, and does not accept raw order payloads. It can only submit an already persisted approved LIVE risk-decision audit record.
 
 The live loop command does not create signals, does not scan for decisions, does not run strategies, and does not accept raw order payloads. It can only process one already persisted approved LIVE risk-decision audit record chosen by the operator.
+
+Both `live-health` and `live-loop` persist `live_loop_runs` and `live_loop_iterations` audit rows. If the run-start audit cannot be written, the loop fails before startup preflight or any order-capable iteration.
 
 ## Regime Classification
 

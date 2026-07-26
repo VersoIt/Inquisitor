@@ -64,6 +64,8 @@ func TestRunLiveHealthChecksBoundedLoopWithoutOrders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
+	mock.ExpectExec("INSERT INTO live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
 	mock.ExpectExec("INSERT INTO live_account_snapshots").
@@ -72,6 +74,10 @@ func TestRunLiveHealthChecksBoundedLoopWithoutOrders(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_loop_iterations").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	accountReader := &fakeLiveHealthAccountReader{
 		snapshot: validLiveHealthAccountSnapshot(t),
 	}
@@ -163,8 +169,12 @@ func TestRunLiveHealthRejectsUnsafePreflightBeforeIteration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
+	mock.ExpectExec("INSERT INTO live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("UPDATE live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	runner := &fakeLiveHealthIterationRunner{}
 
 	var output bytes.Buffer

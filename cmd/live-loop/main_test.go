@@ -89,6 +89,8 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
+	mock.ExpectExec("INSERT INTO live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
 	mock.ExpectExec("INSERT INTO live_account_snapshots").
@@ -109,6 +111,10 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO live_position_snapshots").
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO live_loop_iterations").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	identity, err := deterministicLiveLoopIdentity("risk_decision_live_cli_0001", "live_loop_cli_0001")
 	if err != nil {
@@ -264,8 +270,12 @@ func TestRunLiveLoopRejectsUnsafePreflightBeforeOrderIteration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
+	mock.ExpectExec("INSERT INTO live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
 		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("UPDATE live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	executor := &fakeLiveLoopExecutor{receivedAt: time.Now().UTC()}
 	accountReader := &fakeLiveLoopAccountReader{snapshot: validLiveLoopAccountSnapshot(t)}
 

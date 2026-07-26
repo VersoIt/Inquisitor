@@ -9,6 +9,7 @@ import (
 
 	applive "github.com/VersoIt/Inquisitor/internal/app/live"
 	"github.com/VersoIt/Inquisitor/internal/clock"
+	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
 
@@ -39,6 +40,91 @@ func TestServiceRunBoundedLiveLoopRunsPreflightThenBoundedIterations(t *testing.
 		if req.RunID != "live_loop_app_0001" || req.Iteration != index+1 || req.StartedAt != now {
 			t.Fatalf("iteration request[%d] mismatch: %#v", index, req)
 		}
+	}
+}
+
+func TestServiceRunBoundedLiveLoopJournalsRunAndIterations(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	runner := &fakeLiveLoopIterationRunner{}
+	journal := &fakeLiveLoopJournal{}
+	service := boundedLiveLoopServiceWithJournal(now, &fakeLiveKillSwitchRepository{}, runner, journal)
+
+	got, err := service.RunBoundedLiveLoop(context.Background(), validBoundedLiveLoopRequest())
+	if err != nil {
+		t.Fatalf("run bounded live loop: %v", err)
+	}
+
+	if journal.startCalls != 1 || journal.finishCalls != 1 || journal.iterationCalls != 3 {
+		t.Fatalf("journal calls mismatch: start=%d finish=%d iterations=%d", journal.startCalls, journal.finishCalls, journal.iterationCalls)
+	}
+	start := journal.started[0]
+	if start.RunID != got.RunID || start.StartedAt != got.StartedAt ||
+		start.MaxIterations != 3 || start.MaxRuntime != time.Minute || start.IterationTimeout != 5*time.Second {
+		t.Fatalf("start audit mismatch: %#v result=%#v", start, got)
+	}
+	finish := journal.finished[0]
+	if finish.RunID != got.RunID ||
+		finish.StartedAt != got.StartedAt ||
+		finish.Status != domainlive.LiveLoopRunStatusCompleted ||
+		finish.StopReason != string(applive.LiveLoopStopMaxIterations) ||
+		!finish.PreflightChecked ||
+		!finish.PreflightReady ||
+		finish.IterationsAttempted != 3 ||
+		finish.IterationsSucceeded != 3 ||
+		!finish.CompletedWithinBounds ||
+		finish.Error != "" {
+		t.Fatalf("finish audit mismatch: %#v result=%#v", finish, got)
+	}
+	for index, audit := range journal.iterations {
+		if audit.RunID != got.RunID || audit.RunStartedAt != got.StartedAt ||
+			audit.Iteration != index+1 ||
+			audit.Action != domainlive.LiveLoopAuditIterationActionNone ||
+			audit.StartedAt != now ||
+			audit.FinishedAt != now {
+			t.Fatalf("iteration audit[%d] mismatch: %#v result=%#v", index, audit, got)
+		}
+	}
+}
+
+func TestServiceRunBoundedLiveLoopBlocksWhenStartAuditFailsBeforePreflight(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	auditErr := errors.New("audit database unavailable")
+	killSwitch := &fakeLiveKillSwitchRepository{}
+	runner := &fakeLiveLoopIterationRunner{}
+	journal := &fakeLiveLoopJournal{startErr: auditErr}
+	service := boundedLiveLoopServiceWithJournal(now, killSwitch, runner, journal)
+
+	got, err := service.RunBoundedLiveLoop(context.Background(), validBoundedLiveLoopRequest())
+	if err == nil || !strings.Contains(err.Error(), "start audit") || !strings.Contains(err.Error(), auditErr.Error()) {
+		t.Fatalf("expected start audit error, got %v", err)
+	}
+	if killSwitch.currentCalls != 0 || runner.calls != 0 || journal.finishCalls != 0 || got.PreflightChecked {
+		t.Fatalf("start audit failure must block preflight and iteration: result=%#v kill=%d runner=%d finish=%d", got, killSwitch.currentCalls, runner.calls, journal.finishCalls)
+	}
+}
+
+func TestServiceRunBoundedLiveLoopFailsClosedWhenIterationAuditFails(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	auditErr := errors.New("iteration audit insert failed")
+	runner := &fakeLiveLoopIterationRunner{}
+	journal := &fakeLiveLoopJournal{iterationErr: auditErr}
+	service := boundedLiveLoopServiceWithJournal(now, &fakeLiveKillSwitchRepository{}, runner, journal)
+
+	got, err := service.RunBoundedLiveLoop(context.Background(), validBoundedLiveLoopRequest())
+	if err == nil || !strings.Contains(err.Error(), auditErr.Error()) {
+		t.Fatalf("expected iteration audit error, got %v", err)
+	}
+	if got.StopReason != applive.LiveLoopStopAuditJournalError ||
+		got.IterationsAttempted != 1 ||
+		got.IterationsSucceeded != 1 ||
+		journal.startCalls != 1 ||
+		journal.iterationCalls != 1 ||
+		journal.finishCalls != 1 {
+		t.Fatalf("iteration audit failure mismatch: result=%#v journal=%#v", got, journal)
+	}
+	if journal.finished[0].Status != domainlive.LiveLoopRunStatusFailed ||
+		!strings.Contains(journal.finished[0].Error, auditErr.Error()) {
+		t.Fatalf("failed finish audit mismatch: %#v", journal.finished[0])
 	}
 }
 
@@ -347,6 +433,21 @@ func boundedLiveLoopService(
 	)
 }
 
+func boundedLiveLoopServiceWithJournal(
+	now time.Time,
+	killSwitch *fakeLiveKillSwitchRepository,
+	runner applive.LiveLoopIterationRunner,
+	journal *fakeLiveLoopJournal,
+) *applive.Service {
+	return applive.NewService(
+		applive.WithLiveLoopIterationRunner(runner),
+		applive.WithLiveLoopJournal(journal),
+		applive.WithKillSwitchRepository(killSwitch),
+		applive.WithEnvironmentReader(validLiveStartupEnvironment()),
+		applive.WithClock(clock.FixedClock{Time: now}),
+	)
+}
+
 func validBoundedLiveLoopRequest() applive.RunBoundedLiveLoopRequest {
 	return applive.RunBoundedLiveLoopRequest{
 		RunID:            "live_loop_app_0001",
@@ -355,6 +456,57 @@ func validBoundedLiveLoopRequest() applive.RunBoundedLiveLoopRequest {
 		MaxRuntime:       time.Minute,
 		IterationTimeout: 5 * time.Second,
 	}
+}
+
+type fakeLiveLoopJournal struct {
+	started        []domainlive.LiveLoopRunStarted
+	finished       []domainlive.LiveLoopRunFinished
+	iterations     []domainlive.LiveLoopIterationAudit
+	startStats     domainlive.LiveLoopAuditStats
+	finishStats    domainlive.LiveLoopAuditStats
+	iterationStats domainlive.LiveLoopAuditStats
+	startCalls     int
+	finishCalls    int
+	iterationCalls int
+	startErr       error
+	finishErr      error
+	iterationErr   error
+}
+
+func (j *fakeLiveLoopJournal) RecordLiveLoopRunStarted(_ context.Context, run domainlive.LiveLoopRunStarted) (domainlive.LiveLoopAuditStats, error) {
+	j.startCalls++
+	j.started = append(j.started, run)
+	if j.startErr != nil {
+		return domainlive.LiveLoopAuditStats{}, j.startErr
+	}
+	if j.startStats.Total() > 0 {
+		return j.startStats, nil
+	}
+	return domainlive.LiveLoopAuditStats{Inserted: 1}, nil
+}
+
+func (j *fakeLiveLoopJournal) RecordLiveLoopRunFinished(_ context.Context, run domainlive.LiveLoopRunFinished) (domainlive.LiveLoopAuditStats, error) {
+	j.finishCalls++
+	j.finished = append(j.finished, run)
+	if j.finishErr != nil {
+		return domainlive.LiveLoopAuditStats{}, j.finishErr
+	}
+	if j.finishStats.Total() > 0 {
+		return j.finishStats, nil
+	}
+	return domainlive.LiveLoopAuditStats{Updated: 1}, nil
+}
+
+func (j *fakeLiveLoopJournal) RecordLiveLoopIteration(_ context.Context, iteration domainlive.LiveLoopIterationAudit) (domainlive.LiveLoopAuditStats, error) {
+	j.iterationCalls++
+	j.iterations = append(j.iterations, iteration)
+	if j.iterationErr != nil {
+		return domainlive.LiveLoopAuditStats{}, j.iterationErr
+	}
+	if j.iterationStats.Total() > 0 {
+		return j.iterationStats, nil
+	}
+	return domainlive.LiveLoopAuditStats{Inserted: 1}, nil
 }
 
 func mutateBoundedLiveLoopRequest(mutate func(*applive.RunBoundedLiveLoopRequest)) applive.RunBoundedLiveLoopRequest {

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 )
 
 const (
@@ -32,6 +34,7 @@ const (
 	LiveLoopStopKillSwitchActive   LiveLoopStopReason = "KILL_SWITCH_ACTIVE"
 	LiveLoopStopIterationError     LiveLoopStopReason = "ITERATION_ERROR"
 	LiveLoopStopIterationRequested LiveLoopStopReason = "ITERATION_REQUESTED"
+	LiveLoopStopAuditJournalError  LiveLoopStopReason = "AUDIT_JOURNAL_ERROR"
 )
 
 type LiveLoopIterationRequest struct {
@@ -98,6 +101,10 @@ func (s *Service) RunBoundedLiveLoop(ctx context.Context, req RunBoundedLiveLoop
 	result.RunID = strings.TrimSpace(req.RunID)
 	result.StartedAt = startedAt
 	runtimeDeadline := startedAt.Add(req.MaxRuntime)
+	if err := s.recordLiveLoopRunStarted(ctx, result, req); err != nil {
+		result.FinishedAt = s.clock.Now()
+		return result, err
+	}
 
 	preflight, err := s.PreflightLiveStartup(ctx, req.Preflight)
 	result.PreflightChecked = true
@@ -106,13 +113,13 @@ func (s *Service) RunBoundedLiveLoop(ctx context.Context, req RunBoundedLiveLoop
 		result.StopReason = LiveLoopStopPreflightFailed
 		result.StopDetails = err.Error()
 		result.FinishedAt = s.clock.Now()
-		return result, fmt.Errorf("live loop startup preflight failed: %w", err)
+		return s.finishBoundedLiveLoop(ctx, result, fmt.Errorf("live loop startup preflight failed: %w", err))
 	}
 
 	for iteration := 1; iteration <= req.MaxIterations; iteration++ {
 		if err := ctx.Err(); err != nil {
 			result.FinishedAt = s.clock.Now()
-			return result, err
+			return s.finishBoundedLiveLoop(ctx, result, err)
 		}
 		now := s.clock.Now()
 		if !now.Before(runtimeDeadline) {
@@ -120,7 +127,7 @@ func (s *Service) RunBoundedLiveLoop(ctx context.Context, req RunBoundedLiveLoop
 			result.StopDetails = "max live loop runtime reached before next iteration"
 			result.FinishedAt = now
 			result.CompletedWithinBounds = true
-			return result, nil
+			return s.finishBoundedLiveLoop(ctx, result, nil)
 		}
 
 		state, err := s.killSwitch.CurrentKillSwitchState(ctx)
@@ -128,13 +135,13 @@ func (s *Service) RunBoundedLiveLoop(ctx context.Context, req RunBoundedLiveLoop
 			result.StopReason = LiveLoopStopSafetyCheckError
 			result.StopDetails = err.Error()
 			result.FinishedAt = s.clock.Now()
-			return result, fmt.Errorf("load kill switch before live loop iteration %d: %w", iteration, err)
+			return s.finishBoundedLiveLoop(ctx, result, fmt.Errorf("load kill switch before live loop iteration %d: %w", iteration, err))
 		}
 		if state.Active {
 			result.StopReason = LiveLoopStopKillSwitchActive
 			result.StopDetails = fmt.Sprintf("reason=%q source=%q", state.Reason, state.Source)
 			result.FinishedAt = s.clock.Now()
-			return result, fmt.Errorf("live loop stopped by active kill switch before iteration %d: %s", iteration, result.StopDetails)
+			return s.finishBoundedLiveLoop(ctx, result, fmt.Errorf("live loop stopped by active kill switch before iteration %d: %s", iteration, result.StopDetails))
 		}
 
 		iterationStartedAt := s.clock.Now()
@@ -144,7 +151,7 @@ func (s *Service) RunBoundedLiveLoop(ctx context.Context, req RunBoundedLiveLoop
 			result.StopDetails = "max live loop runtime reached before next iteration"
 			result.FinishedAt = iterationStartedAt
 			result.CompletedWithinBounds = true
-			return result, nil
+			return s.finishBoundedLiveLoop(ctx, result, nil)
 		}
 		iterationTimeout := boundedIterationTimeout(req.IterationTimeout, remainingRuntime)
 		iterationCtx, cancel := context.WithTimeout(ctx, iterationTimeout)
@@ -160,7 +167,7 @@ func (s *Service) RunBoundedLiveLoop(ctx context.Context, req RunBoundedLiveLoop
 			result.StopReason = LiveLoopStopIterationError
 			result.StopDetails = err.Error()
 			result.FinishedAt = s.clock.Now()
-			return result, fmt.Errorf("run live loop iteration %d: %w", iteration, err)
+			return s.finishBoundedLiveLoop(ctx, result, fmt.Errorf("run live loop iteration %d: %w", iteration, err))
 		}
 
 		iterationFinishedAt := s.clock.Now()
@@ -169,16 +176,22 @@ func (s *Service) RunBoundedLiveLoop(ctx context.Context, req RunBoundedLiveLoop
 			result.StopReason = LiveLoopStopIterationError
 			result.StopDetails = err.Error()
 			result.FinishedAt = iterationFinishedAt
-			return result, err
+			return s.finishBoundedLiveLoop(ctx, result, err)
 		}
 		result.Iterations = append(result.Iterations, normalized)
 		result.IterationsSucceeded++
+		if err := s.recordLiveLoopIterationAudit(ctx, result.StartedAt, normalized); err != nil {
+			result.StopReason = LiveLoopStopAuditJournalError
+			result.StopDetails = err.Error()
+			result.FinishedAt = s.clock.Now()
+			return s.finishBoundedLiveLoop(ctx, result, err)
+		}
 		if normalized.RequestStop || normalized.Action == LiveLoopIterationActionStop {
 			result.StopReason = LiveLoopStopIterationRequested
 			result.StopDetails = normalized.Reason
 			result.FinishedAt = normalized.FinishedAt
 			result.CompletedWithinBounds = true
-			return result, nil
+			return s.finishBoundedLiveLoop(ctx, result, nil)
 		}
 	}
 
@@ -186,7 +199,7 @@ func (s *Service) RunBoundedLiveLoop(ctx context.Context, req RunBoundedLiveLoop
 	result.StopDetails = "max live loop iterations reached"
 	result.FinishedAt = s.clock.Now()
 	result.CompletedWithinBounds = true
-	return result, nil
+	return s.finishBoundedLiveLoop(ctx, result, nil)
 }
 
 func (s *Service) requireLiveLoopDependencies() error {
@@ -201,6 +214,97 @@ func (s *Service) requireLiveLoopDependencies() error {
 	}
 	if s.clock == nil {
 		return fmt.Errorf("live loop requires clock")
+	}
+	return nil
+}
+
+func (s *Service) recordLiveLoopRunStarted(ctx context.Context, result RunBoundedLiveLoopResult, req RunBoundedLiveLoopRequest) error {
+	if s.loopJournal == nil {
+		return nil
+	}
+	stats, err := s.loopJournal.RecordLiveLoopRunStarted(ctx, domainlive.LiveLoopRunStarted{
+		RunID:            result.RunID,
+		StartedAt:        result.StartedAt,
+		MaxIterations:    req.MaxIterations,
+		MaxRuntime:       req.MaxRuntime,
+		IterationTimeout: req.IterationTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("record live loop start audit %q: %w", result.RunID, err)
+	}
+	if stats.Total() == 0 {
+		return fmt.Errorf("live loop start audit did not record %q", result.RunID)
+	}
+	return nil
+}
+
+func (s *Service) finishBoundedLiveLoop(
+	ctx context.Context,
+	result RunBoundedLiveLoopResult,
+	runErr error,
+) (RunBoundedLiveLoopResult, error) {
+	if s.loopJournal == nil || result.StartedAt.IsZero() {
+		return result, runErr
+	}
+	stats, err := s.loopJournal.RecordLiveLoopRunFinished(ctx, domainlive.LiveLoopRunFinished{
+		RunID:                 result.RunID,
+		StartedAt:             result.StartedAt,
+		FinishedAt:            result.FinishedAt,
+		Status:                domainlive.LiveLoopRunStatusFromError(result.CompletedWithinBounds, runErr),
+		PreflightChecked:      result.PreflightChecked,
+		PreflightReady:        result.Preflight.Ready,
+		IterationsAttempted:   result.IterationsAttempted,
+		IterationsSucceeded:   result.IterationsSucceeded,
+		StopReason:            string(result.StopReason),
+		StopDetails:           result.StopDetails,
+		Error:                 domainlive.LiveLoopAuditError(runErr),
+		CompletedWithinBounds: result.CompletedWithinBounds,
+	})
+	if err != nil {
+		auditErr := fmt.Errorf("record live loop finish audit %q: %w", result.RunID, err)
+		if runErr != nil {
+			return result, errors.Join(runErr, auditErr)
+		}
+		return result, auditErr
+	}
+	if stats.Total() == 0 {
+		auditErr := fmt.Errorf("live loop finish audit did not record %q", result.RunID)
+		if runErr != nil {
+			return result, errors.Join(runErr, auditErr)
+		}
+		return result, auditErr
+	}
+	return result, runErr
+}
+
+func (s *Service) recordLiveLoopIterationAudit(
+	ctx context.Context,
+	runStartedAt time.Time,
+	iteration LiveLoopIterationResult,
+) error {
+	if s.loopJournal == nil {
+		return nil
+	}
+	stats, err := s.loopJournal.RecordLiveLoopIteration(ctx, domainlive.LiveLoopIterationAudit{
+		RunID:             iteration.RunID,
+		RunStartedAt:      runStartedAt,
+		Iteration:         iteration.Iteration,
+		Action:            domainlive.LiveLoopAuditIterationAction(iteration.Action),
+		RequestStop:       iteration.RequestStop,
+		Reason:            iteration.Reason,
+		DecisionID:        iteration.DecisionID,
+		SubmissionID:      iteration.SubmissionID,
+		ClientOrderID:     iteration.ClientOrderID,
+		ExchangeSubmitted: iteration.ExchangeSubmitted,
+		AlreadySubmitted:  iteration.AlreadySubmitted,
+		StartedAt:         iteration.StartedAt,
+		FinishedAt:        iteration.FinishedAt,
+	})
+	if err != nil {
+		return fmt.Errorf("record live loop iteration audit %q/%d: %w", iteration.RunID, iteration.Iteration, err)
+	}
+	if stats.Total() == 0 {
+		return fmt.Errorf("live loop iteration audit did not record %q/%d", iteration.RunID, iteration.Iteration)
 	}
 	return nil
 }

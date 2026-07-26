@@ -100,9 +100,11 @@ func runLiveHealth(ctx context.Context, args []string, deps liveHealthDependenci
 
 	killSwitch := postgres.NewRiskKillSwitchRepository(db)
 	liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
+	liveLoopJournal := postgres.NewLiveLoopJournalRepository(db)
 	serviceOptions := []applive.Option{
 		applive.WithKillSwitchRepository(killSwitch),
 		applive.WithLiveLoopIterationRunner(deps.newIterationRunner()),
+		applive.WithLiveLoopJournal(liveLoopJournal),
 	}
 	if liveHealthAccountPreflightEnabled(preflightRequest.ExpectedAccount) {
 		accountReader, err := deps.newAccountReader(cfg)

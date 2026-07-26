@@ -146,6 +146,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 
 	killSwitch := postgres.NewRiskKillSwitchRepository(db)
 	liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
+	liveLoopJournal := postgres.NewLiveLoopJournalRepository(db)
 	serviceOptions := []applive.Option{
 		applive.WithRiskDecisionReader(postgres.NewRiskDecisionRepository(db)),
 		applive.WithOrderExecutor(executor),
@@ -155,6 +156,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		applive.WithPositionSnapshotReader(positionReader),
 		applive.WithPositionSnapshotJournal(liveOrderJournal),
 		applive.WithKillSwitchRepository(killSwitch),
+		applive.WithLiveLoopJournal(liveLoopJournal),
 	}
 	if liveLoopAccountPreflightEnabled(preflightRequest.ExpectedAccount) {
 		accountReader, err := deps.newAccountReader(cfg)
