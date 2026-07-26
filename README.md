@@ -80,10 +80,11 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - App-layer live position reconciliation that compares exchange position size with submitted order executed quantity, persists durable position snapshots, and fails closed on unexpected flat/open/side/size mismatches.
 - App-layer bounded live-loop orchestration guard that runs live startup preflight before the first iteration, enforces explicit max-iteration/runtime/iteration-timeout limits, checks the Kill Switch before every iteration, and exposes operator-visible stop reasons without creating signals or placing orders by itself.
 - Operator-facing live-health CLI that runs the bounded live-loop guard with a no-op iteration, persists the same account/position preflight audit snapshots, reports health/stop reasons, and still cannot create signals or place orders.
-- App-layer persisted LIVE decision loop iteration runner that can process one explicitly selected approved risk decision through the existing submit, order-status reconciliation, and position reconciliation pipeline, then requests bounded-loop stop; it is not wired to an autonomous CLI yet.
+- App-layer persisted LIVE decision loop iteration runner that can process one explicitly selected approved risk decision through the existing submit, order-status reconciliation, and position reconciliation pipeline, then requests bounded-loop stop.
+- Explicitly armed live-loop CLI that refuses to run unless `-execute=true` is provided, reruns bounded startup preflight, checks the Kill Switch before iteration, processes exactly one operator-provided persisted LIVE risk decision, reconciles order status and position, and cannot discover signals or scan decisions by itself.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should wire the persisted-decision iteration runner into an explicitly armed bounded live-loop CLI while keeping operator-facing health and stop reasons visible and fail-closed.
+The next Phase 7 slices should add richer live-loop audit persistence and only then consider a tightly scoped decision-source scanner, while keeping operator-facing health and stop reasons visible and fail-closed.
 
 ## What This Is Not
 
@@ -497,6 +498,12 @@ Run the bounded live-loop health command before wiring any autonomous iteration 
 go run ./cmd/live-health -config configs/live.local.yaml -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_health_001 -max-iterations 1
 ```
 
+Run one explicitly armed bounded live-loop iteration for a persisted approved LIVE decision. This uses the same startup guard and per-iteration Kill Switch check as `live-health`, but the iteration source is still only the `-decision-id` you provide:
+
+```powershell
+go run ./cmd/live-loop -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
+```
+
 Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight including the same fresh account and flat-position guards, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
 
 ```powershell
@@ -511,7 +518,7 @@ go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decis
 
 The live submit command does not create signals, does not run strategies, does not size positions, and does not accept raw order payloads. It can only submit an already persisted approved LIVE risk-decision audit record.
 
-The app layer now has a bounded live-loop guardrail for future automation. It requires startup preflight before iteration one, finite runtime and iteration limits, per-iteration timeouts, and a fresh Kill Switch check before every iteration. A persisted-decision iteration runner exists in the app layer, but the current operator command still uses only a no-op iteration and does not create signals or place orders by itself.
+The live loop command does not create signals, does not scan for decisions, does not run strategies, and does not accept raw order payloads. It can only process one already persisted approved LIVE risk-decision audit record chosen by the operator.
 
 ## Regime Classification
 
@@ -566,6 +573,7 @@ make paper-auto-cycle VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PA
 make paper-cycle-smoke
 make paper-cycle-smoke-sh
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
+make live-loop CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-settle PAPER_EVENT_ID=paper_equity_001 PAPER_CLOSE_ID=paper_close_001 PAPER_POSITION_ID=paper_position_001 PAPER_MID_PRICE=101000 PAPER_CLOSE_REASON=TAKE_PROFIT PAPER_EXECUTION_AT=2026-07-16T13:00:00Z
