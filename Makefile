@@ -79,8 +79,12 @@ LIVE_AUDIT_LIMIT ?= 10
 LIVE_AUDIT_INCLUDE_ITERATIONS ?= 1
 LIVE_SCAN_SYMBOL ?=
 LIVE_SCAN_LIMIT ?= 10
+LIVE_READINESS_SYMBOL ?=
+LIVE_READINESS_PENDING_LIMIT ?= 1
+LIVE_READINESS_AUDIT_LIMIT ?= 10
+LIVE_READINESS_REQUIRE_PENDING ?= 1
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-loop-audit live-decision-scan live-submit docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-loop-audit live-decision-scan live-readiness live-submit docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -197,6 +201,9 @@ live-loop-audit:
 
 live-decision-scan:
 	$(GO) run ./cmd/live-decision-scan -config $(CONFIG) -limit $(LIVE_SCAN_LIMIT) $(if $(LIVE_SCAN_SYMBOL),-symbol $(LIVE_SCAN_SYMBOL),)
+
+live-readiness:
+	$(GO) run ./cmd/live-readiness -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -pending-limit $(LIVE_READINESS_PENDING_LIMIT) -audit-limit $(LIVE_READINESS_AUDIT_LIMIT) -require-pending=$(if $(LIVE_READINESS_REQUIRE_PENDING),true,false) $(if $(LIVE_READINESS_SYMBOL),-symbol $(LIVE_READINESS_SYMBOL),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
 
 live-submit:
 	$(GO) run ./cmd/live-submit -config $(CONFIG) -decision-id $(LIVE_DECISION_ID) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)
