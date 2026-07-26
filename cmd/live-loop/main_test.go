@@ -212,6 +212,169 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	}
 }
 
+func TestRunLiveLoopSelectsPendingDecisionThroughBoundedLoop(t *testing.T) {
+	t.Setenv("TRADING_LIVE_CONFIRM", "true")
+	t.Setenv("BYBIT_API_KEY", "actual-live-api-key-value")
+	t.Setenv("BYBIT_API_SECRET", "actual-live-api-secret-value")
+
+	now := time.Now().UTC()
+	decisionTime := now.Add(-2 * time.Second)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	mock.ExpectQuery("SELECT rd.decision_id, rd.intent_id, rd.mode").
+		WithArgs("BTCUSDT", 1).
+		WillReturnRows(liveLoopRiskDecisionRows(decisionTime))
+	mock.ExpectExec("INSERT INTO live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery("SELECT active, reason, source, created_at").
+		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_account_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO live_position_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery("SELECT active, reason, source, created_at").
+		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectQuery("SELECT decision_id, intent_id, mode").
+		WillReturnRows(liveLoopRiskDecisionRows(decisionTime))
+	mock.ExpectQuery("SELECT active, reason, source, created_at").
+		WillReturnRows(sqlmock.NewRows([]string{"active", "reason", "source", "created_at"}))
+	mock.ExpectExec("INSERT INTO live_order_submissions").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO live_order_acknowledgements").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO live_order_status_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO live_position_snapshots").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO live_loop_iterations").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE live_loop_runs").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	identity, err := deterministicLiveLoopIdentity("risk_decision_live_cli_0001", "live_loop_cli_0001")
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	executor := &fakeLiveLoopExecutor{receivedAt: now}
+	accountReader := &fakeLiveLoopAccountReader{
+		snapshot: validLiveLoopAccountSnapshot(t),
+	}
+
+	var output bytes.Buffer
+	err = runLiveLoop(context.Background(), []string{
+		"-config", writeLiveLoopConfig(t),
+		"-select-pending",
+		"-pending-symbol", "BTCUSDT",
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+		"-run-id", "live_loop_cli_0001",
+		"-max-iterations", "1",
+		"-max-runtime", "15s",
+		"-iteration-timeout", "10s",
+		"-execute",
+	}, liveLoopDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newExecutor: func(_ *config.Config, apiKey string, apiSecret string) (domainlive.OrderExecutor, error) {
+			if apiKey != "actual-live-api-key-value" || apiSecret != "actual-live-api-secret-value" {
+				t.Fatalf("executor credentials mismatch")
+			}
+			return executor, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			return accountReader, nil
+		},
+		output: &output,
+	})
+	if err != nil {
+		t.Fatalf("run live loop: %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+	if accountReader.calls != 1 {
+		t.Fatalf("account reader mismatch: calls=%d query=%#v", accountReader.calls, accountReader.query)
+	}
+	if executor.calls != 1 || executor.statusCalls != 1 || executor.positionCalls != 2 {
+		t.Fatalf("executor calls mismatch: submit=%d status=%d position=%d", executor.calls, executor.statusCalls, executor.positionCalls)
+	}
+	if executor.submission.DecisionID != "risk_decision_live_cli_0001" ||
+		executor.submission.SubmissionID != identity.SubmissionID ||
+		executor.submission.ClientOrderID != identity.ClientOrderID {
+		t.Fatalf("executor submission mismatch: %#v", executor.submission)
+	}
+
+	logs := output.String()
+	for _, want := range []string{
+		`"msg":"pending live decision selected"`,
+		`"decision_id":"risk_decision_live_cli_0001"`,
+		`"symbol":"BTCUSDT"`,
+		`"candidates_checked":1`,
+		`"msg":"live loop checked"`,
+		`"completed":true`,
+		`"run_id":"live_loop_cli_0001"`,
+		`"iteration_action":"SUBMITTED"`,
+		`"exchange_submitted":true`,
+		`"msg":"live loop completed"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
+		}
+	}
+	if strings.Contains(logs, "actual-live-api-key-value") || strings.Contains(logs, "actual-live-api-secret-value") {
+		t.Fatalf("logs must not contain credential values, got\n%s", logs)
+	}
+}
+
+func TestRunLiveLoopSelectPendingRequiresCandidateBeforePreflightSideEffects(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	mock.ExpectQuery("SELECT rd.decision_id, rd.intent_id, rd.mode").
+		WithArgs("", 1).
+		WillReturnRows(emptyLiveLoopRiskDecisionRows())
+
+	var executorCreated bool
+	var accountReaderCreated bool
+	err = runLiveLoop(context.Background(), []string{
+		"-config", writeLiveLoopConfig(t),
+		"-select-pending",
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+		"-run-id", "live_loop_cli_0001",
+		"-max-iterations", "1",
+		"-max-runtime", "15s",
+		"-iteration-timeout", "10s",
+		"-execute",
+	}, liveLoopDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
+			executorCreated = true
+			return &fakeLiveLoopExecutor{}, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			accountReaderCreated = true
+			return &fakeLiveLoopAccountReader{}, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no pending LIVE risk decisions") {
+		t.Fatalf("expected no pending decision error, got %v", err)
+	}
+	if executorCreated || accountReaderCreated {
+		t.Fatalf("missing pending candidate must stop before exchange readers: executor=%t account_reader=%t", executorCreated, accountReaderCreated)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+}
+
 func TestRunLiveLoopRequiresExecutorStatusReaderBeforeLoopSideEffects(t *testing.T) {
 	t.Setenv("TRADING_LIVE_CONFIRM", "true")
 	t.Setenv("BYBIT_API_KEY", "actual-live-api-key-value")
@@ -358,6 +521,71 @@ func TestValidateLiveLoopFlagsTableDriven(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("validate live loop flags: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateLiveLoopDecisionSourceFlagsTableDriven(t *testing.T) {
+	tests := []struct {
+		name          string
+		decisionID    string
+		selectPending bool
+		runID         string
+		wantErrSub    string
+	}{
+		{name: "explicit decision id", decisionID: "risk_decision_live_cli_0001"},
+		{name: "pending selector", selectPending: true},
+		{name: "both sources", decisionID: "risk_decision_live_cli_0001", selectPending: true, wantErrSub: "decision-id"},
+		{name: "missing source", wantErrSub: "decision-id is required"},
+		{name: "untrimmed run id", decisionID: "risk_decision_live_cli_0001", runID: " live_loop_cli_0001 ", wantErrSub: "run-id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateLiveLoopDecisionSourceFlags(tt.decisionID, tt.selectPending, tt.runID)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate live loop decision source flags: %v", err)
+			}
+		})
+	}
+}
+
+func TestLiveLoopPendingDecisionQueryFromFlagsTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		symbol     string
+		enabled    bool
+		want       domainlive.PendingLiveDecisionQuery
+		wantErrSub string
+	}{
+		{name: "disabled", want: domainlive.PendingLiveDecisionQuery{}},
+		{name: "lowercase symbol normalizes", symbol: "btcusdt", enabled: true, want: domainlive.PendingLiveDecisionQuery{Symbol: "BTCUSDT", Limit: 1}},
+		{name: "empty symbol selects across all pending decisions", enabled: true, want: domainlive.PendingLiveDecisionQuery{Limit: 1}},
+		{name: "symbol without selector rejected", symbol: "BTCUSDT", wantErrSub: "select-pending"},
+		{name: "untrimmed symbol rejected", symbol: " BTCUSDT ", enabled: true, wantErrSub: "trimmed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := liveLoopPendingDecisionQueryFromFlags(tt.symbol, tt.enabled)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("build pending decision query: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("query mismatch: got %#v want %#v", got, tt.want)
 			}
 		})
 	}
@@ -511,16 +739,15 @@ func validLiveLoopFlatPositionSnapshot(query domainlive.PositionSnapshotQuery, o
 	})
 }
 
+func emptyLiveLoopRiskDecisionRows() *sqlmock.Rows {
+	return sqlmock.NewRows(liveLoopRiskDecisionColumns())
+}
+
 func liveLoopRiskDecisionRows(now time.Time) *sqlmock.Rows {
 	createdAt := now.Add(-2 * time.Second)
 	recordedAt := now.Add(-time.Second)
 	intentCreatedAt := now.Add(-time.Minute)
-	return sqlmock.NewRows([]string{
-		"decision_id", "intent_id", "mode", "hypothesis_id", "strategy_name", "symbol", "side",
-		"entry_price", "leverage", "confidence", "intent_reason", "intent_created_at",
-		"approved", "final_quantity", "max_loss", "stop_loss", "take_profit",
-		"reason", "checks_json", "created_at", "recorded_at",
-	}).AddRow(
+	return sqlmock.NewRows(liveLoopRiskDecisionColumns()).AddRow(
 		"risk_decision_live_cli_0001",
 		"risk_intent_live_cli_0001",
 		"LIVE",
@@ -543,6 +770,15 @@ func liveLoopRiskDecisionRows(now time.Time) *sqlmock.Rows {
 		createdAt,
 		recordedAt,
 	)
+}
+
+func liveLoopRiskDecisionColumns() []string {
+	return []string{
+		"decision_id", "intent_id", "mode", "hypothesis_id", "strategy_name", "symbol", "side",
+		"entry_price", "leverage", "confidence", "intent_reason", "intent_created_at",
+		"approved", "final_quantity", "max_loss", "stop_loss", "take_profit",
+		"reason", "checks_json", "created_at", "recorded_at",
+	}
 }
 
 func writeLiveLoopConfig(t *testing.T) string {

@@ -28,6 +28,16 @@ type PendingLiveDecisionReport struct {
 	Candidates []domainlive.PendingLiveDecision
 }
 
+type SelectPendingLiveDecisionRequest struct {
+	Symbol string
+}
+
+type SelectPendingLiveDecisionResult struct {
+	Selected          bool
+	Decision          domainlive.PendingLiveDecision
+	CandidatesChecked int
+}
+
 func (s *Service) BuildPendingLiveDecisionReport(
 	ctx context.Context,
 	req PendingLiveDecisionReportRequest,
@@ -79,4 +89,26 @@ func (s *Service) BuildPendingLiveDecisionReport(
 		report.Summary.Total++
 	}
 	return report, nil
+}
+
+func (s *Service) SelectNextPendingLiveDecision(
+	ctx context.Context,
+	req SelectPendingLiveDecisionRequest,
+) (SelectPendingLiveDecisionResult, error) {
+	report, err := s.BuildPendingLiveDecisionReport(ctx, PendingLiveDecisionReportRequest{
+		Symbol: req.Symbol,
+		Limit:  1,
+	})
+	if err != nil {
+		return SelectPendingLiveDecisionResult{}, err
+	}
+	result := SelectPendingLiveDecisionResult{
+		CandidatesChecked: report.Summary.Total,
+	}
+	if len(report.Candidates) == 0 {
+		return result, nil
+	}
+	result.Selected = true
+	result.Decision = report.Candidates[0]
+	return result, nil
 }

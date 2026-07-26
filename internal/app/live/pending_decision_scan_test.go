@@ -98,6 +98,47 @@ func TestServiceBuildPendingLiveDecisionReportRejectsUnsafeInputsTableDriven(t *
 	}
 }
 
+func TestServiceSelectNextPendingLiveDecisionSelectsOldestCandidate(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	reader := &fakePendingLiveDecisionReader{candidates: []domainlive.PendingLiveDecision{
+		pendingLiveDecision("risk_decision_live_pending_0001", "BTCUSDT", now.Add(-2*time.Minute)),
+		pendingLiveDecision("risk_decision_live_pending_0002", "BTCUSDT", now.Add(-time.Minute)),
+	}}
+	service := applive.NewService(applive.WithPendingLiveDecisionReader(reader))
+
+	got, err := service.SelectNextPendingLiveDecision(context.Background(), applive.SelectPendingLiveDecisionRequest{
+		Symbol: "btcusdt",
+	})
+	if err != nil {
+		t.Fatalf("select next pending live decision: %v", err)
+	}
+	if reader.calls != 1 || reader.query.Symbol != "BTCUSDT" || reader.query.Limit != 1 {
+		t.Fatalf("reader query mismatch: calls=%d query=%#v", reader.calls, reader.query)
+	}
+	if !got.Selected || got.CandidatesChecked != 2 {
+		t.Fatalf("selection summary mismatch: %#v", got)
+	}
+	if got.Decision.Decision.DecisionID != "risk_decision_live_pending_0001" {
+		t.Fatalf("selected decision mismatch: %#v", got.Decision)
+	}
+}
+
+func TestServiceSelectNextPendingLiveDecisionReturnsEmptySelection(t *testing.T) {
+	reader := &fakePendingLiveDecisionReader{}
+	service := applive.NewService(applive.WithPendingLiveDecisionReader(reader))
+
+	got, err := service.SelectNextPendingLiveDecision(context.Background(), applive.SelectPendingLiveDecisionRequest{})
+	if err != nil {
+		t.Fatalf("select next pending live decision: %v", err)
+	}
+	if reader.calls != 1 || reader.query.Limit != 1 {
+		t.Fatalf("reader query mismatch: calls=%d query=%#v", reader.calls, reader.query)
+	}
+	if got.Selected || got.CandidatesChecked != 0 || got.Decision.Decision.DecisionID != "" {
+		t.Fatalf("expected empty selection, got %#v", got)
+	}
+}
+
 type fakePendingLiveDecisionReader struct {
 	query      domainlive.PendingLiveDecisionQuery
 	candidates []domainlive.PendingLiveDecision

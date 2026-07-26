@@ -86,9 +86,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Deployment-oriented live-loop smoke command that applies migrations, seeds one deterministic approved LIVE risk decision, runs the real bounded app/db pipeline against a fake exchange adapter, and verifies durable risk/order/status/live-loop audit rows without contacting Bybit or placing a real order.
 - Operator-facing live-loop audit CLI that lists recent run and iteration audit rows with status, stop reason, decision/submission/client IDs, and exchange-submission flags without touching exchange APIs.
 - Read-only pending LIVE decision scanner that lists approved LIVE risk decisions with no live order submission yet, ordered FIFO, so an operator can choose an explicit `decision_id` for `live-loop` without enabling automatic discovery or order placement.
+- Explicitly armed pending LIVE decision selector for `live-loop` that can pick the oldest approved unsubmitted LIVE decision only when `-select-pending` and `-execute=true` are both provided, then runs the same bounded preflight, Kill Switch, submission, reconciliation, and audit pipeline for exactly one decision.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should keep decision discovery read-only unless it is wired into an explicitly armed, bounded, operator-visible flow with the same fail-closed preflight and audit guarantees.
+The next Phase 7 slices should add stronger pending-decision reservation/locking, deployment runbooks, and operational observability before any always-on worker is considered.
 
 ## What This Is Not
 
@@ -533,7 +534,13 @@ go run ./cmd/live-decision-scan -config configs/live.local.yaml -symbol BTCUSDT 
 
 Use the logged `next_decision_id` or a listed `decision_id` as the explicit `-decision-id` for `live-loop` only after the operator checks the audit and safety context.
 
-Run one explicitly armed bounded live-loop iteration for a persisted approved LIVE decision. This uses the same startup guard and per-iteration Kill Switch check as `live-health`, but the iteration source is still only the `-decision-id` you provide:
+Alternatively, explicitly arm FIFO pending selection inside `live-loop`. This selects one oldest approved LIVE decision with no live order submission, optionally filtered by symbol, and cannot be combined with `-decision-id`:
+
+```powershell
+go run ./cmd/live-loop -config configs/live.local.yaml -select-pending -pending-symbol BTCUSDT -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
+```
+
+Run one explicitly armed bounded live-loop iteration for a persisted approved LIVE decision. This uses the same startup guard and per-iteration Kill Switch check as `live-health`; the iteration source must be either the `-decision-id` you provide or the explicitly armed FIFO selector above:
 
 ```powershell
 go run ./cmd/live-loop -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
@@ -553,7 +560,7 @@ go run ./cmd/live-submit -config configs/live.local.yaml -decision-id risk_decis
 
 The live submit command does not create signals, does not run strategies, does not size positions, and does not accept raw order payloads. It can only submit an already persisted approved LIVE risk-decision audit record.
 
-The live loop command does not create signals, does not scan for decisions, does not run strategies, and does not accept raw order payloads. It can only process one already persisted approved LIVE risk-decision audit record chosen by the operator.
+The live loop command does not create signals, does not run strategies, and does not accept raw order payloads. It can only process one already persisted approved LIVE risk-decision audit record chosen by the operator or selected through the explicitly armed FIFO pending selector.
 
 Both `live-health` and `live-loop` persist `live_loop_runs` and `live_loop_iterations` audit rows. If the run-start audit cannot be written, the loop fails before startup preflight or any order-capable iteration.
 
@@ -614,6 +621,7 @@ make live-loop-audit CONFIG=configs/live.local.yaml LIVE_AUDIT_LIMIT=10
 make live-decision-scan CONFIG=configs/live.local.yaml LIVE_SCAN_SYMBOL=BTCUSDT LIVE_SCAN_LIMIT=10
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
 make live-loop CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
+make live-loop CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-settle PAPER_EVENT_ID=paper_equity_001 PAPER_CLOSE_ID=paper_close_001 PAPER_POSITION_ID=paper_position_001 PAPER_MID_PRICE=101000 PAPER_CLOSE_REASON=TAKE_PROFIT PAPER_EXECUTION_AT=2026-07-16T13:00:00Z

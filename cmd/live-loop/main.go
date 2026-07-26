@@ -61,6 +61,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	flags.SetOutput(deps.output)
 	configPath := flags.String("config", "configs/config.example.yaml", "path to YAML config")
 	decisionID := flags.String("decision-id", "", "persisted LIVE risk decision id to process")
+	selectPending := flags.Bool("select-pending", false, "select the oldest approved pending LIVE risk decision with no live order submission")
+	pendingSymbol := flags.String("pending-symbol", "", "optional symbol filter used with -select-pending")
 	execute := flags.Bool("execute", false, "must be true to run the live loop iteration")
 	maxInitialCapitalValue := flags.String("max-initial-live-capital-usdt", defaultMaxInitialLiveCapitalUSDT, "operator safety cap for configured live initial capital")
 	subaccountConfirmed := flags.Bool("subaccount-confirmed", false, "set only after verifying API keys belong to the dedicated live subaccount")
@@ -80,11 +82,14 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		return fmt.Errorf("refusing to run live loop without -execute=true")
 	}
 
-	identity, err := deterministicLiveLoopIdentity(*decisionID, *runIDValue)
+	pendingQuery, err := liveLoopPendingDecisionQueryFromFlags(*pendingSymbol, *selectPending)
 	if err != nil {
 		return err
 	}
-	if err := validateLiveLoopFlags(identity.RunID, *maxIterations, *maxRuntime, *iterationTimeout); err != nil {
+	if err := validateLiveLoopDecisionSourceFlags(*decisionID, *selectPending, *runIDValue); err != nil {
+		return err
+	}
+	if err := validateLiveLoopBoundsFlags(*maxIterations, *maxRuntime, *iterationTimeout); err != nil {
 		return err
 	}
 	orderType, err := parseLiveOrderType(*orderTypeValue)
@@ -102,6 +107,17 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	maxInitialCapital, err := parsePositiveDecimalFlag("max-initial-live-capital-usdt", *maxInitialCapitalValue)
 	if err != nil {
 		return err
+	}
+	selectedDecisionID := strings.TrimSpace(*decisionID)
+	identity := liveLoopIdentity{}
+	if !*selectPending {
+		identity, err = deterministicLiveLoopIdentity(selectedDecisionID, *runIDValue)
+		if err != nil {
+			return err
+		}
+		if err := validateLiveLoopRunIDFlag(identity.RunID); err != nil {
+			return err
+		}
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -122,6 +138,29 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		return fmt.Errorf("connect postgres for live loop: %w", err)
 	}
 	defer db.Close()
+
+	riskDecisionRepo := postgres.NewRiskDecisionRepository(db)
+	if *selectPending {
+		selectionService := applive.NewService(applive.WithPendingLiveDecisionReader(riskDecisionRepo))
+		selection, err := selectionService.SelectNextPendingLiveDecision(loopCtx, applive.SelectPendingLiveDecisionRequest{
+			Symbol: pendingQuery.Symbol,
+		})
+		if err != nil {
+			return err
+		}
+		if !selection.Selected {
+			return fmt.Errorf("no pending LIVE risk decisions found")
+		}
+		selectedDecisionID = selection.Decision.Decision.DecisionID
+		logPendingLiveDecisionSelection(log, selection)
+		identity, err = deterministicLiveLoopIdentity(selectedDecisionID, *runIDValue)
+		if err != nil {
+			return err
+		}
+		if err := validateLiveLoopRunIDFlag(identity.RunID); err != nil {
+			return err
+		}
+	}
 
 	preflightRequest, err := liveLoopPreflightRequestFromConfig(cfg, *subaccountConfirmed, maxInitialCapital)
 	if err != nil {
@@ -148,7 +187,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	liveOrderJournal := postgres.NewLiveOrderJournalRepository(db)
 	liveLoopJournal := postgres.NewLiveLoopJournalRepository(db)
 	serviceOptions := []applive.Option{
-		applive.WithRiskDecisionReader(postgres.NewRiskDecisionRepository(db)),
+		applive.WithRiskDecisionReader(riskDecisionRepo),
+		applive.WithPendingLiveDecisionReader(riskDecisionRepo),
 		applive.WithOrderExecutor(executor),
 		applive.WithOrderJournal(liveOrderJournal),
 		applive.WithOrderStatusReader(statusReader),
@@ -170,7 +210,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	}
 	service := applive.NewService(serviceOptions...)
 	order := applive.PersistedDecisionLiveLoopOrder{
-		DecisionID:    strings.TrimSpace(*decisionID),
+		DecisionID:    selectedDecisionID,
 		SubmissionID:  identity.SubmissionID,
 		ClientOrderID: identity.ClientOrderID,
 		Exchange:      strings.ToLower(strings.TrimSpace(cfg.Exchange.Primary)),
@@ -251,6 +291,44 @@ func deterministicLiveLoopIdentity(decisionID string, runID string) (liveLoopIde
 	return identity, nil
 }
 
+func liveLoopPendingDecisionQueryFromFlags(symbol string, enabled bool) (domainlive.PendingLiveDecisionQuery, error) {
+	trimmedSymbol := strings.TrimSpace(symbol)
+	if !enabled {
+		if trimmedSymbol != "" {
+			return domainlive.PendingLiveDecisionQuery{}, fmt.Errorf("pending-symbol requires -select-pending")
+		}
+		return domainlive.PendingLiveDecisionQuery{}, nil
+	}
+	if symbol != trimmedSymbol {
+		return domainlive.PendingLiveDecisionQuery{}, fmt.Errorf("pending-symbol must be trimmed")
+	}
+	query := domainlive.PendingLiveDecisionQuery{
+		Symbol: strings.ToUpper(trimmedSymbol),
+		Limit:  1,
+	}
+	if err := domainlive.ValidatePendingLiveDecisionQuery(query); err != nil {
+		return domainlive.PendingLiveDecisionQuery{}, err
+	}
+	return query, nil
+}
+
+func validateLiveLoopDecisionSourceFlags(decisionID string, selectPending bool, runID string) error {
+	var problems []string
+	if selectPending && strings.TrimSpace(decisionID) != "" {
+		problems = append(problems, "decision-id must be empty when -select-pending is used")
+	}
+	if !selectPending && strings.TrimSpace(decisionID) == "" {
+		problems = append(problems, "decision-id is required unless -select-pending is used")
+	}
+	if runID != strings.TrimSpace(runID) {
+		problems = append(problems, "run-id must be trimmed")
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("live loop decision source validation failed: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 func liveLoopPreflightRequestFromConfig(cfg *config.Config, subaccountConfirmed bool, maxInitialCapital decimal.Decimal) (applive.PreflightLiveStartupRequest, error) {
 	if cfg == nil {
 		return applive.PreflightLiveStartupRequest{}, fmt.Errorf("config is required")
@@ -310,6 +388,22 @@ func liveLoopExpectedFlatPositionsFromConfig(cfg *config.Config) []domainlive.Po
 }
 
 func validateLiveLoopFlags(runID string, maxIterations int, maxRuntime time.Duration, iterationTimeout time.Duration) error {
+	problems := append(liveLoopRunIDProblems(runID), liveLoopBoundsProblems(maxIterations, maxRuntime, iterationTimeout)...)
+	if len(problems) > 0 {
+		return fmt.Errorf("live loop flag validation failed: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func validateLiveLoopRunIDFlag(runID string) error {
+	problems := liveLoopRunIDProblems(runID)
+	if len(problems) > 0 {
+		return fmt.Errorf("live loop flag validation failed: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func liveLoopRunIDProblems(runID string) []string {
 	var problems []string
 	if strings.TrimSpace(runID) == "" {
 		problems = append(problems, "run-id is required")
@@ -317,6 +411,19 @@ func validateLiveLoopFlags(runID string, maxIterations int, maxRuntime time.Dura
 	if runID != strings.TrimSpace(runID) {
 		problems = append(problems, "run-id must be trimmed")
 	}
+	return problems
+}
+
+func validateLiveLoopBoundsFlags(maxIterations int, maxRuntime time.Duration, iterationTimeout time.Duration) error {
+	problems := liveLoopBoundsProblems(maxIterations, maxRuntime, iterationTimeout)
+	if len(problems) > 0 {
+		return fmt.Errorf("live loop flag validation failed: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func liveLoopBoundsProblems(maxIterations int, maxRuntime time.Duration, iterationTimeout time.Duration) []string {
+	var problems []string
 	if maxIterations <= 0 {
 		problems = append(problems, "max-iterations must be positive")
 	}
@@ -335,10 +442,7 @@ func validateLiveLoopFlags(runID string, maxIterations int, maxRuntime time.Dura
 	if maxRuntime > 0 && iterationTimeout > maxRuntime {
 		problems = append(problems, "iteration-timeout must not exceed max-runtime")
 	}
-	if len(problems) > 0 {
-		return fmt.Errorf("live loop flag validation failed: %s", strings.Join(problems, "; "))
-	}
-	return nil
+	return problems
 }
 
 func parsePositiveDecimalFlag(field string, value string) (decimal.Decimal, error) {
@@ -442,6 +546,21 @@ func lookupNonEmptyEnv(name string) (string, bool) {
 func lookupEnvValue(name string) string {
 	value, _ := os.LookupEnv(strings.TrimSpace(name))
 	return strings.TrimSpace(value)
+}
+
+func logPendingLiveDecisionSelection(log *slog.Logger, selection applive.SelectPendingLiveDecisionResult) {
+	record := selection.Decision.Decision
+	log.Info(
+		"pending live decision selected",
+		"decision_id", record.DecisionID,
+		"symbol", record.Symbol,
+		"side", record.Side,
+		"entry_price", record.EntryPrice.String(),
+		"quantity", record.Decision.FinalQuantity.String(),
+		"max_loss", record.Decision.MaxLoss.String(),
+		"created_at", record.Decision.CreatedAt.Format(time.RFC3339Nano),
+		"candidates_checked", selection.CandidatesChecked,
+	)
 }
 
 func logLiveLoopResult(log *slog.Logger, result applive.RunBoundedLiveLoopResult, runErr error) {

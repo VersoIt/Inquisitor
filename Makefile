@@ -53,6 +53,8 @@ PAPER_SMOKE_VALIDATION_ID ?= paper_cycle_smoke_001
 PAPER_SMOKE_QUOTE_AS_OF ?= 2026-07-18T12:00:01Z
 PAPER_SMOKE_EXIT_QUOTE_AS_OF ?= 2026-07-18T12:01:01Z
 LIVE_DECISION_ID ?=
+LIVE_SELECT_PENDING ?=
+LIVE_PENDING_SYMBOL ?=
 LIVE_MAX_INITIAL_CAPITAL ?= 100
 LIVE_SUBACCOUNT_CONFIRMED ?=
 LIVE_EXECUTE ?=
@@ -185,7 +187,7 @@ live-health:
 	$(GO) run ./cmd/live-health -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -run-id $(LIVE_HEALTH_RUN_ID) -max-iterations $(LIVE_HEALTH_MAX_ITERATIONS) -max-runtime $(LIVE_HEALTH_MAX_RUNTIME) -iteration-timeout $(LIVE_HEALTH_ITERATION_TIMEOUT) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
 
 live-loop:
-	$(GO) run ./cmd/live-loop -config $(CONFIG) -decision-id $(LIVE_DECISION_ID) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -max-iterations $(LIVE_LOOP_MAX_ITERATIONS) -max-runtime $(LIVE_LOOP_MAX_RUNTIME) -iteration-timeout $(LIVE_LOOP_ITERATION_TIMEOUT) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_LOOP_RUN_ID),-run-id $(LIVE_LOOP_RUN_ID),) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)
+	$(GO) run ./cmd/live-loop -config $(CONFIG) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -max-iterations $(LIVE_LOOP_MAX_ITERATIONS) -max-runtime $(LIVE_LOOP_MAX_RUNTIME) -iteration-timeout $(LIVE_LOOP_ITERATION_TIMEOUT) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_LOOP_RUN_ID),-run-id $(LIVE_LOOP_RUN_ID),) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)
 
 live-loop-smoke:
 	$(GO) run ./cmd/live-loop-smoke -config $(CONFIG) -migrations $(MIGRATIONS) -run-id $(LIVE_SMOKE_RUN_ID) -decision-id $(LIVE_SMOKE_DECISION_ID) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -cleanup=$(if $(LIVE_SMOKE_CLEANUP),true,false) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,) $(if $(LIVE_SMOKE_REQUIRE_LIVE_CONFIG),-require-live-config,)
