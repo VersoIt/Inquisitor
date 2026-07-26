@@ -153,6 +153,89 @@ func TestLiveLoopAuditStatsAndStatusHelpers(t *testing.T) {
 	}
 }
 
+func TestValidateLiveLoopRunAuditRejectsUnsafeInputsTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*live.LiveLoopRunAudit)
+		wantErrSub string
+	}{
+		{name: "valid completed", mutate: func(*live.LiveLoopRunAudit) {}},
+		{name: "valid running", mutate: func(r *live.LiveLoopRunAudit) {
+			r.Status = live.LiveLoopRunStatusRunning
+			r.FinishedAt = time.Time{}
+			r.CompletedWithinBounds = false
+			r.IterationsAttempted = 0
+			r.IterationsSucceeded = 0
+			r.StopReason = ""
+			r.Iterations = nil
+		}},
+		{name: "missing run id", mutate: func(r *live.LiveLoopRunAudit) { r.RunID = "" }, wantErrSub: "run_id"},
+		{name: "unknown status", mutate: func(r *live.LiveLoopRunAudit) { r.Status = "BROKEN" }, wantErrSub: "status"},
+		{name: "running with finish", mutate: func(r *live.LiveLoopRunAudit) {
+			r.Status = live.LiveLoopRunStatusRunning
+			r.CompletedWithinBounds = false
+		}, wantErrSub: "finished_at"},
+		{name: "completed outside bounds", mutate: func(r *live.LiveLoopRunAudit) { r.CompletedWithinBounds = false }, wantErrSub: "within bounds"},
+		{name: "failed without error", mutate: func(r *live.LiveLoopRunAudit) {
+			r.Status = live.LiveLoopRunStatusFailed
+			r.CompletedWithinBounds = false
+			r.Error = ""
+		}, wantErrSub: "error"},
+		{name: "iteration run mismatch", mutate: func(r *live.LiveLoopRunAudit) { r.Iterations[0].RunID = "other_run" }, wantErrSub: "run_id must match"},
+		{name: "iteration started mismatch", mutate: func(r *live.LiveLoopRunAudit) {
+			r.Iterations[0].RunStartedAt = r.StartedAt.Add(time.Second)
+		}, wantErrSub: "run_started_at"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := validLiveLoopRunAudit()
+			tt.mutate(&run)
+
+			err := live.ValidateLiveLoopRunAudit(run)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate run audit: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateLiveLoopAuditQueryRejectsUnsafeInputsTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      live.LiveLoopAuditQuery
+		wantErrSub string
+	}{
+		{name: "valid empty"},
+		{name: "valid status", query: live.LiveLoopAuditQuery{Status: live.LiveLoopRunStatusCompleted, Limit: 10}},
+		{name: "untrimmed run id", query: live.LiveLoopAuditQuery{RunID: " live_loop_domain_0001 "}, wantErrSub: "run_id"},
+		{name: "unknown status", query: live.LiveLoopAuditQuery{Status: "BROKEN"}, wantErrSub: "status"},
+		{name: "negative limit", query: live.LiveLoopAuditQuery{Limit: -1}, wantErrSub: "limit"},
+		{name: "limit above max", query: live.LiveLoopAuditQuery{Limit: 101}, wantErrSub: "limit"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := live.ValidateLiveLoopAuditQuery(tt.query)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate audit query: %v", err)
+			}
+		})
+	}
+}
+
 type assertErr string
 
 func (e assertErr) Error() string {
@@ -202,5 +285,27 @@ func validLiveLoopIterationAudit() live.LiveLoopIterationAudit {
 		ExchangeSubmitted: true,
 		StartedAt:         startedAt.Add(time.Second),
 		FinishedAt:        startedAt.Add(2 * time.Second),
+	}
+}
+
+func validLiveLoopRunAudit() live.LiveLoopRunAudit {
+	startedAt := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	iteration := validLiveLoopIterationAudit()
+	return live.LiveLoopRunAudit{
+		RunID:                 "live_loop_domain_0001",
+		StartedAt:             startedAt,
+		MaxIterations:         3,
+		MaxRuntime:            time.Minute,
+		IterationTimeout:      5 * time.Second,
+		Status:                live.LiveLoopRunStatusCompleted,
+		FinishedAt:            startedAt.Add(3 * time.Second),
+		PreflightChecked:      true,
+		PreflightReady:        true,
+		IterationsAttempted:   1,
+		IterationsSucceeded:   1,
+		StopReason:            "ITERATION_REQUESTED",
+		StopDetails:           "live_order_submitted",
+		CompletedWithinBounds: true,
+		Iterations:            []live.LiveLoopIterationAudit{iteration},
 	}
 }

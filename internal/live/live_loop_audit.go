@@ -63,6 +63,32 @@ type LiveLoopIterationAudit struct {
 	FinishedAt        time.Time
 }
 
+type LiveLoopRunAudit struct {
+	RunID                 string
+	StartedAt             time.Time
+	MaxIterations         int
+	MaxRuntime            time.Duration
+	IterationTimeout      time.Duration
+	Status                LiveLoopRunStatus
+	FinishedAt            time.Time
+	PreflightChecked      bool
+	PreflightReady        bool
+	IterationsAttempted   int
+	IterationsSucceeded   int
+	StopReason            string
+	StopDetails           string
+	Error                 string
+	CompletedWithinBounds bool
+	Iterations            []LiveLoopIterationAudit
+}
+
+type LiveLoopAuditQuery struct {
+	RunID             string
+	Status            LiveLoopRunStatus
+	Limit             int
+	IncludeIterations bool
+}
+
 type LiveLoopAuditStats struct {
 	Inserted int
 	Updated  int
@@ -73,6 +99,10 @@ type LiveLoopJournal interface {
 	RecordLiveLoopRunStarted(ctx context.Context, run LiveLoopRunStarted) (LiveLoopAuditStats, error)
 	RecordLiveLoopRunFinished(ctx context.Context, run LiveLoopRunFinished) (LiveLoopAuditStats, error)
 	RecordLiveLoopIteration(ctx context.Context, iteration LiveLoopIterationAudit) (LiveLoopAuditStats, error)
+}
+
+type LiveLoopAuditReader interface {
+	ListLiveLoopRunAudits(ctx context.Context, query LiveLoopAuditQuery) ([]LiveLoopRunAudit, error)
 }
 
 func (s LiveLoopAuditStats) Total() int {
@@ -194,6 +224,106 @@ func ValidateLiveLoopIterationAudit(iteration LiveLoopIterationAudit) error {
 	}
 	if len(problems) > 0 {
 		return errors.New("live loop iteration audit validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func ValidateLiveLoopRunAudit(run LiveLoopRunAudit) error {
+	var problems []string
+	problems = append(problems, validateLiveLoopRunIdentity(run.RunID, run.StartedAt)...)
+	if run.MaxIterations <= 0 {
+		problems = append(problems, "max_iterations must be positive")
+	}
+	if run.MaxRuntime <= 0 {
+		problems = append(problems, "max_runtime must be positive")
+	}
+	if run.IterationTimeout <= 0 {
+		problems = append(problems, "iteration_timeout must be positive")
+	}
+	if run.MaxRuntime > 0 && run.IterationTimeout > run.MaxRuntime {
+		problems = append(problems, "iteration_timeout must not exceed max_runtime")
+	}
+	if !KnownLiveLoopRunStatus(run.Status) {
+		problems = append(problems, "status must be RUNNING, COMPLETED, or FAILED")
+	}
+	if run.Status == LiveLoopRunStatusRunning {
+		if !run.FinishedAt.IsZero() {
+			problems = append(problems, "running run must not include finished_at")
+		}
+		if run.CompletedWithinBounds {
+			problems = append(problems, "running run must not be completed within bounds")
+		}
+	} else {
+		if run.FinishedAt.IsZero() {
+			problems = append(problems, "finished_at is required for finished run")
+		}
+		if !run.StartedAt.IsZero() && !run.FinishedAt.IsZero() && run.FinishedAt.Before(run.StartedAt) {
+			problems = append(problems, "finished_at must not be before started_at")
+		}
+	}
+	if run.Status == LiveLoopRunStatusCompleted && !run.CompletedWithinBounds {
+		problems = append(problems, "completed run must be completed within bounds")
+	}
+	if run.Status == LiveLoopRunStatusFailed && strings.TrimSpace(run.Error) == "" {
+		problems = append(problems, "failed run requires error")
+	}
+	if run.IterationsAttempted < 0 {
+		problems = append(problems, "iterations_attempted must be non-negative")
+	}
+	if run.IterationsSucceeded < 0 {
+		problems = append(problems, "iterations_succeeded must be non-negative")
+	}
+	if run.IterationsSucceeded > run.IterationsAttempted {
+		problems = append(problems, "iterations_succeeded must not exceed iterations_attempted")
+	}
+	if run.StopReason != strings.TrimSpace(run.StopReason) {
+		problems = append(problems, "stop_reason must be trimmed")
+	}
+	if run.Error != strings.TrimSpace(run.Error) {
+		problems = append(problems, "error must be trimmed")
+	}
+	for index, iteration := range run.Iterations {
+		if err := ValidateLiveLoopIterationAudit(iteration); err != nil {
+			problems = append(problems, fmt.Sprintf("iteration[%d]: %s", index, err.Error()))
+		}
+		if iteration.RunID != run.RunID {
+			problems = append(problems, fmt.Sprintf("iteration[%d] run_id must match run", index))
+		}
+		if !iteration.RunStartedAt.Equal(run.StartedAt) {
+			problems = append(problems, fmt.Sprintf("iteration[%d] run_started_at must match run", index))
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New("live loop run audit validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func ValidateLiveLoopRunAudits(runs []LiveLoopRunAudit) error {
+	for index, run := range runs {
+		if err := ValidateLiveLoopRunAudit(run); err != nil {
+			return fmt.Errorf("live_loop_run_audit[%d]: %w", index, err)
+		}
+	}
+	return nil
+}
+
+func ValidateLiveLoopAuditQuery(query LiveLoopAuditQuery) error {
+	var problems []string
+	if query.RunID != strings.TrimSpace(query.RunID) {
+		problems = append(problems, "run_id must be trimmed")
+	}
+	if query.Status != "" && !KnownLiveLoopRunStatus(query.Status) {
+		problems = append(problems, "status must be RUNNING, COMPLETED, or FAILED")
+	}
+	if query.Limit < 0 {
+		problems = append(problems, "limit must be greater than or equal to zero")
+	}
+	if query.Limit > 100 {
+		problems = append(problems, "limit must be no more than 100")
+	}
+	if len(problems) > 0 {
+		return errors.New("live loop audit query validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
 }

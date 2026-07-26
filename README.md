@@ -84,9 +84,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Explicitly armed live-loop CLI that refuses to run unless `-execute=true` is provided, reruns bounded startup preflight, checks the Kill Switch before iteration, processes exactly one operator-provided persisted LIVE risk decision, reconciles order status and position, and cannot discover signals or scan decisions by itself.
 - Durable live-loop run and iteration audit records for operator-facing health/live-loop commands, including run bounds, preflight readiness, iteration actions, stop reasons, completion status, and errors.
 - Deployment-oriented live-loop smoke command that applies migrations, seeds one deterministic approved LIVE risk decision, runs the real bounded app/db pipeline against a fake exchange adapter, and verifies durable risk/order/status/live-loop audit rows without contacting Bybit or placing a real order.
+- Operator-facing live-loop audit CLI that lists recent run and iteration audit rows with status, stop reason, decision/submission/client IDs, and exchange-submission flags without touching exchange APIs.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should tighten operator visibility around live-loop audit/status inspection and only then consider a tightly scoped decision-source scanner, while keeping health and stop reasons visible and fail-closed.
+The next Phase 7 slices should consider a tightly scoped decision-source scanner only after the explicit operator-run path remains stable, visible, and fail-closed.
 
 ## What This Is Not
 
@@ -510,6 +511,19 @@ go run ./cmd/live-loop-smoke -config configs/config.example.yaml -migrations mig
 
 Pass `-require-live-config` when you want the smoke to require `trading.enabled=true`, `trading.mode=live`, and `trading.allow_live=true` from the provided config instead of using smoke-only in-memory live flags. This command does not validate real Bybit credentials; use `live-preflight` and `live-health` for real account/API readiness.
 
+Inspect recent live-loop audit rows after smoke, health, or an armed live-loop attempt. This command is read-only and does not contact exchange APIs:
+
+```powershell
+go run ./cmd/live-loop-audit -config configs/live.local.yaml -limit 10
+```
+
+Useful filters:
+
+```powershell
+go run ./cmd/live-loop-audit -config configs/live.local.yaml -status FAILED -limit 5
+go run ./cmd/live-loop-audit -config configs/live.local.yaml -run-id live_loop_001
+```
+
 Run one explicitly armed bounded live-loop iteration for a persisted approved LIVE decision. This uses the same startup guard and per-iteration Kill Switch check as `live-health`, but the iteration source is still only the `-decision-id` you provide:
 
 ```powershell
@@ -587,6 +601,7 @@ make paper-auto-cycle VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PA
 make paper-cycle-smoke
 make paper-cycle-smoke-sh
 make live-loop-smoke CONFIG=configs/config.example.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
+make live-loop-audit CONFIG=configs/live.local.yaml LIVE_AUDIT_LIMIT=10
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
 make live-loop CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z

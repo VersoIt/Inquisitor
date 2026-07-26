@@ -71,8 +71,12 @@ LIVE_SMOKE_RUN_ID ?= live_loop_smoke_001
 LIVE_SMOKE_DECISION_ID ?= risk_decision_live_smoke_001
 LIVE_SMOKE_REQUIRE_LIVE_CONFIG ?=
 LIVE_SMOKE_CLEANUP ?= 1
+LIVE_AUDIT_RUN_ID ?=
+LIVE_AUDIT_STATUS ?=
+LIVE_AUDIT_LIMIT ?= 10
+LIVE_AUDIT_INCLUDE_ITERATIONS ?= 1
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-submit docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-loop-audit live-submit docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -183,6 +187,9 @@ live-loop:
 
 live-loop-smoke:
 	$(GO) run ./cmd/live-loop-smoke -config $(CONFIG) -migrations $(MIGRATIONS) -run-id $(LIVE_SMOKE_RUN_ID) -decision-id $(LIVE_SMOKE_DECISION_ID) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -cleanup=$(if $(LIVE_SMOKE_CLEANUP),true,false) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,) $(if $(LIVE_SMOKE_REQUIRE_LIVE_CONFIG),-require-live-config,)
+
+live-loop-audit:
+	$(GO) run ./cmd/live-loop-audit -config $(CONFIG) -limit $(LIVE_AUDIT_LIMIT) -include-iterations=$(if $(LIVE_AUDIT_INCLUDE_ITERATIONS),true,false) $(if $(LIVE_AUDIT_RUN_ID),-run-id $(LIVE_AUDIT_RUN_ID),) $(if $(LIVE_AUDIT_STATUS),-status $(LIVE_AUDIT_STATUS),)
 
 live-submit:
 	$(GO) run ./cmd/live-submit -config $(CONFIG) -decision-id $(LIVE_DECISION_ID) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)

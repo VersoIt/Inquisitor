@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
@@ -113,6 +114,87 @@ func (r *LiveLoopJournalRepository) RecordLiveLoopIteration(ctx context.Context,
 	return domainlive.LiveLoopAuditStats{Skipped: 1}, nil
 }
 
+func (r *LiveLoopJournalRepository) ListLiveLoopRunAudits(ctx context.Context, query domainlive.LiveLoopAuditQuery) ([]domainlive.LiveLoopRunAudit, error) {
+	if err := domainlive.ValidateLiveLoopAuditQuery(query); err != nil {
+		return nil, err
+	}
+	limit := query.Limit
+	if limit == 0 {
+		limit = 10
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT run_id, started_at, max_iterations, max_runtime_ns, iteration_timeout_ns,
+		       status, finished_at, preflight_checked, preflight_ready,
+		       iterations_attempted, iterations_succeeded, stop_reason, stop_details,
+		       error, completed_within_bounds
+		FROM live_loop_runs
+		WHERE ($1::text = '' OR run_id = $1)
+		  AND ($2::text = '' OR status = $2)
+		ORDER BY started_at DESC, id DESC
+		LIMIT $3
+	`, strings.TrimSpace(query.RunID), string(query.Status), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list live loop audit runs: %w", err)
+	}
+	defer rows.Close()
+
+	var runs []domainlive.LiveLoopRunAudit
+	for rows.Next() {
+		run, err := scanLiveLoopRunAudit(rows)
+		if err != nil {
+			return nil, err
+		}
+		if query.IncludeIterations {
+			iterations, err := r.listLiveLoopIterationAudits(ctx, run.RunID, run.StartedAt)
+			if err != nil {
+				return nil, err
+			}
+			run.Iterations = iterations
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate live loop audit runs: %w", err)
+	}
+	if err := domainlive.ValidateLiveLoopRunAudits(runs); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+func (r *LiveLoopJournalRepository) listLiveLoopIterationAudits(
+	ctx context.Context,
+	runID string,
+	runStartedAt time.Time,
+) ([]domainlive.LiveLoopIterationAudit, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT run_id, run_started_at, iteration, action, request_stop, reason,
+		       decision_id, submission_id, client_order_id,
+		       exchange_submitted, already_submitted, started_at, finished_at
+		FROM live_loop_iterations
+		WHERE run_id = $1
+		  AND run_started_at = $2
+		ORDER BY iteration ASC
+	`, runID, runStartedAt.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("list live loop audit iterations %s: %w", domainlive.FormatLiveLoopRunKey(runID, runStartedAt), err)
+	}
+	defer rows.Close()
+
+	var iterations []domainlive.LiveLoopIterationAudit
+	for rows.Next() {
+		iteration, err := scanLiveLoopIterationAudit(rows)
+		if err != nil {
+			return nil, err
+		}
+		iterations = append(iterations, iteration)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate live loop audit iterations %s: %w", domainlive.FormatLiveLoopRunKey(runID, runStartedAt), err)
+	}
+	return iterations, nil
+}
+
 func (r *LiveLoopJournalRepository) assertExistingLiveLoopRunStartMatches(ctx context.Context, args []any) error {
 	var exists int
 	if err := r.db.QueryRowContext(ctx, `
@@ -203,4 +285,76 @@ func liveLoopIterationSQLArgs(iteration domainlive.LiveLoopIterationAudit) []any
 		iteration.StartedAt.UTC(),
 		iteration.FinishedAt.UTC(),
 	}
+}
+
+func scanLiveLoopRunAudit(scanner interface{ Scan(dest ...any) error }) (domainlive.LiveLoopRunAudit, error) {
+	var (
+		run                domainlive.LiveLoopRunAudit
+		status             string
+		maxRuntimeNS       int64
+		iterationTimeoutNS int64
+		finishedAt         sql.NullTime
+	)
+	if err := scanner.Scan(
+		&run.RunID,
+		&run.StartedAt,
+		&run.MaxIterations,
+		&maxRuntimeNS,
+		&iterationTimeoutNS,
+		&status,
+		&finishedAt,
+		&run.PreflightChecked,
+		&run.PreflightReady,
+		&run.IterationsAttempted,
+		&run.IterationsSucceeded,
+		&run.StopReason,
+		&run.StopDetails,
+		&run.Error,
+		&run.CompletedWithinBounds,
+	); err != nil {
+		return domainlive.LiveLoopRunAudit{}, fmt.Errorf("scan live loop audit run: %w", err)
+	}
+	run.StartedAt = run.StartedAt.UTC()
+	run.MaxRuntime = time.Duration(maxRuntimeNS)
+	run.IterationTimeout = time.Duration(iterationTimeoutNS)
+	run.Status = domainlive.LiveLoopRunStatus(status)
+	if finishedAt.Valid {
+		run.FinishedAt = finishedAt.Time.UTC()
+	}
+	if err := domainlive.ValidateLiveLoopRunAudit(run); err != nil {
+		return domainlive.LiveLoopRunAudit{}, err
+	}
+	return run, nil
+}
+
+func scanLiveLoopIterationAudit(scanner interface{ Scan(dest ...any) error }) (domainlive.LiveLoopIterationAudit, error) {
+	var (
+		iteration domainlive.LiveLoopIterationAudit
+		action    string
+	)
+	if err := scanner.Scan(
+		&iteration.RunID,
+		&iteration.RunStartedAt,
+		&iteration.Iteration,
+		&action,
+		&iteration.RequestStop,
+		&iteration.Reason,
+		&iteration.DecisionID,
+		&iteration.SubmissionID,
+		&iteration.ClientOrderID,
+		&iteration.ExchangeSubmitted,
+		&iteration.AlreadySubmitted,
+		&iteration.StartedAt,
+		&iteration.FinishedAt,
+	); err != nil {
+		return domainlive.LiveLoopIterationAudit{}, fmt.Errorf("scan live loop audit iteration: %w", err)
+	}
+	iteration.RunStartedAt = iteration.RunStartedAt.UTC()
+	iteration.StartedAt = iteration.StartedAt.UTC()
+	iteration.FinishedAt = iteration.FinishedAt.UTC()
+	iteration.Action = domainlive.LiveLoopAuditIterationAction(action)
+	if err := domainlive.ValidateLiveLoopIterationAudit(iteration); err != nil {
+		return domainlive.LiveLoopIterationAudit{}, err
+	}
+	return iteration, nil
 }
