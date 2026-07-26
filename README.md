@@ -86,10 +86,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Deployment-oriented live-loop smoke command that applies migrations, seeds one deterministic approved LIVE risk decision, runs the real bounded app/db pipeline against a fake exchange adapter, and verifies durable risk/order/status/live-loop audit rows without contacting Bybit or placing a real order.
 - Operator-facing live-loop audit CLI that lists recent run and iteration audit rows with status, stop reason, decision/submission/client IDs, and exchange-submission flags without touching exchange APIs.
 - Read-only pending LIVE decision scanner that lists approved LIVE risk decisions with no live order submission yet, ordered FIFO, so an operator can choose an explicit `decision_id` for `live-loop` without enabling automatic discovery or order placement.
-- Explicitly armed pending LIVE decision selector for `live-loop` that can pick the oldest approved unsubmitted LIVE decision only when `-select-pending` and `-execute=true` are both provided, then runs the same bounded preflight, Kill Switch, submission, reconciliation, and audit pipeline for exactly one decision.
+- Explicitly armed pending LIVE decision selector for `live-loop` that can pick the oldest approved unsubmitted LIVE decision only when `-select-pending` and `-execute=true` are both provided, holds a PostgreSQL advisory lock so only one selector runs at a time, then runs the same bounded preflight, Kill Switch, submission, reconciliation, and audit pipeline for exactly one decision.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add stronger pending-decision reservation/locking, deployment runbooks, and operational observability before any always-on worker is considered.
+The next Phase 7 slices should add deployment runbooks, operational observability, and explicit live readiness checklists before any always-on worker is considered.
 
 ## What This Is Not
 
@@ -534,7 +534,7 @@ go run ./cmd/live-decision-scan -config configs/live.local.yaml -symbol BTCUSDT 
 
 Use the logged `next_decision_id` or a listed `decision_id` as the explicit `-decision-id` for `live-loop` only after the operator checks the audit and safety context.
 
-Alternatively, explicitly arm FIFO pending selection inside `live-loop`. This selects one oldest approved LIVE decision with no live order submission, optionally filtered by symbol, and cannot be combined with `-decision-id`:
+Alternatively, explicitly arm FIFO pending selection inside `live-loop`. This selects one oldest approved LIVE decision with no live order submission, optionally filtered by symbol, and cannot be combined with `-decision-id`. The selector holds a global PostgreSQL advisory lock for the whole bounded run, so only one pending selector can run at a time; set `database.max_open_conns` to `0` or at least `2` so the lock connection cannot starve normal repository queries:
 
 ```powershell
 go run ./cmd/live-loop -config configs/live.local.yaml -select-pending -pending-symbol BTCUSDT -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute

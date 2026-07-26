@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"os"
@@ -34,6 +35,9 @@ const maxLiveLoopCLIIterations = 100
 
 const maxLiveLoopCLIRuntime = 24 * time.Hour
 
+// Keep the namespace stable so rolling deploys share the same selector lock.
+const livePendingDecisionSelectionLockNamespace = "inquisitor.live.pending_decision_selection.v1"
+
 type liveLoopIdentity struct {
 	RunID         string
 	SubmissionID  string
@@ -46,6 +50,8 @@ type liveLoopDependencies struct {
 	newAccountReader func(*config.Config) (domainlive.AccountSnapshotReader, error)
 	output           io.Writer
 }
+
+type livePendingDecisionSelectionUnlock func(context.Context) error
 
 func main() {
 	if err := runLiveLoop(context.Background(), os.Args[1:], liveLoopDependencies{}); err != nil {
@@ -124,6 +130,11 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	if err != nil {
 		return err
 	}
+	if *selectPending {
+		if err := requireLivePendingDecisionSelectionLockCapacity(cfg.Database); err != nil {
+			return err
+		}
+	}
 	effectiveLogLevel := strings.TrimSpace(*logLevel)
 	if effectiveLogLevel == "" {
 		effectiveLogLevel = cfg.App.LogLevel
@@ -141,6 +152,17 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 
 	riskDecisionRepo := postgres.NewRiskDecisionRepository(db)
 	if *selectPending {
+		unlockPendingSelection, err := acquireLivePendingDecisionSelectionLock(loopCtx, db)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if unlockErr := unlockPendingSelection(context.Background()); unlockErr != nil {
+				log.Error("pending live decision selection lock release failed", "error", unlockErr)
+			}
+		}()
+		log.Info("pending live decision selection lock acquired", "symbol", pendingQuery.Symbol)
+
 		selectionService := applive.NewService(applive.WithPendingLiveDecisionReader(riskDecisionRepo))
 		selection, err := selectionService.SelectNextPendingLiveDecision(loopCtx, applive.SelectPendingLiveDecisionRequest{
 			Symbol: pendingQuery.Symbol,
@@ -327,6 +349,59 @@ func validateLiveLoopDecisionSourceFlags(decisionID string, selectPending bool, 
 		return fmt.Errorf("live loop decision source validation failed: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func requireLivePendingDecisionSelectionLockCapacity(cfg config.DatabaseConfig) error {
+	if cfg.MaxOpenConns == 1 {
+		return fmt.Errorf("-select-pending requires database.max_open_conns to be 0 or at least 2 so the advisory lock cannot starve repository queries")
+	}
+	return nil
+}
+
+func acquireLivePendingDecisionSelectionLock(
+	ctx context.Context,
+	db *sql.DB,
+) (livePendingDecisionSelectionUnlock, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database is required")
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reserve pending live decision selection lock connection: %w", err)
+	}
+
+	key := livePendingDecisionSelectionLockKey()
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&acquired); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("acquire pending live decision selection advisory lock: %w", err)
+	}
+	if !acquired {
+		_ = conn.Close()
+		return nil, fmt.Errorf("pending LIVE decision selector already running")
+	}
+
+	return func(unlockCtx context.Context) error {
+		var released bool
+		err := conn.QueryRowContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, key).Scan(&released)
+		closeErr := conn.Close()
+		if err != nil {
+			return fmt.Errorf("release pending live decision selection advisory lock: %w", err)
+		}
+		if !released {
+			return fmt.Errorf("release pending live decision selection advisory lock: lock was not held")
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close pending live decision selection lock connection: %w", closeErr)
+		}
+		return nil
+	}, nil
+}
+
+func livePendingDecisionSelectionLockKey() int64 {
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(livePendingDecisionSelectionLockNamespace))
+	return int64(hash.Sum64())
 }
 
 func liveLoopPreflightRequestFromConfig(cfg *config.Config, subaccountConfirmed bool, maxInitialCapital decimal.Decimal) (applive.PreflightLiveStartupRequest, error) {

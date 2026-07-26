@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -223,6 +224,9 @@ func TestRunLiveLoopSelectsPendingDecisionThroughBoundedLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
+	lockKey := livePendingDecisionSelectionLockKey()
+	mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(lockKey).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
 	mock.ExpectQuery("SELECT rd.decision_id, rd.intent_id, rd.mode").
 		WithArgs("BTCUSDT", 1).
 		WillReturnRows(liveLoopRiskDecisionRows(decisionTime))
@@ -252,6 +256,8 @@ func TestRunLiveLoopSelectsPendingDecisionThroughBoundedLoop(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("UPDATE live_loop_runs").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT pg_advisory_unlock").WithArgs(lockKey).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
 
 	identity, err := deterministicLiveLoopIdentity("risk_decision_live_cli_0001", "live_loop_cli_0001")
 	if err != nil {
@@ -264,7 +270,7 @@ func TestRunLiveLoopSelectsPendingDecisionThroughBoundedLoop(t *testing.T) {
 
 	var output bytes.Buffer
 	err = runLiveLoop(context.Background(), []string{
-		"-config", writeLiveLoopConfig(t),
+		"-config", writeLiveLoopConfigWithMaxOpenConns(t, 2),
 		"-select-pending",
 		"-pending-symbol", "BTCUSDT",
 		"-subaccount-confirmed",
@@ -309,6 +315,7 @@ func TestRunLiveLoopSelectsPendingDecisionThroughBoundedLoop(t *testing.T) {
 
 	logs := output.String()
 	for _, want := range []string{
+		`"msg":"pending live decision selection lock acquired"`,
 		`"msg":"pending live decision selected"`,
 		`"decision_id":"risk_decision_live_cli_0001"`,
 		`"symbol":"BTCUSDT"`,
@@ -334,14 +341,19 @@ func TestRunLiveLoopSelectPendingRequiresCandidateBeforePreflightSideEffects(t *
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
+	lockKey := livePendingDecisionSelectionLockKey()
+	mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(lockKey).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
 	mock.ExpectQuery("SELECT rd.decision_id, rd.intent_id, rd.mode").
 		WithArgs("", 1).
 		WillReturnRows(emptyLiveLoopRiskDecisionRows())
+	mock.ExpectQuery("SELECT pg_advisory_unlock").WithArgs(lockKey).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
 
 	var executorCreated bool
 	var accountReaderCreated bool
 	err = runLiveLoop(context.Background(), []string{
-		"-config", writeLiveLoopConfig(t),
+		"-config", writeLiveLoopConfigWithMaxOpenConns(t, 2),
 		"-select-pending",
 		"-subaccount-confirmed",
 		"-max-initial-live-capital-usdt", "100",
@@ -372,6 +384,82 @@ func TestRunLiveLoopSelectPendingRequiresCandidateBeforePreflightSideEffects(t *
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("sql expectations: %v", err)
+	}
+}
+
+func TestRunLiveLoopSelectPendingRequiresUnlockedSelectorBeforeSelection(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	lockKey := livePendingDecisionSelectionLockKey()
+	mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(lockKey).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(false))
+
+	var executorCreated bool
+	var accountReaderCreated bool
+	err = runLiveLoop(context.Background(), []string{
+		"-config", writeLiveLoopConfigWithMaxOpenConns(t, 2),
+		"-select-pending",
+		"-pending-symbol", "BTCUSDT",
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+		"-run-id", "live_loop_cli_0001",
+		"-max-iterations", "1",
+		"-max-runtime", "15s",
+		"-iteration-timeout", "10s",
+		"-execute",
+	}, liveLoopDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
+			executorCreated = true
+			return &fakeLiveLoopExecutor{}, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			accountReaderCreated = true
+			return &fakeLiveLoopAccountReader{}, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "selector already running") {
+		t.Fatalf("expected selector lock error, got %v", err)
+	}
+	if executorCreated || accountReaderCreated {
+		t.Fatalf("locked pending selector must stop before exchange readers: executor=%t account_reader=%t", executorCreated, accountReaderCreated)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+}
+
+func TestRunLiveLoopSelectPendingRequiresSpareDBConnectionBeforeOpen(t *testing.T) {
+	var opened bool
+
+	err := runLiveLoop(context.Background(), []string{
+		"-config", writeLiveLoopConfigWithMaxOpenConns(t, 1),
+		"-select-pending",
+		"-pending-symbol", "BTCUSDT",
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+		"-run-id", "live_loop_cli_0001",
+		"-max-iterations", "1",
+		"-max-runtime", "15s",
+		"-iteration-timeout", "10s",
+		"-execute",
+	}, liveLoopDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			opened = true
+			return nil, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "database.max_open_conns") {
+		t.Fatalf("expected max_open_conns error, got %v", err)
+	}
+	if opened {
+		t.Fatal("database must not be opened when selector lock cannot be held safely")
 	}
 }
 
@@ -591,6 +679,120 @@ func TestLiveLoopPendingDecisionQueryFromFlagsTableDriven(t *testing.T) {
 	}
 }
 
+func TestLivePendingDecisionSelectionLockKeyIsStable(t *testing.T) {
+	if got, again := livePendingDecisionSelectionLockKey(), livePendingDecisionSelectionLockKey(); got != again {
+		t.Fatalf("lock key must be stable: got %d then %d", got, again)
+	}
+}
+
+func TestRequireLivePendingDecisionSelectionLockCapacityTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxOpen    int
+		wantErrSub string
+	}{
+		{name: "unlimited", maxOpen: 0},
+		{name: "two connections", maxOpen: 2},
+		{name: "one connection rejected", maxOpen: 1, wantErrSub: "max_open_conns"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := requireLivePendingDecisionSelectionLockCapacity(config.DatabaseConfig{MaxOpenConns: tt.maxOpen})
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("require pending selector lock capacity: %v", err)
+			}
+		})
+	}
+}
+
+func TestAcquireLivePendingDecisionSelectionLockTableDriven(t *testing.T) {
+	ctx := context.Background()
+	key := livePendingDecisionSelectionLockKey()
+
+	tests := []struct {
+		name       string
+		mock       func(sqlmock.Sqlmock)
+		wantErrSub string
+		unlock     bool
+	}{
+		{
+			name: "acquires and releases lock",
+			mock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+				mock.ExpectQuery("SELECT pg_advisory_unlock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
+			},
+			unlock: true,
+		},
+		{
+			name: "rejects when lock is already held",
+			mock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(false))
+			},
+			wantErrSub: "already running",
+		},
+		{
+			name: "reports unlock mismatch",
+			mock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+				mock.ExpectQuery("SELECT pg_advisory_unlock").WithArgs(key).
+					WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(false))
+			},
+			wantErrSub: "not held",
+			unlock:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
+			tt.mock(mock)
+
+			unlock, err := acquireLivePendingDecisionSelectionLock(ctx, db)
+			if tt.wantErrSub != "" && !tt.unlock {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				if unlock != nil {
+					t.Fatal("unlock must be nil when lock acquisition fails")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("acquire lock: %v", err)
+				}
+				if unlock == nil {
+					t.Fatal("unlock is required after successful acquisition")
+				}
+				err = unlock(ctx)
+				if tt.wantErrSub != "" {
+					if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+						t.Fatalf("expected unlock error containing %q, got %v", tt.wantErrSub, err)
+					}
+				} else if err != nil {
+					t.Fatalf("unlock: %v", err)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("sql expectations: %v", err)
+			}
+		})
+	}
+}
+
 type fakeLiveLoopAccountReader struct {
 	query    domainlive.AccountSnapshotQuery
 	snapshot domainlive.AccountSnapshot
@@ -784,8 +986,14 @@ func liveLoopRiskDecisionColumns() []string {
 func writeLiveLoopConfig(t *testing.T) string {
 	t.Helper()
 
+	return writeLiveLoopConfigWithMaxOpenConns(t, 1)
+}
+
+func writeLiveLoopConfigWithMaxOpenConns(t *testing.T, maxOpenConns int) string {
+	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	raw := []byte(`
+	raw := []byte(strings.Replace(`
 app:
   name: crypto-quant-platform
   env: test
@@ -793,7 +1001,7 @@ app:
   log_level: info
 database:
   dsn: postgres://user:pass@localhost:5432/inquisitor?sslmode=disable
-  max_open_conns: 1
+  max_open_conns: __MAX_OPEN_CONNS__
   max_idle_conns: 1
 exchange:
   primary: bybit
@@ -866,7 +1074,7 @@ edge_decay:
   max_recent_drawdown_pct: 8
 monitoring:
   health_port: 8080
-`)
+`, "__MAX_OPEN_CONNS__", strconv.Itoa(maxOpenConns), 1))
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
