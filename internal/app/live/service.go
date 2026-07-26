@@ -13,21 +13,22 @@ import (
 )
 
 type Service struct {
-	executor        domainlive.OrderExecutor
-	statusReader    domainlive.OrderStatusReader
-	statusJournal   domainlive.OrderStatusJournal
-	positionReader  domainlive.PositionSnapshotReader
-	positionJournal domainlive.PositionSnapshotJournal
-	accountReader   domainlive.AccountSnapshotReader
-	accountJournal  domainlive.AccountSnapshotJournal
-	loopRunner      LiveLoopIterationRunner
-	loopJournal     domainlive.LiveLoopJournal
-	loopAuditReader domainlive.LiveLoopAuditReader
-	journal         domainlive.OrderJournal
-	killSwitch      domainrisk.KillSwitchRepository
-	riskDecisions   RiskDecisionReader
-	clock           clock.Clock
-	env             EnvironmentReader
+	executor         domainlive.OrderExecutor
+	statusReader     domainlive.OrderStatusReader
+	statusJournal    domainlive.OrderStatusJournal
+	positionReader   domainlive.PositionSnapshotReader
+	positionJournal  domainlive.PositionSnapshotJournal
+	accountReader    domainlive.AccountSnapshotReader
+	accountJournal   domainlive.AccountSnapshotJournal
+	loopRunner       LiveLoopIterationRunner
+	loopJournal      domainlive.LiveLoopJournal
+	loopAuditReader  domainlive.LiveLoopAuditReader
+	pendingDecisions domainlive.PendingLiveDecisionReader
+	journal          domainlive.OrderJournal
+	killSwitch       domainrisk.KillSwitchRepository
+	riskDecisions    RiskDecisionReader
+	clock            clock.Clock
+	env              EnvironmentReader
 }
 
 type Option func(*Service)
@@ -118,6 +119,12 @@ func WithLiveLoopJournal(journal domainlive.LiveLoopJournal) Option {
 func WithLiveLoopAuditReader(reader domainlive.LiveLoopAuditReader) Option {
 	return func(service *Service) {
 		service.loopAuditReader = reader
+	}
+}
+
+func WithPendingLiveDecisionReader(reader domainlive.PendingLiveDecisionReader) Option {
+	return func(service *Service) {
+		service.pendingDecisions = reader
 	}
 }
 

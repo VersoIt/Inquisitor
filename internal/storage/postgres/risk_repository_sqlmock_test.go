@@ -12,6 +12,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/shopspring/decimal"
 
+	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
@@ -133,6 +134,46 @@ func TestRiskDecisionRepositorySQLMockTableDriven(t *testing.T) {
 				if len(got) != 1 || got[0].DecisionID != record.DecisionID || !got[0].Decision.MaxLoss.Equal(record.Decision.MaxLoss) ||
 					!got[0].EntryPrice.Equal(record.EntryPrice) || got[0].Confidence != record.Confidence {
 					t.Fatalf("unexpected risk decisions: %#v", got)
+				}
+			},
+		},
+		{
+			name: "lists pending live decisions",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				record := testLiveRiskDecisionAuditRecord(now)
+				mock.ExpectQuery("SELECT rd.decision_id, rd.intent_id, rd.mode").
+					WithArgs(record.Symbol, 5).
+					WillReturnRows(riskDecisionRows(t, record))
+
+				got, err := postgres.NewRiskDecisionRepository(db).ListPendingLiveDecisions(ctx, domainlive.PendingLiveDecisionQuery{
+					Symbol: record.Symbol,
+					Limit:  5,
+				})
+				if err != nil {
+					t.Fatalf("list pending live decisions: %v", err)
+				}
+				if len(got) != 1 ||
+					got[0].Decision.DecisionID != record.DecisionID ||
+					got[0].Decision.Mode != domainrisk.ModeLive ||
+					!got[0].Decision.Decision.Approved {
+					t.Fatalf("pending live decisions mismatch: %#v", got)
+				}
+			},
+		},
+		{
+			name: "lists pending live decisions with default limit",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				record := testLiveRiskDecisionAuditRecord(now)
+				mock.ExpectQuery("SELECT rd.decision_id, rd.intent_id, rd.mode").
+					WithArgs("", 10).
+					WillReturnRows(riskDecisionRows(t, record))
+
+				got, err := postgres.NewRiskDecisionRepository(db).ListPendingLiveDecisions(ctx, domainlive.PendingLiveDecisionQuery{})
+				if err != nil {
+					t.Fatalf("list pending live decisions: %v", err)
+				}
+				if len(got) != 1 || got[0].Decision.Symbol != record.Symbol {
+					t.Fatalf("pending live decisions mismatch: %#v", got)
 				}
 			},
 		},
@@ -295,6 +336,14 @@ func TestRiskRepositoriesRejectInvalidInputsBeforeSQLTableDriven(t *testing.T) {
 			wantErrSub: "limit",
 		},
 		{
+			name: "pending live decision list rejects invalid query",
+			run: func(db *sql.DB) error {
+				_, err := postgres.NewRiskDecisionRepository(db).ListPendingLiveDecisions(ctx, domainlive.PendingLiveDecisionQuery{Symbol: "btcusdt"})
+				return err
+			},
+			wantErrSub: "symbol",
+		},
+		{
 			name: "kill switch rejects invalid event",
 			run: func(db *sql.DB) error {
 				event := testKillSwitchEvent(now, true)
@@ -357,6 +406,46 @@ func testRiskDecisionAuditRecord(now time.Time) domainrisk.DecisionAuditRecord {
 		IntentCreatedAt: now.Add(-time.Minute),
 		RecordedAt:      now.Add(time.Second),
 	}
+}
+
+func testLiveRiskDecisionAuditRecord(now time.Time) domainrisk.DecisionAuditRecord {
+	record := testRiskDecisionAuditRecord(now)
+	record.DecisionID = "risk_decision_live_sqlmock_0001"
+	record.Decision.IntentID = "risk_intent_live_sqlmock_0001"
+	record.Mode = domainrisk.ModeLive
+	return record
+}
+
+func riskDecisionRows(t *testing.T, record domainrisk.DecisionAuditRecord) *sqlmock.Rows {
+	t.Helper()
+	return sqlmock.NewRows([]string{
+		"decision_id", "intent_id", "mode", "hypothesis_id", "strategy_name", "symbol", "side",
+		"entry_price", "leverage", "confidence", "intent_reason", "intent_created_at",
+		"approved", "final_quantity", "max_loss", "stop_loss", "take_profit", "reason",
+		"checks_json", "created_at", "recorded_at",
+	}).AddRow(
+		record.DecisionID,
+		record.Decision.IntentID,
+		string(record.Mode),
+		record.HypothesisID,
+		record.StrategyName,
+		record.Symbol,
+		string(record.Side),
+		record.EntryPrice.String(),
+		record.Leverage.String(),
+		record.Confidence,
+		record.IntentReason,
+		record.IntentCreatedAt,
+		record.Decision.Approved,
+		record.Decision.FinalQuantity.String(),
+		record.Decision.MaxLoss.String(),
+		record.Decision.StopLoss.String(),
+		record.Decision.TakeProfit.String(),
+		record.Decision.Reason,
+		mustRiskChecksJSON(t, record.Decision.Checks),
+		record.Decision.CreatedAt,
+		record.RecordedAt,
+	)
 }
 
 func riskDecisionSQLDriverArgs(t *testing.T, record domainrisk.DecisionAuditRecord) []driver.Value {

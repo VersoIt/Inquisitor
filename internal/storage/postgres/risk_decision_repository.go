@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 	"github.com/shopspring/decimal"
 )
@@ -104,6 +105,54 @@ func (r *RiskDecisionRepository) ListDecisions(ctx context.Context, query domain
 		return nil, err
 	}
 	return records, nil
+}
+
+func (r *RiskDecisionRepository) ListPendingLiveDecisions(
+	ctx context.Context,
+	query domainlive.PendingLiveDecisionQuery,
+) ([]domainlive.PendingLiveDecision, error) {
+	if err := domainlive.ValidatePendingLiveDecisionQuery(query); err != nil {
+		return nil, err
+	}
+	limit := query.Limit
+	if limit == 0 {
+		limit = 10
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT rd.decision_id, rd.intent_id, rd.mode, rd.hypothesis_id, rd.strategy_name, rd.symbol, rd.side,
+		       rd.entry_price::text, rd.leverage::text, rd.confidence, rd.intent_reason, rd.intent_created_at,
+		       rd.approved, rd.final_quantity::text, rd.max_loss::text, rd.stop_loss::text, rd.take_profit::text,
+		       rd.reason, rd.checks_json::text, rd.created_at, rd.recorded_at
+		FROM risk_decisions rd
+		LEFT JOIN live_order_submissions los
+		       ON los.decision_id = rd.decision_id
+		WHERE rd.mode = 'LIVE'
+		  AND rd.approved
+		  AND los.decision_id IS NULL
+		  AND ($1::text = '' OR rd.symbol = $1)
+		ORDER BY rd.created_at ASC, rd.id ASC
+		LIMIT $2
+	`, strings.TrimSpace(query.Symbol), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending live decisions: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []domainlive.PendingLiveDecision
+	for rows.Next() {
+		record, err := scanRiskDecision(rows)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, domainlive.PendingLiveDecision{Decision: record})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending live decisions: %w", err)
+	}
+	if err := domainlive.ValidatePendingLiveDecisions(candidates); err != nil {
+		return nil, err
+	}
+	return candidates, nil
 }
 
 func (r *RiskDecisionRepository) assertExistingDecisionMatches(ctx context.Context, args []any) error {

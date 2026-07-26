@@ -85,9 +85,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Durable live-loop run and iteration audit records for operator-facing health/live-loop commands, including run bounds, preflight readiness, iteration actions, stop reasons, completion status, and errors.
 - Deployment-oriented live-loop smoke command that applies migrations, seeds one deterministic approved LIVE risk decision, runs the real bounded app/db pipeline against a fake exchange adapter, and verifies durable risk/order/status/live-loop audit rows without contacting Bybit or placing a real order.
 - Operator-facing live-loop audit CLI that lists recent run and iteration audit rows with status, stop reason, decision/submission/client IDs, and exchange-submission flags without touching exchange APIs.
+- Read-only pending LIVE decision scanner that lists approved LIVE risk decisions with no live order submission yet, ordered FIFO, so an operator can choose an explicit `decision_id` for `live-loop` without enabling automatic discovery or order placement.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should consider a tightly scoped decision-source scanner only after the explicit operator-run path remains stable, visible, and fail-closed.
+The next Phase 7 slices should keep decision discovery read-only unless it is wired into an explicitly armed, bounded, operator-visible flow with the same fail-closed preflight and audit guarantees.
 
 ## What This Is Not
 
@@ -524,6 +525,14 @@ go run ./cmd/live-loop-audit -config configs/live.local.yaml -status FAILED -lim
 go run ./cmd/live-loop-audit -config configs/live.local.yaml -run-id live_loop_001
 ```
 
+Scan for approved LIVE risk decisions that have not yet been submitted as live orders. This is read-only, uses only PostgreSQL, does not contact Bybit, and does not feed `live-loop` automatically:
+
+```powershell
+go run ./cmd/live-decision-scan -config configs/live.local.yaml -symbol BTCUSDT -limit 10
+```
+
+Use the logged `next_decision_id` or a listed `decision_id` as the explicit `-decision-id` for `live-loop` only after the operator checks the audit and safety context.
+
 Run one explicitly armed bounded live-loop iteration for a persisted approved LIVE decision. This uses the same startup guard and per-iteration Kill Switch check as `live-health`, but the iteration source is still only the `-decision-id` you provide:
 
 ```powershell
@@ -602,6 +611,7 @@ make paper-cycle-smoke
 make paper-cycle-smoke-sh
 make live-loop-smoke CONFIG=configs/config.example.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-loop-audit CONFIG=configs/live.local.yaml LIVE_AUDIT_LIMIT=10
+make live-decision-scan CONFIG=configs/live.local.yaml LIVE_SCAN_SYMBOL=BTCUSDT LIVE_SCAN_LIMIT=10
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
 make live-loop CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
