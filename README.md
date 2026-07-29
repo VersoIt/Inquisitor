@@ -88,7 +88,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Read-only pending LIVE decision scanner that lists approved LIVE risk decisions with no live order submission yet, ordered FIFO, so an operator can choose an explicit `decision_id` for `live-loop` without enabling automatic discovery or order placement.
 - Explicitly armed pending LIVE decision selector for `live-loop` that can pick the oldest approved unsubmitted LIVE decision only when `-select-pending` and `-execute=true` are both provided, holds a PostgreSQL advisory lock so only one selector runs at a time, then runs the same bounded preflight, Kill Switch, submission, reconciliation, and audit pipeline for exactly one decision.
 - Read-only live readiness CLI that checks live config/env/operator confirmation, capital cap, pending selector DB-pool safety, inactive Kill Switch, pending LIVE decision availability, and recent live-loop audit status without contacting Bybit or placing orders.
-- Read-only live order plan CLI that previews the exact `run_id`, deterministic `submission_id`/`client_order_id`, normalized order instructions, risk snapshot, notional, and safety side-effect flags for an explicit or FIFO-selected pending LIVE decision without reserving it, writing order rows, or contacting Bybit.
+- Read-only live order plan CLI that previews the exact `run_id`, deterministic `submission_id`/`client_order_id`, normalized order instructions, risk snapshot, notional, and safety side-effect flags for an explicit or FIFO-selected pending LIVE decision without reserving it, writing order rows, or contacting Bybit; `live-loop` can optionally require those expected IDs before any preflight/exchange-capable work.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
 The next Phase 7 slices should add deployment runbooks, operational observability, and explicit live readiness checklists before any always-on worker is considered.
@@ -568,6 +568,12 @@ Run one explicitly armed bounded live-loop iteration for a persisted approved LI
 go run ./cmd/live-loop -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
 ```
 
+For the safest handoff from preview to execution, copy `submission_id` and `client_order_id` from `live-order-plan` into the armed `live-loop`. If the selected decision would produce different deterministic IDs, `live-loop` fails before startup preflight or exchange setup:
+
+```powershell
+go run ./cmd/live-loop -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -expected-submission-id live_sub_from_plan -expected-client-order-id inq_live_from_plan -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
+```
+
 Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight including the same fresh account and flat-position guards, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
 
 ```powershell
@@ -645,7 +651,7 @@ make live-readiness CONFIG=configs/live.local.yaml LIVE_READINESS_SYMBOL=BTCUSDT
 make live-order-plan CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_LOOP_RUN_ID=live_loop_001
 make live-order-plan CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_LOOP_RUN_ID=live_loop_001
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
-make live-loop CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
+make live-loop CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001 LIVE_EXPECTED_SUBMISSION_ID=live_sub_from_plan LIVE_EXPECTED_CLIENT_ORDER_ID=inq_live_from_plan
 make live-loop CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z

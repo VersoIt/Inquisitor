@@ -63,3 +63,40 @@ func TestDeterministicLiveLoopOrderIdentityRejectsUnsafeInputsTableDriven(t *tes
 		})
 	}
 }
+
+func TestValidateLiveLoopOrderIdentityExpectationTableDriven(t *testing.T) {
+	identity, err := domainlive.NewDeterministicLiveLoopOrderIdentity("risk_decision_live_domain_0001", "live_loop_operator_0001")
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		expectation domainlive.LiveLoopOrderIdentityExpectation
+		wantErrSub  string
+	}{
+		{name: "empty expectation allows dry run without handoff guard"},
+		{name: "submission only matches", expectation: domainlive.LiveLoopOrderIdentityExpectation{SubmissionID: identity.SubmissionID}},
+		{name: "client order only matches", expectation: domainlive.LiveLoopOrderIdentityExpectation{ClientOrderID: identity.ClientOrderID}},
+		{name: "both ids match", expectation: domainlive.LiveLoopOrderIdentityExpectation{SubmissionID: identity.SubmissionID, ClientOrderID: identity.ClientOrderID}},
+		{name: "untrimmed submission", expectation: domainlive.LiveLoopOrderIdentityExpectation{SubmissionID: " " + identity.SubmissionID + " "}, wantErrSub: "expected_submission_id"},
+		{name: "untrimmed client order", expectation: domainlive.LiveLoopOrderIdentityExpectation{ClientOrderID: " " + identity.ClientOrderID + " "}, wantErrSub: "expected_client_order_id"},
+		{name: "submission mismatch", expectation: domainlive.LiveLoopOrderIdentityExpectation{SubmissionID: "live_sub_wrong"}, wantErrSub: "planned submission_id"},
+		{name: "client order mismatch", expectation: domainlive.LiveLoopOrderIdentityExpectation{ClientOrderID: "inq_live_wrong"}, wantErrSub: "planned client_order_id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := domainlive.ValidateLiveLoopOrderIdentityExpectation(identity, tt.expectation)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate expectation: %v", err)
+			}
+		})
+	}
+}

@@ -136,6 +136,8 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 		"-max-iterations", "1",
 		"-max-runtime", "15s",
 		"-iteration-timeout", "10s",
+		"-expected-submission-id", identity.SubmissionID,
+		"-expected-client-order-id", identity.ClientOrderID,
 		"-execute",
 	}, liveLoopDependencies{
 		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
@@ -210,6 +212,29 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	}
 	if strings.Contains(logs, "actual-live-api-key-value") || strings.Contains(logs, "actual-live-api-secret-value") {
 		t.Fatalf("logs must not contain credential values, got\n%s", logs)
+	}
+}
+
+func TestRunLiveLoopExpectedIdentityMismatchStopsBeforeSideEffects(t *testing.T) {
+	var opened bool
+
+	err := runLiveLoop(context.Background(), []string{
+		"-decision-id", "risk_decision_live_cli_0001",
+		"-expected-submission-id", "live_sub_wrong",
+		"-expected-client-order-id", "inq_live_wrong",
+		"-execute",
+	}, liveLoopDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			opened = true
+			return nil, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "identity expectation") || !strings.Contains(err.Error(), "planned submission_id") {
+		t.Fatalf("expected identity mismatch error, got %v", err)
+	}
+	if opened {
+		t.Fatal("database must not be opened when explicit decision expected identity mismatches")
 	}
 }
 
@@ -333,6 +358,59 @@ func TestRunLiveLoopSelectsPendingDecisionThroughBoundedLoop(t *testing.T) {
 	}
 	if strings.Contains(logs, "actual-live-api-key-value") || strings.Contains(logs, "actual-live-api-secret-value") {
 		t.Fatalf("logs must not contain credential values, got\n%s", logs)
+	}
+}
+
+func TestRunLiveLoopSelectPendingExpectedIdentityMismatchStopsBeforePreflightSideEffects(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	lockKey := livePendingDecisionSelectionLockKey()
+	mock.ExpectQuery("SELECT pg_try_advisory_lock").WithArgs(lockKey).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+	mock.ExpectQuery("SELECT rd.decision_id, rd.intent_id, rd.mode").
+		WithArgs("BTCUSDT", 1).
+		WillReturnRows(liveLoopRiskDecisionRows(time.Now().UTC().Add(-time.Minute)))
+	mock.ExpectQuery("SELECT pg_advisory_unlock").WithArgs(lockKey).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
+
+	var executorCreated bool
+	var accountReaderCreated bool
+	err = runLiveLoop(context.Background(), []string{
+		"-config", writeLiveLoopConfigWithMaxOpenConns(t, 2),
+		"-select-pending",
+		"-pending-symbol", "BTCUSDT",
+		"-expected-submission-id", "live_sub_wrong",
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+		"-run-id", "live_loop_cli_0001",
+		"-max-iterations", "1",
+		"-max-runtime", "15s",
+		"-iteration-timeout", "10s",
+		"-execute",
+	}, liveLoopDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
+			executorCreated = true
+			return &fakeLiveLoopExecutor{}, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			accountReaderCreated = true
+			return &fakeLiveLoopAccountReader{}, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "identity expectation") || !strings.Contains(err.Error(), "planned submission_id") {
+		t.Fatalf("expected identity mismatch error, got %v", err)
+	}
+	if executorCreated || accountReaderCreated {
+		t.Fatalf("identity mismatch must stop before exchange readers: executor=%t account_reader=%t", executorCreated, accountReaderCreated)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
 	}
 }
 

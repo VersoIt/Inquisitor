@@ -71,6 +71,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	maxInitialCapitalValue := flags.String("max-initial-live-capital-usdt", defaultMaxInitialLiveCapitalUSDT, "operator safety cap for configured live initial capital")
 	subaccountConfirmed := flags.Bool("subaccount-confirmed", false, "set only after verifying API keys belong to the dedicated live subaccount")
 	runIDValue := flags.String("run-id", "", "operator-visible bounded live loop run id; defaults deterministically from decision-id")
+	expectedSubmissionID := flags.String("expected-submission-id", "", "optional submission_id copied from live-order-plan; when set, live-loop fails if the planned id differs")
+	expectedClientOrderID := flags.String("expected-client-order-id", "", "optional client_order_id copied from live-order-plan; when set, live-loop fails if the planned id differs")
 	maxIterations := flags.Int("max-iterations", 1, "maximum bounded live loop iterations")
 	maxRuntime := flags.Duration("max-runtime", 15*time.Second, "maximum bounded live loop runtime")
 	iterationTimeout := flags.Duration("iteration-timeout", 10*time.Second, "maximum duration for one live loop iteration")
@@ -112,6 +114,10 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	if err != nil {
 		return err
 	}
+	identityExpectation := domainlive.LiveLoopOrderIdentityExpectation{
+		SubmissionID:  *expectedSubmissionID,
+		ClientOrderID: *expectedClientOrderID,
+	}
 	selectedDecisionID := strings.TrimSpace(*decisionID)
 	identity := liveLoopIdentity{}
 	if !*selectPending {
@@ -120,6 +126,9 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			return err
 		}
 		if err := validateLiveLoopRunIDFlag(identity.RunID); err != nil {
+			return err
+		}
+		if err := validateLiveLoopIdentityExpectation(identity, identityExpectation); err != nil {
 			return err
 		}
 	}
@@ -178,6 +187,9 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			return err
 		}
 		if err := validateLiveLoopRunIDFlag(identity.RunID); err != nil {
+			return err
+		}
+		if err := validateLiveLoopIdentityExpectation(identity, identityExpectation); err != nil {
 			return err
 		}
 	}
@@ -299,6 +311,17 @@ func deterministicLiveLoopIdentity(decisionID string, runID string) (liveLoopIde
 		SubmissionID:  identity.SubmissionID,
 		ClientOrderID: identity.ClientOrderID,
 	}, nil
+}
+
+func validateLiveLoopIdentityExpectation(
+	identity liveLoopIdentity,
+	expectation domainlive.LiveLoopOrderIdentityExpectation,
+) error {
+	return domainlive.ValidateLiveLoopOrderIdentityExpectation(domainlive.LiveLoopOrderIdentity{
+		RunID:         identity.RunID,
+		SubmissionID:  identity.SubmissionID,
+		ClientOrderID: identity.ClientOrderID,
+	}, expectation)
 }
 
 func liveLoopPendingDecisionQueryFromFlags(symbol string, enabled bool) (domainlive.PendingLiveDecisionQuery, error) {
