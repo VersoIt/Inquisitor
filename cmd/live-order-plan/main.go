@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,6 +52,7 @@ func runLiveOrderPlan(ctx context.Context, args []string, deps liveOrderPlanDepe
 	orderTypeValue := flags.String("order-type", string(domainlive.OrderTypeMarket), "live order type: MARKET or LIMIT")
 	timeInForceValue := flags.String("time-in-force", "", "time in force: IOC, FOK, GTC, or POST_ONLY; defaults to IOC")
 	limitPriceValue := flags.String("limit-price", "", "positive limit price, required only for LIMIT orders")
+	artifactPath := flags.String("artifact-path", "", "optional path to write a machine-readable JSON live order plan artifact")
 	timeout := flags.Duration("timeout", 10*time.Second, "maximum live order plan command duration")
 	logLevel := flags.String("log-level", "", "optional log level override: debug, info, warn, error")
 	if err := flags.Parse(args); err != nil {
@@ -142,6 +145,23 @@ func runLiveOrderPlan(ctx context.Context, args []string, deps liveOrderPlanDepe
 		return err
 	}
 	logLiveOrderPlan(log, source, pendingQuery.Symbol, identity.RunID, plan)
+	artifact := liveOrderPlanArtifactFromResult(source, pendingQuery.Symbol, identity.RunID, plan)
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*artifactPath) != "" {
+		if err := writeLiveOrderPlanArtifact(*artifactPath, artifact); err != nil {
+			return err
+		}
+		log.Info(
+			"live order plan artifact written",
+			"path", strings.TrimSpace(*artifactPath),
+			"schema_version", artifact.SchemaVersion,
+			"decision_id", artifact.DecisionID,
+			"submission_id", artifact.SubmissionID,
+			"client_order_id", artifact.ClientOrderID,
+		)
+	}
 	return nil
 }
 
@@ -324,4 +344,68 @@ func logLiveOrderPlan(
 		"exchange_contacted", plan.ExchangeContacted,
 		"order_submitted", plan.OrderSubmitted,
 	)
+}
+
+func liveOrderPlanArtifactFromResult(
+	source string,
+	pendingSymbol string,
+	runID string,
+	plan applive.BuildLiveOrderPlanResult,
+) domainlive.LiveOrderPlanArtifact {
+	submission := plan.Submission
+	decision := plan.Decision
+	return domainlive.LiveOrderPlanArtifact{
+		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
+		Source:              source,
+		PendingSymbol:       pendingSymbol,
+		RunID:               runID,
+		DecisionID:          submission.DecisionID,
+		SubmissionID:        submission.SubmissionID,
+		ClientOrderID:       submission.ClientOrderID,
+		Exchange:            submission.Exchange,
+		Category:            submission.Category,
+		Symbol:              submission.Symbol,
+		Side:                submission.Side,
+		OrderType:           submission.Type,
+		TimeInForce:         submission.TimeInForce,
+		LimitPrice:          submission.LimitPrice.String(),
+		Quantity:            submission.Quantity.String(),
+		EntryPrice:          submission.ReferencePrice.String(),
+		Notional:            submission.Notional.String(),
+		MaxLoss:             submission.MaxLoss.String(),
+		StopLoss:            submission.StopLoss.String(),
+		TakeProfit:          submission.TakeProfit.String(),
+		Leverage:            submission.Leverage.String(),
+		Confidence:          submission.Confidence,
+		DecisionCreatedAt:   decision.Decision.CreatedAt,
+		RecordedAt:          decision.RecordedAt,
+		SubmissionCreatedAt: submission.CreatedAt,
+		Reserved:            plan.SubmissionReserved,
+		ExchangeContacted:   plan.ExchangeContacted,
+		OrderSubmitted:      plan.OrderSubmitted,
+	}
+}
+
+func writeLiveOrderPlanArtifact(path string, artifact domainlive.LiveOrderPlanArtifact) error {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return fmt.Errorf("artifact-path is required")
+	}
+	if path != trimmedPath {
+		return fmt.Errorf("artifact-path must be trimmed")
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode live order plan artifact: %w", err)
+	}
+	payload = append(payload, '\n')
+	if dir := filepath.Dir(trimmedPath); dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create live order plan artifact directory %q: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(trimmedPath, payload, 0o600); err != nil {
+		return fmt.Errorf("write live order plan artifact %q: %w", trimmedPath, err)
+	}
+	return nil
 }

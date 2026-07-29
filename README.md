@@ -544,16 +544,16 @@ go run ./cmd/live-decision-scan -config configs/live.local.yaml -symbol BTCUSDT 
 
 Use the logged `next_decision_id` or a listed `decision_id` as the explicit `-decision-id` for `live-loop` only after the operator checks the audit and safety context.
 
-Preview the exact live-loop order plan before arming execution. This command is read-only, uses only PostgreSQL, does not reserve the pending decision, does not write `live_order_submissions`, and does not contact Bybit:
+Preview the exact live-loop order plan before arming execution. This command is read-only, uses only PostgreSQL, does not reserve the pending decision, does not write `live_order_submissions`, and does not contact Bybit. Pass `-artifact-path` to save a machine-readable JSON handoff file:
 
 ```powershell
-go run ./cmd/live-order-plan -config configs/live.local.yaml -decision-id risk_decision_live_001 -run-id live_loop_001
+go run ./cmd/live-order-plan -config configs/live.local.yaml -decision-id risk_decision_live_001 -run-id live_loop_001 -artifact-path artifacts/live-order-plan.json
 ```
 
 The preview can also use the same FIFO pending source as `live-loop`, but it remains an unreserved preview; another operator/process can still consume that decision before execution:
 
 ```powershell
-go run ./cmd/live-order-plan -config configs/live.local.yaml -select-pending -pending-symbol BTCUSDT -run-id live_loop_001
+go run ./cmd/live-order-plan -config configs/live.local.yaml -select-pending -pending-symbol BTCUSDT -run-id live_loop_001 -artifact-path artifacts/live-order-plan.json
 ```
 
 Alternatively, explicitly arm FIFO pending selection inside `live-loop`. This selects one oldest approved LIVE decision with no live order submission, optionally filtered by symbol, and cannot be combined with `-decision-id`. The selector holds a global PostgreSQL advisory lock for the whole bounded run, so only one pending selector can run at a time; set `database.max_open_conns` to `0` or at least `2` so the lock connection cannot starve normal repository queries:
@@ -568,11 +568,13 @@ Run one explicitly armed bounded live-loop iteration for a persisted approved LI
 go run ./cmd/live-loop -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
 ```
 
-For the safest handoff from preview to execution, copy `submission_id` and `client_order_id` from `live-order-plan` into the armed `live-loop`. If the selected decision would produce different deterministic IDs, `live-loop` fails before startup preflight or exchange setup:
+For the safest handoff from preview to execution, pass the JSON artifact to the armed `live-loop`. The artifact can provide `decision_id`, `run_id`, deterministic IDs, and order instructions; if the selected decision/config/instructions would produce a different execution plan, `live-loop` fails before startup preflight or exchange setup:
 
 ```powershell
-go run ./cmd/live-loop -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -expected-submission-id live_sub_from_plan -expected-client-order-id inq_live_from_plan -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
+go run ./cmd/live-loop -config configs/live.local.yaml -plan-file artifacts/live-order-plan.json -subaccount-confirmed -max-initial-live-capital-usdt 100 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
 ```
+
+Manual `-expected-submission-id` and `-expected-client-order-id` flags are still available as a fallback when no artifact file is used.
 
 Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight including the same fresh account and flat-position guards, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
 
@@ -648,10 +650,10 @@ make live-loop-smoke CONFIG=configs/config.example.yaml LIVE_SUBACCOUNT_CONFIRME
 make live-loop-audit CONFIG=configs/live.local.yaml LIVE_AUDIT_LIMIT=10
 make live-decision-scan CONFIG=configs/live.local.yaml LIVE_SCAN_SYMBOL=BTCUSDT LIVE_SCAN_LIMIT=10
 make live-readiness CONFIG=configs/live.local.yaml LIVE_READINESS_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1
-make live-order-plan CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_LOOP_RUN_ID=live_loop_001
-make live-order-plan CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_LOOP_RUN_ID=live_loop_001
+make live-order-plan CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_LOOP_RUN_ID=live_loop_001 LIVE_PLAN_FILE=artifacts/live-order-plan.json
+make live-order-plan CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_LOOP_RUN_ID=live_loop_001 LIVE_PLAN_FILE=artifacts/live-order-plan.json
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
-make live-loop CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001 LIVE_EXPECTED_SUBMISSION_ID=live_sub_from_plan LIVE_EXPECTED_CLIENT_ORDER_ID=inq_live_from_plan
+make live-loop CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-loop CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
 make paper-enter PAPER_FILL_ID=paper_fill_001 PAPER_POSITION_ID=paper_position_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z
 make paper-fill PAPER_FILL_ID=paper_fill_001 PAPER_TICKET_ID=paper_ticket_001 PAPER_MID_PRICE=100000 PAPER_EXECUTION_AT=2026-07-16T12:00:00Z

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -64,6 +65,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	flags := flag.NewFlagSet("live-loop", flag.ContinueOnError)
 	flags.SetOutput(deps.output)
 	configPath := flags.String("config", "configs/config.example.yaml", "path to YAML config")
+	planFile := flags.String("plan-file", "", "optional JSON artifact written by live-order-plan; validates decision, ids, and order instructions before execution")
 	decisionID := flags.String("decision-id", "", "persisted LIVE risk decision id to process")
 	selectPending := flags.Bool("select-pending", false, "select the oldest approved pending LIVE risk decision with no live order submission")
 	pendingSymbol := flags.String("pending-symbol", "", "optional symbol filter used with -select-pending")
@@ -88,25 +90,55 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		return fmt.Errorf("refusing to run live loop without -execute=true")
 	}
 
-	pendingQuery, err := liveLoopPendingDecisionQueryFromFlags(*pendingSymbol, *selectPending)
+	planArtifact, hasPlanArtifact, err := loadLiveLoopPlanArtifact(*planFile)
 	if err != nil {
 		return err
 	}
-	if err := validateLiveLoopDecisionSourceFlags(*decisionID, *selectPending, *runIDValue); err != nil {
+	effectiveDecisionID := *decisionID
+	effectivePendingSymbol := *pendingSymbol
+	effectiveRunID := *runIDValue
+	effectiveOrderType := *orderTypeValue
+	effectiveTimeInForce := *timeInForceValue
+	effectiveLimitPrice := *limitPriceValue
+	effectiveExpectedSubmissionID := *expectedSubmissionID
+	effectiveExpectedClientOrderID := *expectedClientOrderID
+	if hasPlanArtifact {
+		if err := applyLiveLoopPlanArtifact(
+			args,
+			planArtifact,
+			*selectPending,
+			&effectiveDecisionID,
+			&effectivePendingSymbol,
+			&effectiveRunID,
+			&effectiveOrderType,
+			&effectiveTimeInForce,
+			&effectiveLimitPrice,
+			&effectiveExpectedSubmissionID,
+			&effectiveExpectedClientOrderID,
+		); err != nil {
+			return err
+		}
+	}
+
+	pendingQuery, err := liveLoopPendingDecisionQueryFromFlags(effectivePendingSymbol, *selectPending)
+	if err != nil {
+		return err
+	}
+	if err := validateLiveLoopDecisionSourceFlags(effectiveDecisionID, *selectPending, effectiveRunID); err != nil {
 		return err
 	}
 	if err := validateLiveLoopBoundsFlags(*maxIterations, *maxRuntime, *iterationTimeout); err != nil {
 		return err
 	}
-	orderType, err := parseLiveOrderType(*orderTypeValue)
+	orderType, err := parseLiveOrderType(effectiveOrderType)
 	if err != nil {
 		return err
 	}
-	timeInForce, err := parseLiveTimeInForce(*timeInForceValue)
+	timeInForce, err := parseLiveTimeInForce(effectiveTimeInForce)
 	if err != nil {
 		return err
 	}
-	limitPrice, err := parseLiveLimitPrice(orderType, *limitPriceValue)
+	limitPrice, err := parseLiveLimitPrice(orderType, effectiveLimitPrice)
 	if err != nil {
 		return err
 	}
@@ -115,13 +147,13 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		return err
 	}
 	identityExpectation := domainlive.LiveLoopOrderIdentityExpectation{
-		SubmissionID:  *expectedSubmissionID,
-		ClientOrderID: *expectedClientOrderID,
+		SubmissionID:  effectiveExpectedSubmissionID,
+		ClientOrderID: effectiveExpectedClientOrderID,
 	}
-	selectedDecisionID := strings.TrimSpace(*decisionID)
+	selectedDecisionID := strings.TrimSpace(effectiveDecisionID)
 	identity := liveLoopIdentity{}
 	if !*selectPending {
-		identity, err = deterministicLiveLoopIdentity(selectedDecisionID, *runIDValue)
+		identity, err = deterministicLiveLoopIdentity(selectedDecisionID, effectiveRunID)
 		if err != nil {
 			return err
 		}
@@ -136,6 +168,11 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
+	}
+	if hasPlanArtifact && !*selectPending {
+		if err := validateLiveLoopPlanArtifactAgainstExecution(planArtifact, selectedDecisionID, identity, cfg, orderType, timeInForce, limitPrice); err != nil {
+			return err
+		}
 	}
 	if *selectPending {
 		if err := requireLivePendingDecisionSelectionLockCapacity(cfg.Database); err != nil {
@@ -182,7 +219,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		}
 		selectedDecisionID = selection.Decision.Decision.DecisionID
 		logPendingLiveDecisionSelection(log, selection)
-		identity, err = deterministicLiveLoopIdentity(selectedDecisionID, *runIDValue)
+		identity, err = deterministicLiveLoopIdentity(selectedDecisionID, effectiveRunID)
 		if err != nil {
 			return err
 		}
@@ -191,6 +228,11 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		}
 		if err := validateLiveLoopIdentityExpectation(identity, identityExpectation); err != nil {
 			return err
+		}
+		if hasPlanArtifact {
+			if err := validateLiveLoopPlanArtifactAgainstExecution(planArtifact, selectedDecisionID, identity, cfg, orderType, timeInForce, limitPrice); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -322,6 +364,212 @@ func validateLiveLoopIdentityExpectation(
 		SubmissionID:  identity.SubmissionID,
 		ClientOrderID: identity.ClientOrderID,
 	}, expectation)
+}
+
+func loadLiveLoopPlanArtifact(path string) (domainlive.LiveOrderPlanArtifact, bool, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return domainlive.LiveOrderPlanArtifact{}, false, nil
+	}
+	if path != trimmedPath {
+		return domainlive.LiveOrderPlanArtifact{}, false, fmt.Errorf("plan-file must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return domainlive.LiveOrderPlanArtifact{}, false, fmt.Errorf("read live order plan artifact %q: %w", trimmedPath, err)
+	}
+	var artifact domainlive.LiveOrderPlanArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		return domainlive.LiveOrderPlanArtifact{}, false, fmt.Errorf("decode live order plan artifact %q: %w", trimmedPath, err)
+	}
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return domainlive.LiveOrderPlanArtifact{}, false, err
+	}
+	return artifact, true, nil
+}
+
+func applyLiveLoopPlanArtifact(
+	args []string,
+	artifact domainlive.LiveOrderPlanArtifact,
+	selectPending bool,
+	decisionID *string,
+	pendingSymbol *string,
+	runID *string,
+	orderType *string,
+	timeInForce *string,
+	limitPrice *string,
+	expectedSubmissionID *string,
+	expectedClientOrderID *string,
+) error {
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return err
+	}
+	if !selectPending {
+		if err := applyLiveLoopPlanString(args, "decision-id", artifact.DecisionID, decisionID); err != nil {
+			return err
+		}
+	}
+	if selectPending && artifact.PendingSymbol != "" {
+		if err := applyLiveLoopPlanString(args, "pending-symbol", artifact.PendingSymbol, pendingSymbol); err != nil {
+			return err
+		}
+	}
+	if err := applyLiveLoopPlanString(args, "run-id", artifact.RunID, runID); err != nil {
+		return err
+	}
+	if err := applyLiveLoopPlanOrderType(args, artifact.OrderType, orderType); err != nil {
+		return err
+	}
+	if err := applyLiveLoopPlanTimeInForce(args, artifact.TimeInForce, timeInForce); err != nil {
+		return err
+	}
+	if err := applyLiveLoopPlanLimitPrice(args, artifact.OrderType, artifact.LimitPrice, limitPrice); err != nil {
+		return err
+	}
+	if err := applyLiveLoopPlanString(args, "expected-submission-id", artifact.SubmissionID, expectedSubmissionID); err != nil {
+		return err
+	}
+	if err := applyLiveLoopPlanString(args, "expected-client-order-id", artifact.ClientOrderID, expectedClientOrderID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyLiveLoopPlanString(args []string, flagName string, artifactValue string, target *string) error {
+	if target == nil {
+		return fmt.Errorf("%s target is required", flagName)
+	}
+	if liveLoopFlagProvided(args, flagName) || strings.TrimSpace(*target) != "" {
+		if strings.TrimSpace(*target) != artifactValue {
+			return fmt.Errorf("plan-file %s %q does not match CLI value %q", flagName, artifactValue, strings.TrimSpace(*target))
+		}
+		return nil
+	}
+	*target = artifactValue
+	return nil
+}
+
+func applyLiveLoopPlanOrderType(args []string, artifactValue domainlive.OrderType, target *string) error {
+	if liveLoopFlagProvided(args, "order-type") {
+		parsed, err := parseLiveOrderType(*target)
+		if err != nil {
+			return err
+		}
+		if parsed != artifactValue {
+			return fmt.Errorf("plan-file order-type %q does not match CLI value %q", artifactValue, parsed)
+		}
+		return nil
+	}
+	*target = string(artifactValue)
+	return nil
+}
+
+func applyLiveLoopPlanTimeInForce(args []string, artifactValue domainlive.TimeInForce, target *string) error {
+	if liveLoopFlagProvided(args, "time-in-force") {
+		parsed, err := parseLiveTimeInForce(*target)
+		if err != nil {
+			return err
+		}
+		if parsed != artifactValue {
+			return fmt.Errorf("plan-file time-in-force %q does not match CLI value %q", artifactValue, parsed)
+		}
+		return nil
+	}
+	*target = string(artifactValue)
+	return nil
+}
+
+func applyLiveLoopPlanLimitPrice(args []string, artifactOrderType domainlive.OrderType, artifactValue string, target *string) error {
+	artifactLimitPrice, err := decimal.NewFromString(strings.TrimSpace(artifactValue))
+	if err != nil {
+		return fmt.Errorf("plan-file limit-price must be a decimal string: %w", err)
+	}
+	if liveLoopFlagProvided(args, "limit-price") {
+		parsed, err := decimal.NewFromString(strings.TrimSpace(*target))
+		if err != nil {
+			return fmt.Errorf("limit-price must be a decimal string: %w", err)
+		}
+		if !parsed.Equal(artifactLimitPrice) {
+			return fmt.Errorf("plan-file limit-price %q does not match CLI value %q", artifactValue, strings.TrimSpace(*target))
+		}
+		return nil
+	}
+	if artifactOrderType == domainlive.OrderTypeMarket {
+		*target = ""
+		return nil
+	}
+	*target = artifactValue
+	return nil
+}
+
+func liveLoopFlagProvided(args []string, name string) bool {
+	short := "-" + name
+	long := "--" + name
+	for _, arg := range args {
+		switch {
+		case arg == short, arg == long:
+			return true
+		case strings.HasPrefix(arg, short+"="), strings.HasPrefix(arg, long+"="):
+			return true
+		}
+	}
+	return false
+}
+
+func validateLiveLoopPlanArtifactAgainstExecution(
+	artifact domainlive.LiveOrderPlanArtifact,
+	selectedDecisionID string,
+	identity liveLoopIdentity,
+	cfg *config.Config,
+	orderType domainlive.OrderType,
+	timeInForce domainlive.TimeInForce,
+	limitPrice decimal.Decimal,
+) error {
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return err
+	}
+	var problems []string
+	if artifact.DecisionID != strings.TrimSpace(selectedDecisionID) {
+		problems = append(problems, fmt.Sprintf("decision_id %q does not match selected decision %q", artifact.DecisionID, strings.TrimSpace(selectedDecisionID)))
+	}
+	if artifact.RunID != identity.RunID {
+		problems = append(problems, fmt.Sprintf("run_id %q does not match planned run_id %q", artifact.RunID, identity.RunID))
+	}
+	if err := domainlive.ValidateLiveLoopOrderIdentityExpectation(domainlive.LiveLoopOrderIdentity{
+		RunID:         identity.RunID,
+		SubmissionID:  identity.SubmissionID,
+		ClientOrderID: identity.ClientOrderID,
+	}, artifact.IdentityExpectation()); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if cfg == nil {
+		problems = append(problems, "config is required")
+	} else {
+		exchange := strings.ToLower(strings.TrimSpace(cfg.Exchange.Primary))
+		category := strings.ToLower(strings.TrimSpace(cfg.Exchange.Category))
+		if artifact.Exchange != exchange {
+			problems = append(problems, fmt.Sprintf("exchange %q does not match config exchange %q", artifact.Exchange, exchange))
+		}
+		if artifact.Category != category {
+			problems = append(problems, fmt.Sprintf("category %q does not match config category %q", artifact.Category, category))
+		}
+	}
+	if artifact.OrderType != orderType {
+		problems = append(problems, fmt.Sprintf("order_type %q does not match execution order_type %q", artifact.OrderType, orderType))
+	}
+	if artifact.TimeInForce != timeInForce {
+		problems = append(problems, fmt.Sprintf("time_in_force %q does not match execution time_in_force %q", artifact.TimeInForce, timeInForce))
+	}
+	artifactLimitPrice, err := decimal.NewFromString(strings.TrimSpace(artifact.LimitPrice))
+	if err != nil {
+		problems = append(problems, fmt.Sprintf("artifact limit_price must be decimal: %v", err))
+	} else if !artifactLimitPrice.Equal(limitPrice) {
+		problems = append(problems, fmt.Sprintf("limit_price %q does not match execution limit_price %q", artifact.LimitPrice, limitPrice.String()))
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("live order plan artifact execution validation failed: %s", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 func liveLoopPendingDecisionQueryFromFlags(symbol string, enabled bool) (domainlive.PendingLiveDecisionQuery, error) {

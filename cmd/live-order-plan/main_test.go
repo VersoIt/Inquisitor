@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,10 +39,12 @@ func TestRunLiveOrderPlanPreviewsExplicitDecisionWithoutExchangeOrWrites(t *test
 		t.Fatalf("identity: %v", err)
 	}
 
+	artifactPath := filepath.Join(t.TempDir(), "artifacts", "live-order-plan.json")
 	var output bytes.Buffer
 	err = runLiveOrderPlan(context.Background(), []string{
 		"-decision-id", " risk_decision_live_plan_cli_0001 ",
 		"-run-id", "live_loop_plan_cli_0001",
+		"-artifact-path", artifactPath,
 	}, liveOrderPlanDependencies{
 		loadConfig: func(string) (*config.Config, error) {
 			return validLiveOrderPlanConfig(), nil
@@ -68,6 +73,19 @@ func TestRunLiveOrderPlanPreviewsExplicitDecisionWithoutExchangeOrWrites(t *test
 	if pendingReader.calls != 0 {
 		t.Fatalf("explicit decision plan must not scan pending decisions, calls=%d", pendingReader.calls)
 	}
+	artifact := readLiveOrderPlanArtifact(t, artifactPath)
+	if artifact.SchemaVersion != domainlive.LiveOrderPlanArtifactSchemaVersion ||
+		artifact.RunID != "live_loop_plan_cli_0001" ||
+		artifact.DecisionID != decision.DecisionID ||
+		artifact.SubmissionID != identity.SubmissionID ||
+		artifact.ClientOrderID != identity.ClientOrderID ||
+		artifact.OrderType != domainlive.OrderTypeMarket ||
+		artifact.TimeInForce != domainlive.TimeInForceIOC ||
+		artifact.ExchangeContacted ||
+		artifact.OrderSubmitted ||
+		artifact.Reserved {
+		t.Fatalf("artifact mismatch: %#v", artifact)
+	}
 
 	logs := output.String()
 	for _, want := range []string{
@@ -85,6 +103,7 @@ func TestRunLiveOrderPlanPreviewsExplicitDecisionWithoutExchangeOrWrites(t *test
 		`"reserved":false`,
 		`"exchange_contacted":false`,
 		`"order_submitted":false`,
+		`"msg":"live order plan artifact written"`,
 	} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
@@ -420,4 +439,20 @@ func liveOrderPlanRiskDecision(decisionID string, symbol string, recordedAt time
 
 func (r *fakeLiveOrderPlanRiskDecisionReader) String() string {
 	return fmt.Sprintf("calls=%d query=%#v records=%d", r.calls, r.query, len(r.records))
+}
+
+func readLiveOrderPlanArtifact(t *testing.T, path string) domainlive.LiveOrderPlanArtifact {
+	t.Helper()
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	var artifact domainlive.LiveOrderPlanArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		t.Fatalf("decode artifact: %v", err)
+	}
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		t.Fatalf("validate artifact: %v", err)
+	}
+	return artifact
 }

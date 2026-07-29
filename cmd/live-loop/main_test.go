@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -121,6 +122,7 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
+	planFile := writeLiveLoopPlanArtifact(t, liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001"))
 	executor := &fakeLiveLoopExecutor{receivedAt: now}
 	accountReader := &fakeLiveLoopAccountReader{
 		snapshot: validLiveLoopAccountSnapshot(t),
@@ -129,15 +131,12 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	var output bytes.Buffer
 	err = runLiveLoop(context.Background(), []string{
 		"-config", writeLiveLoopConfig(t),
-		"-decision-id", "risk_decision_live_cli_0001",
+		"-plan-file", planFile,
 		"-subaccount-confirmed",
 		"-max-initial-live-capital-usdt", "100",
-		"-run-id", "live_loop_cli_0001",
 		"-max-iterations", "1",
 		"-max-runtime", "15s",
 		"-iteration-timeout", "10s",
-		"-expected-submission-id", identity.SubmissionID,
-		"-expected-client-order-id", identity.ClientOrderID,
 		"-execute",
 	}, liveLoopDependencies{
 		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
@@ -235,6 +234,29 @@ func TestRunLiveLoopExpectedIdentityMismatchStopsBeforeSideEffects(t *testing.T)
 	}
 	if opened {
 		t.Fatal("database must not be opened when explicit decision expected identity mismatches")
+	}
+}
+
+func TestRunLiveLoopPlanFileDecisionMismatchStopsBeforeSideEffects(t *testing.T) {
+	var opened bool
+	planFile := writeLiveLoopPlanArtifact(t, liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001"))
+
+	err := runLiveLoop(context.Background(), []string{
+		"-plan-file", planFile,
+		"-decision-id", "risk_decision_live_cli_0002",
+		"-execute",
+	}, liveLoopDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			opened = true
+			return nil, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "plan-file decision-id") {
+		t.Fatalf("expected plan-file decision mismatch error, got %v", err)
+	}
+	if opened {
+		t.Fatal("database must not be opened when plan-file decision mismatches explicit decision")
 	}
 }
 
@@ -1157,4 +1179,57 @@ monitoring:
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+func writeLiveLoopPlanArtifact(t *testing.T, artifact domainlive.LiveOrderPlanArtifact) string {
+	t.Helper()
+
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		t.Fatalf("validate plan artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal plan artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "live-order-plan.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write plan artifact: %v", err)
+	}
+	return path
+}
+
+func liveLoopPlanArtifact(t *testing.T, decisionID string, runID string) domainlive.LiveOrderPlanArtifact {
+	t.Helper()
+
+	identity, err := domainlive.NewDeterministicLiveLoopOrderIdentity(decisionID, runID)
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	return domainlive.LiveOrderPlanArtifact{
+		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
+		Source:              "decision-id",
+		RunID:               identity.RunID,
+		DecisionID:          strings.TrimSpace(decisionID),
+		SubmissionID:        identity.SubmissionID,
+		ClientOrderID:       identity.ClientOrderID,
+		Exchange:            "bybit",
+		Category:            "linear",
+		Symbol:              "BTCUSDT",
+		Side:                domainlive.OrderSideLong,
+		OrderType:           domainlive.OrderTypeMarket,
+		TimeInForce:         domainlive.TimeInForceIOC,
+		LimitPrice:          "0",
+		Quantity:            "0.005",
+		EntryPrice:          "100000",
+		Notional:            "500",
+		MaxLoss:             "5",
+		StopLoss:            "99000",
+		TakeProfit:          "102000",
+		Leverage:            "1",
+		Confidence:          82,
+		DecisionCreatedAt:   now.Add(-2 * time.Minute),
+		RecordedAt:          now.Add(-time.Minute),
+		SubmissionCreatedAt: now,
+	}
 }
