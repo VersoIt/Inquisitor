@@ -88,6 +88,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Read-only pending LIVE decision scanner that lists approved LIVE risk decisions with no live order submission yet, ordered FIFO, so an operator can choose an explicit `decision_id` for `live-loop` without enabling automatic discovery or order placement.
 - Explicitly armed pending LIVE decision selector for `live-loop` that can pick the oldest approved unsubmitted LIVE decision only when `-select-pending` and `-execute=true` are both provided, holds a PostgreSQL advisory lock so only one selector runs at a time, then runs the same bounded preflight, Kill Switch, submission, reconciliation, and audit pipeline for exactly one decision.
 - Read-only live readiness CLI that checks live config/env/operator confirmation, capital cap, pending selector DB-pool safety, inactive Kill Switch, pending LIVE decision availability, and recent live-loop audit status without contacting Bybit or placing orders.
+- Read-only live order plan CLI that previews the exact `run_id`, deterministic `submission_id`/`client_order_id`, normalized order instructions, risk snapshot, notional, and safety side-effect flags for an explicit or FIFO-selected pending LIVE decision without reserving it, writing order rows, or contacting Bybit.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
 The next Phase 7 slices should add deployment runbooks, operational observability, and explicit live readiness checklists before any always-on worker is considered.
@@ -543,6 +544,18 @@ go run ./cmd/live-decision-scan -config configs/live.local.yaml -symbol BTCUSDT 
 
 Use the logged `next_decision_id` or a listed `decision_id` as the explicit `-decision-id` for `live-loop` only after the operator checks the audit and safety context.
 
+Preview the exact live-loop order plan before arming execution. This command is read-only, uses only PostgreSQL, does not reserve the pending decision, does not write `live_order_submissions`, and does not contact Bybit:
+
+```powershell
+go run ./cmd/live-order-plan -config configs/live.local.yaml -decision-id risk_decision_live_001 -run-id live_loop_001
+```
+
+The preview can also use the same FIFO pending source as `live-loop`, but it remains an unreserved preview; another operator/process can still consume that decision before execution:
+
+```powershell
+go run ./cmd/live-order-plan -config configs/live.local.yaml -select-pending -pending-symbol BTCUSDT -run-id live_loop_001
+```
+
 Alternatively, explicitly arm FIFO pending selection inside `live-loop`. This selects one oldest approved LIVE decision with no live order submission, optionally filtered by symbol, and cannot be combined with `-decision-id`. The selector holds a global PostgreSQL advisory lock for the whole bounded run, so only one pending selector can run at a time; set `database.max_open_conns` to `0` or at least `2` so the lock connection cannot starve normal repository queries:
 
 ```powershell
@@ -629,6 +642,8 @@ make live-loop-smoke CONFIG=configs/config.example.yaml LIVE_SUBACCOUNT_CONFIRME
 make live-loop-audit CONFIG=configs/live.local.yaml LIVE_AUDIT_LIMIT=10
 make live-decision-scan CONFIG=configs/live.local.yaml LIVE_SCAN_SYMBOL=BTCUSDT LIVE_SCAN_LIMIT=10
 make live-readiness CONFIG=configs/live.local.yaml LIVE_READINESS_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1
+make live-order-plan CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_LOOP_RUN_ID=live_loop_001
+make live-order-plan CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_LOOP_RUN_ID=live_loop_001
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
 make live-loop CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
 make live-loop CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001

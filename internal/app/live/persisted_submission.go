@@ -36,37 +36,45 @@ func (s *Service) SubmitPersistedDecisionEntryOrder(ctx context.Context, req Sub
 	if err := ctx.Err(); err != nil {
 		return SubmitApprovedEntryOrderResult{}, err
 	}
-	if s == nil || s.riskDecisions == nil {
-		return SubmitApprovedEntryOrderResult{}, fmt.Errorf("live order service requires risk decision reader")
-	}
-	decisionID := strings.TrimSpace(req.DecisionID)
-	if decisionID == "" {
-		return SubmitApprovedEntryOrderResult{}, fmt.Errorf("decision_id is required")
-	}
-
-	records, err := s.riskDecisions.ListDecisions(ctx, domainrisk.DecisionAuditQuery{
-		DecisionID: decisionID,
-		Limit:      2,
-	})
+	decision, err := s.loadUniqueRiskDecision(ctx, req.DecisionID)
 	if err != nil {
-		return SubmitApprovedEntryOrderResult{}, fmt.Errorf("load live risk decision %q: %w", decisionID, err)
-	}
-	switch len(records) {
-	case 0:
-		return SubmitApprovedEntryOrderResult{}, fmt.Errorf("live risk decision %q not found", decisionID)
-	case 1:
-	default:
-		return SubmitApprovedEntryOrderResult{}, fmt.Errorf("live risk decision %q is not unique", decisionID)
+		return SubmitApprovedEntryOrderResult{}, err
 	}
 
 	return s.SubmitApprovedEntryOrder(ctx, SubmitApprovedEntryOrderRequest{
 		SubmissionID:  req.SubmissionID,
 		ClientOrderID: req.ClientOrderID,
-		Decision:      records[0],
+		Decision:      decision,
 		Exchange:      req.Exchange,
 		Category:      req.Category,
 		Type:          req.Type,
 		TimeInForce:   req.TimeInForce,
 		LimitPrice:    req.LimitPrice,
 	})
+}
+
+func (s *Service) loadUniqueRiskDecision(ctx context.Context, decisionID string) (domainrisk.DecisionAuditRecord, error) {
+	if s == nil || s.riskDecisions == nil {
+		return domainrisk.DecisionAuditRecord{}, fmt.Errorf("live order service requires risk decision reader")
+	}
+	trimmedDecisionID := strings.TrimSpace(decisionID)
+	if trimmedDecisionID == "" {
+		return domainrisk.DecisionAuditRecord{}, fmt.Errorf("decision_id is required")
+	}
+
+	records, err := s.riskDecisions.ListDecisions(ctx, domainrisk.DecisionAuditQuery{
+		DecisionID: trimmedDecisionID,
+		Limit:      2,
+	})
+	if err != nil {
+		return domainrisk.DecisionAuditRecord{}, fmt.Errorf("load live risk decision %q: %w", trimmedDecisionID, err)
+	}
+	switch len(records) {
+	case 0:
+		return domainrisk.DecisionAuditRecord{}, fmt.Errorf("live risk decision %q not found", trimmedDecisionID)
+	case 1:
+		return records[0], nil
+	default:
+		return domainrisk.DecisionAuditRecord{}, fmt.Errorf("live risk decision %q is not unique", trimmedDecisionID)
+	}
 }

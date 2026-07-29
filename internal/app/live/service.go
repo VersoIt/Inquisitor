@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -153,44 +154,8 @@ func (s *Service) SubmitApprovedEntryOrder(ctx context.Context, req SubmitApprov
 	if err := s.requireLiveOrderDependencies(); err != nil {
 		return SubmitApprovedEntryOrderResult{}, err
 	}
-	if err := domainrisk.ValidateDecisionAuditRecord(req.Decision); err != nil {
-		return SubmitApprovedEntryOrderResult{}, err
-	}
-	if !req.Decision.Decision.Approved {
-		return SubmitApprovedEntryOrderResult{}, fmt.Errorf("live order submission requires approved risk decision")
-	}
-	if req.Decision.Mode != domainrisk.ModeLive {
-		return SubmitApprovedEntryOrderResult{}, fmt.Errorf("live order submission requires LIVE risk mode")
-	}
 	now := s.clock.Now()
-	if !req.Decision.RecordedAt.IsZero() && now.Before(req.Decision.RecordedAt) {
-		return SubmitApprovedEntryOrderResult{}, fmt.Errorf("live order submission created_at must not precede risk decision audit")
-	}
-
-	submission, err := domainlive.NewOrderSubmission(domainlive.OrderSubmissionInput{
-		SubmissionID:     req.SubmissionID,
-		ClientOrderID:    req.ClientOrderID,
-		DecisionID:       req.Decision.DecisionID,
-		DecisionApproved: req.Decision.Decision.Approved,
-		IntentID:         req.Decision.Decision.IntentID,
-		RiskMode:         domainlive.RiskMode(req.Decision.Mode),
-		Exchange:         req.Exchange,
-		Category:         req.Category,
-		Symbol:           req.Decision.Symbol,
-		Side:             domainlive.OrderSide(req.Decision.Side),
-		Type:             defaultLiveOrderType(req.Type),
-		TimeInForce:      defaultLiveTimeInForce(req.TimeInForce),
-		Quantity:         req.Decision.Decision.FinalQuantity,
-		ReferencePrice:   req.Decision.EntryPrice,
-		LimitPrice:       req.LimitPrice,
-		StopLoss:         req.Decision.Decision.StopLoss,
-		TakeProfit:       req.Decision.Decision.TakeProfit,
-		Leverage:         req.Decision.Leverage,
-		MaxLoss:          req.Decision.Decision.MaxLoss,
-		Confidence:       req.Decision.Confidence,
-		Reason:           req.Decision.Decision.Reason,
-		CreatedAt:        now,
-	})
+	submission, err := buildApprovedEntryOrderSubmission(req, now)
 	if err != nil {
 		return SubmitApprovedEntryOrderResult{}, err
 	}
@@ -258,6 +223,46 @@ func (s *Service) requireLiveOrderDependencies() error {
 		return fmt.Errorf("live order service requires clock")
 	}
 	return nil
+}
+
+func buildApprovedEntryOrderSubmission(req SubmitApprovedEntryOrderRequest, createdAt time.Time) (domainlive.OrderSubmission, error) {
+	if err := domainrisk.ValidateDecisionAuditRecord(req.Decision); err != nil {
+		return domainlive.OrderSubmission{}, err
+	}
+	if !req.Decision.Decision.Approved {
+		return domainlive.OrderSubmission{}, fmt.Errorf("live order submission requires approved risk decision")
+	}
+	if req.Decision.Mode != domainrisk.ModeLive {
+		return domainlive.OrderSubmission{}, fmt.Errorf("live order submission requires LIVE risk mode")
+	}
+	if !req.Decision.RecordedAt.IsZero() && createdAt.Before(req.Decision.RecordedAt) {
+		return domainlive.OrderSubmission{}, fmt.Errorf("live order submission created_at must not precede risk decision audit")
+	}
+
+	return domainlive.NewOrderSubmission(domainlive.OrderSubmissionInput{
+		SubmissionID:     req.SubmissionID,
+		ClientOrderID:    req.ClientOrderID,
+		DecisionID:       req.Decision.DecisionID,
+		DecisionApproved: req.Decision.Decision.Approved,
+		IntentID:         req.Decision.Decision.IntentID,
+		RiskMode:         domainlive.RiskMode(req.Decision.Mode),
+		Exchange:         req.Exchange,
+		Category:         req.Category,
+		Symbol:           req.Decision.Symbol,
+		Side:             domainlive.OrderSide(req.Decision.Side),
+		Type:             defaultLiveOrderType(req.Type),
+		TimeInForce:      defaultLiveTimeInForce(req.TimeInForce),
+		Quantity:         req.Decision.Decision.FinalQuantity,
+		ReferencePrice:   req.Decision.EntryPrice,
+		LimitPrice:       req.LimitPrice,
+		StopLoss:         req.Decision.Decision.StopLoss,
+		TakeProfit:       req.Decision.Decision.TakeProfit,
+		Leverage:         req.Decision.Leverage,
+		MaxLoss:          req.Decision.Decision.MaxLoss,
+		Confidence:       req.Decision.Confidence,
+		Reason:           req.Decision.Decision.Reason,
+		CreatedAt:        createdAt,
+	})
 }
 
 func defaultLiveOrderType(value domainlive.OrderType) domainlive.OrderType {

@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -292,25 +290,15 @@ func newBybitLiveAccountReader(cfg *config.Config) (domainlive.AccountSnapshotRe
 }
 
 func deterministicLiveLoopIdentity(decisionID string, runID string) (liveLoopIdentity, error) {
-	trimmedDecisionID := strings.TrimSpace(decisionID)
-	if trimmedDecisionID == "" {
-		return liveLoopIdentity{}, fmt.Errorf("decision-id is required")
+	identity, err := domainlive.NewDeterministicLiveLoopOrderIdentity(decisionID, runID)
+	if err != nil {
+		return liveLoopIdentity{}, err
 	}
-	sum := sha256.Sum256([]byte(trimmedDecisionID))
-	suffix := hex.EncodeToString(sum[:])[:24]
-	identity := liveLoopIdentity{
-		RunID:         "live_loop_" + suffix,
-		SubmissionID:  "live_sub_" + suffix,
-		ClientOrderID: "inq_live_" + suffix,
-	}
-	trimmedRunID := strings.TrimSpace(runID)
-	if trimmedRunID != "" {
-		if runID != trimmedRunID {
-			return liveLoopIdentity{}, fmt.Errorf("run-id must be trimmed")
-		}
-		identity.RunID = trimmedRunID
-	}
-	return identity, nil
+	return liveLoopIdentity{
+		RunID:         identity.RunID,
+		SubmissionID:  identity.SubmissionID,
+		ClientOrderID: identity.ClientOrderID,
+	}, nil
 }
 
 func liveLoopPendingDecisionQueryFromFlags(symbol string, enabled bool) (domainlive.PendingLiveDecisionQuery, error) {
