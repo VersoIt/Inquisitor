@@ -32,6 +32,8 @@ type BuildLiveReadinessReportRequest struct {
 	PendingLimit                int
 	AuditLimit                  int
 	RequirePendingDecision      bool
+	HasPlanArtifact             bool
+	PlanArtifact                domainlive.LiveOrderPlanArtifact
 }
 
 type LiveReadinessReport struct {
@@ -93,6 +95,14 @@ func (s *Service) BuildLiveReadinessReport(
 	report.NextDecisionID = pending.Summary.NextID
 	report.NextSymbol = pending.Summary.NextSymbol
 	report.Checks = append(report.Checks, liveReadinessPendingDecisionCheck(req, pending))
+
+	if req.HasPlanArtifact {
+		check, err := s.liveReadinessPlanArtifactCheck(ctx, req.PlanArtifact, pending)
+		if err != nil {
+			return report, err
+		}
+		report.Checks = append(report.Checks, check)
+	}
 
 	audit, err := s.BuildLiveLoopAuditReport(ctx, LiveLoopAuditReportRequest{
 		Limit:             auditLimit,
@@ -236,6 +246,73 @@ func liveReadinessPendingDecisionCheck(
 		domainlive.ReadinessCheckStatusPass,
 		fmt.Sprintf("next decision %s for %s is pending", pending.Summary.NextID, pending.Summary.NextSymbol),
 	)
+}
+
+func (s *Service) liveReadinessPlanArtifactCheck(
+	ctx context.Context,
+	artifact domainlive.LiveOrderPlanArtifact,
+	pending PendingLiveDecisionReport,
+) (domainlive.ReadinessCheck, error) {
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return domainlive.NewReadinessCheck("live_order_plan_artifact", domainlive.ReadinessCheckStatusFail, err.Error()), nil
+	}
+	if artifact.Source == "select-pending" {
+		if pending.Summary.Total == 0 {
+			return domainlive.NewReadinessCheck(
+				"live_order_plan_artifact",
+				domainlive.ReadinessCheckStatusFail,
+				"artifact was built from FIFO pending source, but no pending LIVE decision is currently available",
+			), nil
+		}
+		if artifact.DecisionID != pending.Summary.NextID {
+			return domainlive.NewReadinessCheck(
+				"live_order_plan_artifact",
+				domainlive.ReadinessCheckStatusFail,
+				fmt.Sprintf("artifact decision %s is no longer the next FIFO pending decision %s", artifact.DecisionID, pending.Summary.NextID),
+			), nil
+		}
+	}
+	if s == nil || s.riskDecisions == nil {
+		return domainlive.ReadinessCheck{}, fmt.Errorf("live readiness plan artifact check requires risk decision reader")
+	}
+	limitPrice, err := decimal.NewFromString(strings.TrimSpace(artifact.LimitPrice))
+	if err != nil {
+		return domainlive.NewReadinessCheck(
+			"live_order_plan_artifact",
+			domainlive.ReadinessCheckStatusFail,
+			fmt.Sprintf("artifact limit_price must be decimal: %v", err),
+		), nil
+	}
+	currentPlan, err := s.BuildLiveOrderPlan(ctx, BuildLiveOrderPlanRequest{
+		DecisionID:    artifact.DecisionID,
+		SubmissionID:  artifact.SubmissionID,
+		ClientOrderID: artifact.ClientOrderID,
+		Exchange:      artifact.Exchange,
+		Category:      artifact.Category,
+		Type:          artifact.OrderType,
+		TimeInForce:   artifact.TimeInForce,
+		LimitPrice:    limitPrice,
+	})
+	if err != nil {
+		return domainlive.NewReadinessCheck(
+			"live_order_plan_artifact",
+			domainlive.ReadinessCheckStatusFail,
+			fmt.Sprintf("artifact current plan could not be rebuilt: %v", err),
+		), nil
+	}
+	if err := domainlive.ValidateLiveOrderPlanArtifactSnapshot(artifact, domainlive.LiveOrderPlanArtifactSnapshot{
+		RunID:             artifact.RunID,
+		Submission:        currentPlan.Submission,
+		DecisionCreatedAt: currentPlan.Decision.Decision.CreatedAt,
+		RecordedAt:        currentPlan.Decision.RecordedAt,
+	}); err != nil {
+		return domainlive.NewReadinessCheck("live_order_plan_artifact", domainlive.ReadinessCheckStatusFail, err.Error()), nil
+	}
+	return domainlive.NewReadinessCheck(
+		"live_order_plan_artifact",
+		domainlive.ReadinessCheckStatusPass,
+		fmt.Sprintf("artifact matches current PostgreSQL risk snapshot for decision %s", artifact.DecisionID),
+	), nil
 }
 
 func liveReadinessAuditCheck(audit LiveLoopAuditReport) domainlive.ReadinessCheck {

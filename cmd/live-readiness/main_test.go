@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/shopspring/decimal"
 
+	applive "github.com/VersoIt/Inquisitor/internal/app/live"
 	"github.com/VersoIt/Inquisitor/internal/config"
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
@@ -219,6 +223,139 @@ func TestRunLiveReadinessLogsReadyReport(t *testing.T) {
 	}
 }
 
+func TestRunLiveReadinessValidatesPlanArtifact(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	pending := liveReadinessPendingDecision("risk_decision_live_ready_cli_0001", "BTCUSDT", now)
+	artifactPath := writeLiveReadinessPlanArtifact(t, liveReadinessPlanArtifactFromRecord(t, pending.Decision, "decision-id"))
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	pendingReader := &fakeLiveReadinessPendingReader{candidates: []domainlive.PendingLiveDecision{pending}}
+	riskReader := &fakeLiveReadinessRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{pending.Decision}}
+
+	var output bytes.Buffer
+	err = runLiveReadiness(context.Background(), []string{
+		"-symbol", "BTCUSDT",
+		"-plan-file", artifactPath,
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+	}, liveReadinessDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			return validLiveReadinessConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newPendingReader: func(*sql.DB) domainlive.PendingLiveDecisionReader {
+			return pendingReader
+		},
+		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
+			return &fakeLiveReadinessAuditReader{runs: []domainlive.LiveLoopRunAudit{
+				liveReadinessAuditRun(now, domainlive.LiveLoopRunStatusCompleted),
+			}}
+		},
+		newKillSwitch: func(*sql.DB) domainrisk.KillSwitchRepository {
+			return &fakeLiveReadinessKillSwitchRepository{}
+		},
+		newRiskReader: func(*sql.DB) applive.RiskDecisionReader {
+			return riskReader
+		},
+		lookupEnv: mapLookupEnv(map[string]string{
+			"TRADING_LIVE_CONFIRM": "true",
+			"BYBIT_API_KEY":        "key",
+			"BYBIT_API_SECRET":     "secret",
+		}),
+		output: &output,
+	})
+	if err != nil {
+		t.Fatalf("run live readiness: %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+	if riskReader.calls != 1 || riskReader.query.DecisionID != pending.Decision.DecisionID {
+		t.Fatalf("risk reader query mismatch: calls=%d query=%#v", riskReader.calls, riskReader.query)
+	}
+	logs := output.String()
+	for _, want := range []string{
+		`"name":"live_order_plan_artifact"`,
+		`"status":"PASS"`,
+		`"msg":"live readiness passed"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
+		}
+	}
+}
+
+func TestRunLiveReadinessStalePlanArtifactFailsReadiness(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	pending := liveReadinessPendingDecision("risk_decision_live_ready_cli_0001", "BTCUSDT", now)
+	artifact := liveReadinessPlanArtifactFromRecord(t, pending.Decision, "decision-id")
+	artifact.Quantity = "0.010"
+	artifact.Notional = "1000"
+	artifactPath := writeLiveReadinessPlanArtifact(t, artifact)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	riskReader := &fakeLiveReadinessRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{pending.Decision}}
+	var output bytes.Buffer
+	err = runLiveReadiness(context.Background(), []string{
+		"-symbol", "BTCUSDT",
+		"-plan-file", artifactPath,
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+	}, liveReadinessDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			return validLiveReadinessConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newPendingReader: func(*sql.DB) domainlive.PendingLiveDecisionReader {
+			return &fakeLiveReadinessPendingReader{candidates: []domainlive.PendingLiveDecision{pending}}
+		},
+		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
+			return &fakeLiveReadinessAuditReader{runs: []domainlive.LiveLoopRunAudit{
+				liveReadinessAuditRun(now, domainlive.LiveLoopRunStatusCompleted),
+			}}
+		},
+		newKillSwitch: func(*sql.DB) domainrisk.KillSwitchRepository {
+			return &fakeLiveReadinessKillSwitchRepository{}
+		},
+		newRiskReader: func(*sql.DB) applive.RiskDecisionReader {
+			return riskReader
+		},
+		lookupEnv: mapLookupEnv(map[string]string{
+			"TRADING_LIVE_CONFIRM": "true",
+			"BYBIT_API_KEY":        "key",
+			"BYBIT_API_SECRET":     "secret",
+		}),
+		output: &output,
+	})
+	if err == nil || !strings.Contains(err.Error(), "live_order_plan_artifact") {
+		t.Fatalf("expected artifact readiness failure, got %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+	if riskReader.calls != 1 {
+		t.Fatalf("risk reader calls mismatch: %d", riskReader.calls)
+	}
+	logs := output.String()
+	if !strings.Contains(logs, `"name":"live_order_plan_artifact"`) ||
+		!strings.Contains(logs, `"status":"FAIL"`) ||
+		!strings.Contains(logs, "quantity") {
+		t.Fatalf("expected artifact failure logs, got\n%s", logs)
+	}
+}
+
 func TestRunLiveReadinessFailsWhenReportHasBlockingChecks(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -308,6 +445,25 @@ type fakeLiveReadinessKillSwitchRepository struct {
 	err   error
 }
 
+type fakeLiveReadinessRiskDecisionReader struct {
+	query   domainrisk.DecisionAuditQuery
+	records []domainrisk.DecisionAuditRecord
+	calls   int
+	err     error
+}
+
+func (r *fakeLiveReadinessRiskDecisionReader) ListDecisions(
+	_ context.Context,
+	query domainrisk.DecisionAuditQuery,
+) ([]domainrisk.DecisionAuditRecord, error) {
+	r.calls++
+	r.query = query
+	if r.err != nil {
+		return nil, r.err
+	}
+	return append([]domainrisk.DecisionAuditRecord(nil), r.records...), nil
+}
+
 func (r *fakeLiveReadinessKillSwitchRepository) AppendKillSwitchEvent(context.Context, domainrisk.KillSwitchEvent) (domainrisk.KillSwitchStats, error) {
 	return domainrisk.KillSwitchStats{}, fmt.Errorf("not implemented")
 }
@@ -351,6 +507,62 @@ func mapLookupEnv(values map[string]string) func(string) (string, bool) {
 	return func(name string) (string, bool) {
 		value, ok := values[strings.TrimSpace(name)]
 		return value, ok
+	}
+}
+
+func writeLiveReadinessPlanArtifact(t *testing.T, artifact domainlive.LiveOrderPlanArtifact) string {
+	t.Helper()
+
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		t.Fatalf("validate plan artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal plan artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "live-order-plan.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write plan artifact: %v", err)
+	}
+	return path
+}
+
+func liveReadinessPlanArtifactFromRecord(
+	t *testing.T,
+	record domainrisk.DecisionAuditRecord,
+	source string,
+) domainlive.LiveOrderPlanArtifact {
+	t.Helper()
+
+	identity, err := domainlive.NewDeterministicLiveLoopOrderIdentity(record.DecisionID, "live_loop_ready_cli_0001")
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	return domainlive.LiveOrderPlanArtifact{
+		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
+		Source:              source,
+		RunID:               identity.RunID,
+		DecisionID:          record.DecisionID,
+		SubmissionID:        identity.SubmissionID,
+		ClientOrderID:       identity.ClientOrderID,
+		Exchange:            "bybit",
+		Category:            "linear",
+		Symbol:              record.Symbol,
+		Side:                domainlive.OrderSideLong,
+		OrderType:           domainlive.OrderTypeMarket,
+		TimeInForce:         domainlive.TimeInForceIOC,
+		LimitPrice:          "0",
+		Quantity:            record.Decision.FinalQuantity.String(),
+		EntryPrice:          record.EntryPrice.String(),
+		Notional:            record.EntryPrice.Mul(record.Decision.FinalQuantity).String(),
+		MaxLoss:             record.Decision.MaxLoss.String(),
+		StopLoss:            record.Decision.StopLoss.String(),
+		TakeProfit:          record.Decision.TakeProfit.String(),
+		Leverage:            record.Leverage.String(),
+		Confidence:          record.Confidence,
+		DecisionCreatedAt:   record.Decision.CreatedAt,
+		RecordedAt:          record.RecordedAt,
+		SubmissionCreatedAt: record.RecordedAt.Add(time.Second),
 	}
 }
 

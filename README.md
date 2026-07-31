@@ -87,7 +87,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Operator-facing live-loop audit CLI that lists recent run and iteration audit rows with status, stop reason, decision/submission/client IDs, and exchange-submission flags without touching exchange APIs.
 - Read-only pending LIVE decision scanner that lists approved LIVE risk decisions with no live order submission yet, ordered FIFO, so an operator can choose an explicit `decision_id` for `live-loop` without enabling automatic discovery or order placement.
 - Explicitly armed pending LIVE decision selector for `live-loop` that can pick the oldest approved unsubmitted LIVE decision only when `-select-pending` and `-execute=true` are both provided, holds a PostgreSQL advisory lock so only one selector runs at a time, then runs the same bounded preflight, Kill Switch, submission, reconciliation, and audit pipeline for exactly one decision.
-- Read-only live readiness CLI that checks live config/env/operator confirmation, capital cap, pending selector DB-pool safety, inactive Kill Switch, pending LIVE decision availability, and recent live-loop audit status without contacting Bybit or placing orders.
+- Read-only live readiness CLI that checks live config/env/operator confirmation, capital cap, pending selector DB-pool safety, inactive Kill Switch, pending LIVE decision availability, optional live order plan artifact freshness, and recent live-loop audit status without contacting Bybit or placing orders.
 - Read-only live order plan CLI that previews the exact `run_id`, deterministic `submission_id`/`client_order_id`, normalized order instructions, risk snapshot, notional, and safety side-effect flags for an explicit or FIFO-selected pending LIVE decision without reserving it, writing order rows, or contacting Bybit; `live-loop -plan-file` requires those IDs and revalidates the artifact against the current PostgreSQL risk snapshot before any startup preflight or exchange-capable work.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
@@ -491,13 +491,19 @@ go run ./cmd/paper-execute -config configs/config.example.yaml -action settle -e
 
 Live trading remains disabled by default. Use a separate local live config, not `configs/config.example.yaml`, and keep API keys scoped to a dedicated subaccount with withdrawals disabled.
 
-Run the read-only live readiness checklist before contacting Bybit or arming a live-loop order path. It checks config/env/operator confirmation, DB pool safety for pending selection, inactive Kill Switch, pending decision availability, and recent live-loop audit state. It uses only PostgreSQL and local environment variables:
+Run the read-only live readiness checklist before contacting Bybit or arming a live-loop order path. It checks config/env/operator confirmation, DB pool safety for pending selection, inactive Kill Switch, pending decision availability, optional plan artifact freshness, and recent live-loop audit state. It uses only PostgreSQL and local environment variables:
 
 ```powershell
 go run ./cmd/live-readiness -config configs/live.local.yaml -symbol BTCUSDT -subaccount-confirmed -max-initial-live-capital-usdt 100
 ```
 
 If you want to verify infrastructure readiness before a signal exists, pass `-require-pending=false`; before the first order path, keep the default `-require-pending=true`.
+
+After writing a `live-order-plan` artifact, pass it to readiness as a final read-only handoff check:
+
+```powershell
+go run ./cmd/live-readiness -config configs/live.local.yaml -symbol BTCUSDT -plan-file artifacts/live-order-plan.json -subaccount-confirmed -max-initial-live-capital-usdt 100
+```
 
 Run live startup preflight before any live submission. It reads the Bybit `UNIFIED` wallet balance, requires a fresh small account with no margin, borrow, locked funds, non-base assets, or open PnL, persists the account snapshot, then checks every configured `exchange.symbols` position, requires a fresh flat snapshot, and records each position snapshot in PostgreSQL:
 
@@ -649,7 +655,7 @@ make paper-cycle-smoke-sh
 make live-loop-smoke CONFIG=configs/config.example.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-loop-audit CONFIG=configs/live.local.yaml LIVE_AUDIT_LIMIT=10
 make live-decision-scan CONFIG=configs/live.local.yaml LIVE_SCAN_SYMBOL=BTCUSDT LIVE_SCAN_LIMIT=10
-make live-readiness CONFIG=configs/live.local.yaml LIVE_READINESS_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1
+make live-readiness CONFIG=configs/live.local.yaml LIVE_READINESS_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_PLAN_FILE=artifacts/live-order-plan.json
 make live-order-plan CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_LOOP_RUN_ID=live_loop_001 LIVE_PLAN_FILE=artifacts/live-order-plan.json
 make live-order-plan CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_LOOP_RUN_ID=live_loop_001 LIVE_PLAN_FILE=artifacts/live-order-plan.json
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001

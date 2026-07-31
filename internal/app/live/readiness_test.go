@@ -168,6 +168,127 @@ func TestServiceBuildLiveReadinessReportWarnsOnRecentFailedRuns(t *testing.T) {
 	}
 }
 
+func TestServiceBuildLiveReadinessReportPassesWithPlanArtifact(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	record := liveRiskDecisionAudit(now.Add(-time.Minute))
+	riskReader := &fakeLiveRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{record}}
+	service := applive.NewService(
+		applive.WithPendingLiveDecisionReader(&fakePendingLiveDecisionReader{candidates: []domainlive.PendingLiveDecision{
+			pendingLiveDecision("risk_decision_live_ready_0001", "BTCUSDT", now),
+		}}),
+		applive.WithLiveLoopAuditReader(&fakeLiveLoopAuditReader{runs: []domainlive.LiveLoopRunAudit{
+			liveLoopAuditRun(now, domainlive.LiveLoopRunStatusCompleted),
+		}}),
+		applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
+		applive.WithRiskDecisionReader(riskReader),
+	)
+	req := validLiveReadinessRequest()
+	req.HasPlanArtifact = true
+	req.PlanArtifact = validLiveReadinessPlanArtifact(t, record, "decision-id")
+
+	got, err := service.BuildLiveReadinessReport(context.Background(), req)
+	if err != nil {
+		t.Fatalf("build live readiness report: %v", err)
+	}
+	if !got.Ready || got.Summary.Total != 8 || got.Summary.Passed != 8 || got.Summary.Failed != 0 {
+		t.Fatalf("readiness summary mismatch: ready=%t summary=%#v checks=%#v", got.Ready, got.Summary, got.Checks)
+	}
+	check := readinessCheckByName(got.Checks, "live_order_plan_artifact")
+	if check.Status != domainlive.ReadinessCheckStatusPass || !strings.Contains(check.Details, record.DecisionID) {
+		t.Fatalf("artifact check mismatch: %#v", check)
+	}
+	if riskReader.calls != 1 || riskReader.query.DecisionID != record.DecisionID || riskReader.query.Limit != 2 {
+		t.Fatalf("risk reader query mismatch: calls=%d query=%#v", riskReader.calls, riskReader.query)
+	}
+}
+
+func TestServiceBuildLiveReadinessReportPlanArtifactFailuresTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	record := liveRiskDecisionAudit(now.Add(-time.Minute))
+	validArtifact := validLiveReadinessPlanArtifact(t, record, "decision-id")
+
+	tests := []struct {
+		name          string
+		artifact      domainlive.LiveOrderPlanArtifact
+		pending       []domainlive.PendingLiveDecision
+		riskRecords   []domainrisk.DecisionAuditRecord
+		wantDetailSub string
+		wantRiskCalls int
+	}{
+		{
+			name: "invalid read-only side effect marker",
+			artifact: func() domainlive.LiveOrderPlanArtifact {
+				artifact := validArtifact
+				artifact.ExchangeContacted = true
+				return artifact
+			}(),
+			pending:       []domainlive.PendingLiveDecision{pendingLiveDecision("risk_decision_live_ready_0001", "BTCUSDT", now)},
+			riskRecords:   []domainrisk.DecisionAuditRecord{record},
+			wantDetailSub: "exchange_contacted",
+		},
+		{
+			name: "stale risk quantity",
+			artifact: func() domainlive.LiveOrderPlanArtifact {
+				artifact := validArtifact
+				artifact.Quantity = "0.25"
+				artifact.Notional = "25000"
+				return artifact
+			}(),
+			pending:       []domainlive.PendingLiveDecision{pendingLiveDecision("risk_decision_live_ready_0001", "BTCUSDT", now)},
+			riskRecords:   []domainrisk.DecisionAuditRecord{record},
+			wantDetailSub: "quantity",
+			wantRiskCalls: 1,
+		},
+		{
+			name: "select pending artifact no longer next FIFO",
+			artifact: func() domainlive.LiveOrderPlanArtifact {
+				artifact := validLiveReadinessPlanArtifact(t, record, "select-pending")
+				artifact.PendingSymbol = "BTCUSDT"
+				return artifact
+			}(),
+			pending:       []domainlive.PendingLiveDecision{pendingLiveDecision("risk_decision_live_other_0001", "BTCUSDT", now)},
+			riskRecords:   []domainrisk.DecisionAuditRecord{record},
+			wantDetailSub: "no longer the next FIFO pending decision",
+		},
+		{
+			name:          "risk decision missing",
+			artifact:      validArtifact,
+			pending:       []domainlive.PendingLiveDecision{pendingLiveDecision("risk_decision_live_ready_0001", "BTCUSDT", now)},
+			wantDetailSub: "not found",
+			wantRiskCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			riskReader := &fakeLiveRiskDecisionReader{records: tt.riskRecords}
+			service := applive.NewService(
+				applive.WithPendingLiveDecisionReader(&fakePendingLiveDecisionReader{candidates: tt.pending}),
+				applive.WithLiveLoopAuditReader(&fakeLiveLoopAuditReader{runs: []domainlive.LiveLoopRunAudit{
+					liveLoopAuditRun(now, domainlive.LiveLoopRunStatusCompleted),
+				}}),
+				applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
+				applive.WithRiskDecisionReader(riskReader),
+			)
+			req := validLiveReadinessRequest()
+			req.HasPlanArtifact = true
+			req.PlanArtifact = tt.artifact
+
+			got, err := service.BuildLiveReadinessReport(context.Background(), req)
+			if err != nil {
+				t.Fatalf("build live readiness report: %v", err)
+			}
+			check := readinessCheckByName(got.Checks, "live_order_plan_artifact")
+			if got.Ready || check.Status != domainlive.ReadinessCheckStatusFail || !strings.Contains(check.Details, tt.wantDetailSub) {
+				t.Fatalf("expected artifact readiness failure containing %q, ready=%t check=%#v summary=%#v", tt.wantDetailSub, got.Ready, check, got.Summary)
+			}
+			if riskReader.calls != tt.wantRiskCalls {
+				t.Fatalf("risk reader calls mismatch: got %d want %d", riskReader.calls, tt.wantRiskCalls)
+			}
+		})
+	}
+}
+
 func TestServiceBuildLiveReadinessReportRejectsMissingDependenciesTableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -186,6 +307,28 @@ func TestServiceBuildLiveReadinessReportRejectsMissingDependenciesTableDriven(t 
 				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
 			}
 		})
+	}
+}
+
+func TestServiceBuildLiveReadinessReportRequiresRiskReaderForPlanArtifact(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	record := liveRiskDecisionAudit(now.Add(-time.Minute))
+	service := applive.NewService(
+		applive.WithPendingLiveDecisionReader(&fakePendingLiveDecisionReader{candidates: []domainlive.PendingLiveDecision{
+			pendingLiveDecision("risk_decision_live_ready_0001", "BTCUSDT", now),
+		}}),
+		applive.WithLiveLoopAuditReader(&fakeLiveLoopAuditReader{runs: []domainlive.LiveLoopRunAudit{
+			liveLoopAuditRun(now, domainlive.LiveLoopRunStatusCompleted),
+		}}),
+		applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
+	)
+	req := validLiveReadinessRequest()
+	req.HasPlanArtifact = true
+	req.PlanArtifact = validLiveReadinessPlanArtifact(t, record, "decision-id")
+
+	_, err := service.BuildLiveReadinessReport(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "risk decision reader") {
+		t.Fatalf("expected risk reader dependency error, got %v", err)
 	}
 }
 
@@ -264,4 +407,43 @@ func readinessCheckByName(checks []domainlive.ReadinessCheck, name string) domai
 		}
 	}
 	return domainlive.ReadinessCheck{}
+}
+
+func validLiveReadinessPlanArtifact(
+	t *testing.T,
+	record domainrisk.DecisionAuditRecord,
+	source string,
+) domainlive.LiveOrderPlanArtifact {
+	t.Helper()
+
+	identity, err := domainlive.NewDeterministicLiveLoopOrderIdentity(record.DecisionID, "live_loop_readiness_plan_0001")
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	return domainlive.LiveOrderPlanArtifact{
+		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
+		Source:              source,
+		RunID:               identity.RunID,
+		DecisionID:          record.DecisionID,
+		SubmissionID:        identity.SubmissionID,
+		ClientOrderID:       identity.ClientOrderID,
+		Exchange:            "bybit",
+		Category:            "linear",
+		Symbol:              record.Symbol,
+		Side:                domainlive.OrderSideLong,
+		OrderType:           domainlive.OrderTypeMarket,
+		TimeInForce:         domainlive.TimeInForceIOC,
+		LimitPrice:          "0",
+		Quantity:            record.Decision.FinalQuantity.String(),
+		EntryPrice:          record.EntryPrice.String(),
+		Notional:            record.EntryPrice.Mul(record.Decision.FinalQuantity).String(),
+		MaxLoss:             record.Decision.MaxLoss.String(),
+		StopLoss:            record.Decision.StopLoss.String(),
+		TakeProfit:          record.Decision.TakeProfit.String(),
+		Leverage:            record.Leverage.String(),
+		Confidence:          record.Confidence,
+		DecisionCreatedAt:   record.Decision.CreatedAt,
+		RecordedAt:          record.RecordedAt,
+		SubmissionCreatedAt: record.RecordedAt.Add(time.Second),
+	}
 }

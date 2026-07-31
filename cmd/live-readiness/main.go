@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ type liveReadinessDependencies struct {
 	newPendingReader func(*sql.DB) domainlive.PendingLiveDecisionReader
 	newAuditReader   func(*sql.DB) domainlive.LiveLoopAuditReader
 	newKillSwitch    func(*sql.DB) domainrisk.KillSwitchRepository
+	newRiskReader    func(*sql.DB) applive.RiskDecisionReader
 	lookupEnv        func(string) (string, bool)
 	output           io.Writer
 }
@@ -51,6 +53,7 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	pendingLimit := flags.Int("pending-limit", 1, "maximum pending LIVE decisions to inspect, from 1 to 100")
 	auditLimit := flags.Int("audit-limit", 10, "maximum recent live-loop audit runs to inspect, from 1 to 100")
 	requirePending := flags.Bool("require-pending", true, "fail readiness when no pending LIVE decision is available")
+	planFile := flags.String("plan-file", "", "optional JSON artifact written by live-order-plan; validates it against current readiness and risk snapshot")
 	maxInitialCapitalValue := flags.String("max-initial-live-capital-usdt", defaultMaxInitialLiveCapitalUSDT, "operator safety cap for configured live initial capital")
 	subaccountConfirmed := flags.Bool("subaccount-confirmed", false, "set only after verifying API keys belong to the dedicated live subaccount")
 	timeout := flags.Duration("timeout", 10*time.Second, "maximum live readiness command duration")
@@ -68,6 +71,10 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 		return err
 	}
 	maxInitialCapital, err := parsePositiveDecimalFlag("max-initial-live-capital-usdt", *maxInitialCapitalValue)
+	if err != nil {
+		return err
+	}
+	planArtifact, hasPlanArtifact, err := loadLiveReadinessPlanArtifact(*planFile)
 	if err != nil {
 		return err
 	}
@@ -95,6 +102,7 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 		applive.WithKillSwitchRepository(deps.newKillSwitch(db)),
 		applive.WithPendingLiveDecisionReader(deps.newPendingReader(db)),
 		applive.WithLiveLoopAuditReader(deps.newAuditReader(db)),
+		applive.WithRiskDecisionReader(deps.newRiskReader(db)),
 	)
 	req, err := liveReadinessRequestFromConfig(
 		cfg,
@@ -108,6 +116,8 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	if err != nil {
 		return err
 	}
+	req.HasPlanArtifact = hasPlanArtifact
+	req.PlanArtifact = planArtifact
 	report, err := service.BuildLiveReadinessReport(readinessCtx, req)
 	logLiveReadinessReport(log, report)
 	if err != nil {
@@ -142,6 +152,11 @@ func (deps liveReadinessDependencies) withDefaults() liveReadinessDependencies {
 			return postgres.NewRiskKillSwitchRepository(db)
 		}
 	}
+	if deps.newRiskReader == nil {
+		deps.newRiskReader = func(db *sql.DB) applive.RiskDecisionReader {
+			return postgres.NewRiskDecisionRepository(db)
+		}
+	}
 	if deps.lookupEnv == nil {
 		deps.lookupEnv = os.LookupEnv
 	}
@@ -149,6 +164,28 @@ func (deps liveReadinessDependencies) withDefaults() liveReadinessDependencies {
 		deps.output = os.Stdout
 	}
 	return deps
+}
+
+func loadLiveReadinessPlanArtifact(path string) (domainlive.LiveOrderPlanArtifact, bool, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return domainlive.LiveOrderPlanArtifact{}, false, nil
+	}
+	if path != trimmedPath {
+		return domainlive.LiveOrderPlanArtifact{}, false, fmt.Errorf("plan-file must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return domainlive.LiveOrderPlanArtifact{}, false, fmt.Errorf("read live order plan artifact %q: %w", trimmedPath, err)
+	}
+	var artifact domainlive.LiveOrderPlanArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		return domainlive.LiveOrderPlanArtifact{}, false, fmt.Errorf("decode live order plan artifact %q: %w", trimmedPath, err)
+	}
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return domainlive.LiveOrderPlanArtifact{}, false, err
+	}
+	return artifact, true, nil
 }
 
 func liveReadinessPendingQueryFromFlags(symbol string, limit int) (domainlive.PendingLiveDecisionQuery, error) {
