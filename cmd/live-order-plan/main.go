@@ -99,9 +99,9 @@ func runLiveOrderPlan(ctx context.Context, args []string, deps liveOrderPlanDepe
 	defer db.Close()
 
 	selectedDecisionID := strings.TrimSpace(*decisionID)
-	source := "decision-id"
+	source := domainlive.LiveOrderPlanArtifactSourceDecisionID
 	if *selectPending {
-		source = "select-pending"
+		source = domainlive.LiveOrderPlanArtifactSourceSelectPending
 		selectionService := applive.NewService(applive.WithPendingLiveDecisionReader(deps.newPendingReader(db)))
 		selection, err := selectionService.SelectNextPendingLiveDecision(planCtx, applive.SelectPendingLiveDecisionRequest{
 			Symbol: pendingQuery.Symbol,

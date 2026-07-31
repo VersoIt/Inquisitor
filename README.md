@@ -574,7 +574,7 @@ Run one explicitly armed bounded live-loop iteration for a persisted approved LI
 go run ./cmd/live-loop -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
 ```
 
-For the safest handoff from preview to execution, pass the JSON artifact to the armed `live-loop`. The artifact can provide `decision_id`, `run_id`, deterministic IDs, and order instructions; `live-loop` rejects artifacts older than `-max-plan-age` (`10m` by default), rebuilds the current order plan from PostgreSQL, and fails before startup preflight or exchange setup if the selected decision/config/instructions/risk snapshot would produce a different execution plan:
+For the safest handoff from preview to execution, pass the JSON artifact to the armed `live-loop`. Use an explicit `-decision-id` artifact with explicit execution, or a FIFO `-select-pending` artifact with `live-loop -select-pending`; mixed source modes are rejected before configuration, database, or exchange setup. The artifact can provide `decision_id`, `run_id`, deterministic IDs, and order instructions; `live-loop` rejects artifacts older than `-max-plan-age` (`10m` by default), rebuilds the current order plan from PostgreSQL, and fails before startup preflight or exchange setup if the selected decision/config/instructions/risk snapshot would produce a different execution plan:
 
 ```powershell
 go run ./cmd/live-loop -config configs/live.local.yaml -plan-file artifacts/live-order-plan.json -subaccount-confirmed -max-initial-live-capital-usdt 100 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute

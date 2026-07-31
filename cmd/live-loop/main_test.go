@@ -263,6 +263,61 @@ func TestRunLiveLoopPlanFileDecisionMismatchStopsBeforeSideEffects(t *testing.T)
 	}
 }
 
+func TestRunLiveLoopPlanFileSourceMismatchStopsBeforeSideEffects(t *testing.T) {
+	decisionTime := time.Now().UTC().Add(-2 * time.Second)
+	tests := []struct {
+		name             string
+		source           string
+		pendingSymbol    string
+		selectPending    bool
+		wantErrSubstring string
+	}{
+		{
+			name:             "select pending artifact requires selector execution",
+			source:           domainlive.LiveOrderPlanArtifactSourceSelectPending,
+			pendingSymbol:    "BTCUSDT",
+			wantErrSubstring: "explicit decision execution",
+		},
+		{
+			name:             "decision id artifact cannot drive selector execution",
+			source:           domainlive.LiveOrderPlanArtifactSourceDecisionID,
+			selectPending:    true,
+			wantErrSubstring: "-select-pending execution",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opened bool
+			artifact := liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime)
+			artifact.Source = tt.source
+			artifact.PendingSymbol = tt.pendingSymbol
+			planFile := writeLiveLoopPlanArtifact(t, artifact)
+			args := []string{
+				"-plan-file", planFile,
+				"-execute",
+			}
+			if tt.selectPending {
+				args = append(args, "-select-pending")
+			}
+
+			err := runLiveLoop(context.Background(), args, liveLoopDependencies{
+				openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+					opened = true
+					return nil, nil
+				},
+				output: &bytes.Buffer{},
+			})
+			if err == nil || !strings.Contains(err.Error(), "plan-file source") || !strings.Contains(err.Error(), tt.wantErrSubstring) {
+				t.Fatalf("expected plan-file source mismatch error containing %q, got %v", tt.wantErrSubstring, err)
+			}
+			if opened {
+				t.Fatal("database must not be opened when plan-file source mismatches execution mode")
+			}
+		})
+	}
+}
+
 func TestRunLiveLoopPlanFileStaleArtifactStopsBeforeSideEffects(t *testing.T) {
 	var opened bool
 	var executorCreated bool
@@ -1297,7 +1352,7 @@ func liveLoopPlanArtifact(t *testing.T, decisionID string, runID string, decisio
 	recordedAt := decisionObservedAt.UTC().Add(-time.Second)
 	return domainlive.LiveOrderPlanArtifact{
 		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
-		Source:              "decision-id",
+		Source:              domainlive.LiveOrderPlanArtifactSourceDecisionID,
 		RunID:               identity.RunID,
 		DecisionID:          strings.TrimSpace(decisionID),
 		SubmissionID:        identity.SubmissionID,

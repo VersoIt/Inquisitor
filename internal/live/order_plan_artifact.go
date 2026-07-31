@@ -13,6 +13,11 @@ const LiveOrderPlanArtifactSchemaVersion = "inquisitor.live_order_plan.v1"
 
 const DefaultLiveOrderPlanArtifactMaxAge = 10 * time.Minute
 
+const (
+	LiveOrderPlanArtifactSourceDecisionID    = "decision-id"
+	LiveOrderPlanArtifactSourceSelectPending = "select-pending"
+)
+
 type LiveOrderPlanArtifact struct {
 	SchemaVersion       string      `json:"schema_version"`
 	Source              string      `json:"source"`
@@ -57,7 +62,7 @@ func ValidateLiveOrderPlanArtifact(artifact LiveOrderPlanArtifact) error {
 		problems = append(problems, "schema_version must be "+LiveOrderPlanArtifactSchemaVersion)
 	}
 	switch strings.TrimSpace(artifact.Source) {
-	case "decision-id", "select-pending":
+	case LiveOrderPlanArtifactSourceDecisionID, LiveOrderPlanArtifactSourceSelectPending:
 	default:
 		problems = append(problems, "source must be decision-id or select-pending")
 	}

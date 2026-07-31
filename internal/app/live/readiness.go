@@ -268,7 +268,7 @@ func (s *Service) liveReadinessPlanArtifactCheck(
 	if err := domainlive.ValidateLiveOrderPlanArtifactFreshness(artifact, s.clock.Now(), maxAge); err != nil {
 		return domainlive.NewReadinessCheck("live_order_plan_artifact", domainlive.ReadinessCheckStatusFail, err.Error()), nil
 	}
-	if artifact.Source == "select-pending" {
+	if artifact.Source == domainlive.LiveOrderPlanArtifactSourceSelectPending {
 		if pending.Summary.Total == 0 {
 			return domainlive.NewReadinessCheck(
 				"live_order_plan_artifact",
