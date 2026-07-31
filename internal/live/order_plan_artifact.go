@@ -42,6 +42,13 @@ type LiveOrderPlanArtifact struct {
 	OrderSubmitted      bool        `json:"order_submitted"`
 }
 
+type LiveOrderPlanArtifactSnapshot struct {
+	RunID             string
+	Submission        OrderSubmission
+	DecisionCreatedAt time.Time
+	RecordedAt        time.Time
+}
+
 func ValidateLiveOrderPlanArtifact(artifact LiveOrderPlanArtifact) error {
 	var problems []string
 	if artifact.SchemaVersion != LiveOrderPlanArtifactSchemaVersion {
@@ -118,6 +125,77 @@ func (artifact LiveOrderPlanArtifact) IdentityExpectation() LiveLoopOrderIdentit
 	}
 }
 
+func ValidateLiveOrderPlanArtifactSnapshot(
+	artifact LiveOrderPlanArtifact,
+	snapshot LiveOrderPlanArtifactSnapshot,
+) error {
+	if err := ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return err
+	}
+	if err := ValidateOrderSubmission(snapshot.Submission); err != nil {
+		return err
+	}
+	var problems []string
+	if strings.TrimSpace(snapshot.RunID) == "" {
+		problems = append(problems, "run_id is required")
+	} else if snapshot.RunID != strings.TrimSpace(snapshot.RunID) {
+		problems = append(problems, "run_id must be trimmed")
+	} else if artifact.RunID != snapshot.RunID {
+		problems = append(problems, fmt.Sprintf("run_id %q does not match current plan run_id %q", artifact.RunID, snapshot.RunID))
+	}
+	submission := snapshot.Submission
+	compareText := map[string][2]string{
+		"decision_id":     {artifact.DecisionID, submission.DecisionID},
+		"submission_id":   {artifact.SubmissionID, submission.SubmissionID},
+		"client_order_id": {artifact.ClientOrderID, submission.ClientOrderID},
+		"exchange":        {artifact.Exchange, submission.Exchange},
+		"category":        {artifact.Category, submission.Category},
+		"symbol":          {artifact.Symbol, submission.Symbol},
+	}
+	for field, values := range compareText {
+		if values[0] != values[1] {
+			problems = append(problems, fmt.Sprintf("%s %q does not match current plan %q", field, values[0], values[1]))
+		}
+	}
+	if artifact.Side != submission.Side {
+		problems = append(problems, fmt.Sprintf("side %q does not match current plan %q", artifact.Side, submission.Side))
+	}
+	if artifact.OrderType != submission.Type {
+		problems = append(problems, fmt.Sprintf("order_type %q does not match current plan %q", artifact.OrderType, submission.Type))
+	}
+	if artifact.TimeInForce != submission.TimeInForce {
+		problems = append(problems, fmt.Sprintf("time_in_force %q does not match current plan %q", artifact.TimeInForce, submission.TimeInForce))
+	}
+	problems = append(problems,
+		liveOrderPlanArtifactDecimalMismatch("limit_price", artifact.LimitPrice, submission.LimitPrice),
+		liveOrderPlanArtifactDecimalMismatch("quantity", artifact.Quantity, submission.Quantity),
+		liveOrderPlanArtifactDecimalMismatch("entry_price", artifact.EntryPrice, submission.ReferencePrice),
+		liveOrderPlanArtifactDecimalMismatch("notional", artifact.Notional, submission.Notional),
+		liveOrderPlanArtifactDecimalMismatch("max_loss", artifact.MaxLoss, submission.MaxLoss),
+		liveOrderPlanArtifactDecimalMismatch("stop_loss", artifact.StopLoss, submission.StopLoss),
+		liveOrderPlanArtifactDecimalMismatch("take_profit", artifact.TakeProfit, submission.TakeProfit),
+		liveOrderPlanArtifactDecimalMismatch("leverage", artifact.Leverage, submission.Leverage),
+	)
+	if artifact.Confidence != submission.Confidence {
+		problems = append(problems, fmt.Sprintf("confidence %d does not match current plan %d", artifact.Confidence, submission.Confidence))
+	}
+	if snapshot.DecisionCreatedAt.IsZero() {
+		problems = append(problems, "current plan decision_created_at is required")
+	} else if !artifact.DecisionCreatedAt.Equal(snapshot.DecisionCreatedAt.UTC()) {
+		problems = append(problems, fmt.Sprintf("decision_created_at %s does not match current plan %s", artifact.DecisionCreatedAt.Format(time.RFC3339Nano), snapshot.DecisionCreatedAt.UTC().Format(time.RFC3339Nano)))
+	}
+	if snapshot.RecordedAt.IsZero() {
+		problems = append(problems, "current plan recorded_at is required")
+	} else if !artifact.RecordedAt.Equal(snapshot.RecordedAt.UTC()) {
+		problems = append(problems, fmt.Sprintf("recorded_at %s does not match current plan %s", artifact.RecordedAt.Format(time.RFC3339Nano), snapshot.RecordedAt.UTC().Format(time.RFC3339Nano)))
+	}
+	problems = compactLiveOrderPlanArtifactProblems(problems)
+	if len(problems) > 0 {
+		return errors.New("live order plan artifact snapshot validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 func liveOrderPlanArtifactRequiredTrimmedProblems(values map[string]string) []string {
 	var problems []string
 	for field, value := range values {
@@ -187,4 +265,25 @@ func decimalFromLiveOrderPlanArtifact(field string, value string) (decimal.Decim
 		return decimal.Zero, fmt.Errorf("%s must be a decimal string: %w", field, err)
 	}
 	return parsed, nil
+}
+
+func liveOrderPlanArtifactDecimalMismatch(field string, artifactValue string, current decimal.Decimal) string {
+	parsed, err := decimalFromLiveOrderPlanArtifact(field, artifactValue)
+	if err != nil {
+		return err.Error()
+	}
+	if !parsed.Equal(current) {
+		return fmt.Sprintf("%s %q does not match current plan %q", field, artifactValue, current.String())
+	}
+	return ""
+}
+
+func compactLiveOrderPlanArtifactProblems(problems []string) []string {
+	compact := problems[:0]
+	for _, problem := range problems {
+		if strings.TrimSpace(problem) != "" {
+			compact = append(compact, problem)
+		}
+	}
+	return compact
 }

@@ -195,6 +195,21 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	defer db.Close()
 
 	riskDecisionRepo := postgres.NewRiskDecisionRepository(db)
+	if hasPlanArtifact && !*selectPending {
+		if err := validateLiveLoopPlanArtifactAgainstCurrentDecision(
+			loopCtx,
+			riskDecisionRepo,
+			planArtifact,
+			selectedDecisionID,
+			identity,
+			cfg,
+			orderType,
+			timeInForce,
+			limitPrice,
+		); err != nil {
+			return err
+		}
+	}
 	if *selectPending {
 		unlockPendingSelection, err := acquireLivePendingDecisionSelectionLock(loopCtx, db)
 		if err != nil {
@@ -231,6 +246,19 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		}
 		if hasPlanArtifact {
 			if err := validateLiveLoopPlanArtifactAgainstExecution(planArtifact, selectedDecisionID, identity, cfg, orderType, timeInForce, limitPrice); err != nil {
+				return err
+			}
+			if err := validateLiveLoopPlanArtifactAgainstCurrentDecision(
+				loopCtx,
+				riskDecisionRepo,
+				planArtifact,
+				selectedDecisionID,
+				identity,
+				cfg,
+				orderType,
+				timeInForce,
+				limitPrice,
+			); err != nil {
 				return err
 			}
 		}
@@ -568,6 +596,50 @@ func validateLiveLoopPlanArtifactAgainstExecution(
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("live order plan artifact execution validation failed: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func validateLiveLoopPlanArtifactAgainstCurrentDecision(
+	ctx context.Context,
+	riskDecisions applive.RiskDecisionReader,
+	artifact domainlive.LiveOrderPlanArtifact,
+	selectedDecisionID string,
+	identity liveLoopIdentity,
+	cfg *config.Config,
+	orderType domainlive.OrderType,
+	timeInForce domainlive.TimeInForce,
+	limitPrice decimal.Decimal,
+) error {
+	if err := validateLiveLoopPlanArtifactAgainstExecution(artifact, selectedDecisionID, identity, cfg, orderType, timeInForce, limitPrice); err != nil {
+		return err
+	}
+	if riskDecisions == nil {
+		return fmt.Errorf("live order plan artifact current validation requires risk decision reader")
+	}
+	if cfg == nil {
+		return fmt.Errorf("live order plan artifact current validation requires config")
+	}
+	currentPlan, err := applive.NewService(applive.WithRiskDecisionReader(riskDecisions)).BuildLiveOrderPlan(ctx, applive.BuildLiveOrderPlanRequest{
+		DecisionID:    strings.TrimSpace(selectedDecisionID),
+		SubmissionID:  identity.SubmissionID,
+		ClientOrderID: identity.ClientOrderID,
+		Exchange:      strings.ToLower(strings.TrimSpace(cfg.Exchange.Primary)),
+		Category:      strings.ToLower(strings.TrimSpace(cfg.Exchange.Category)),
+		Type:          orderType,
+		TimeInForce:   timeInForce,
+		LimitPrice:    limitPrice,
+	})
+	if err != nil {
+		return fmt.Errorf("build current live order plan for artifact validation: %w", err)
+	}
+	if err := domainlive.ValidateLiveOrderPlanArtifactSnapshot(artifact, domainlive.LiveOrderPlanArtifactSnapshot{
+		RunID:             identity.RunID,
+		Submission:        currentPlan.Submission,
+		DecisionCreatedAt: currentPlan.Decision.Decision.CreatedAt,
+		RecordedAt:        currentPlan.Decision.RecordedAt,
+	}); err != nil {
+		return err
 	}
 	return nil
 }

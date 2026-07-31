@@ -91,6 +91,8 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
+	mock.ExpectQuery("SELECT decision_id, intent_id, mode").
+		WillReturnRows(liveLoopRiskDecisionRows(decisionTime))
 	mock.ExpectExec("INSERT INTO live_loop_runs").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery("SELECT active, reason, source, created_at").
@@ -122,7 +124,7 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	planFile := writeLiveLoopPlanArtifact(t, liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001"))
+	planFile := writeLiveLoopPlanArtifact(t, liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime))
 	executor := &fakeLiveLoopExecutor{receivedAt: now}
 	accountReader := &fakeLiveLoopAccountReader{
 		snapshot: validLiveLoopAccountSnapshot(t),
@@ -239,7 +241,8 @@ func TestRunLiveLoopExpectedIdentityMismatchStopsBeforeSideEffects(t *testing.T)
 
 func TestRunLiveLoopPlanFileDecisionMismatchStopsBeforeSideEffects(t *testing.T) {
 	var opened bool
-	planFile := writeLiveLoopPlanArtifact(t, liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001"))
+	decisionTime := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	planFile := writeLiveLoopPlanArtifact(t, liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime))
 
 	err := runLiveLoop(context.Background(), []string{
 		"-plan-file", planFile,
@@ -257,6 +260,56 @@ func TestRunLiveLoopPlanFileDecisionMismatchStopsBeforeSideEffects(t *testing.T)
 	}
 	if opened {
 		t.Fatal("database must not be opened when plan-file decision mismatches explicit decision")
+	}
+}
+
+func TestRunLiveLoopPlanFileStaleRiskSnapshotStopsBeforePreflightSideEffects(t *testing.T) {
+	decisionTime := time.Now().UTC().Add(-2 * time.Second)
+	artifact := liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime)
+	artifact.Quantity = "0.010"
+	artifact.Notional = "1000"
+	planFile := writeLiveLoopPlanArtifact(t, artifact)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	mock.ExpectQuery("SELECT decision_id, intent_id, mode").
+		WillReturnRows(liveLoopRiskDecisionRows(decisionTime))
+
+	var executorCreated bool
+	var accountReaderCreated bool
+	err = runLiveLoop(context.Background(), []string{
+		"-config", writeLiveLoopConfig(t),
+		"-plan-file", planFile,
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+		"-max-iterations", "1",
+		"-max-runtime", "15s",
+		"-iteration-timeout", "10s",
+		"-execute",
+	}, liveLoopDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
+			executorCreated = true
+			return &fakeLiveLoopExecutor{}, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			accountReaderCreated = true
+			return &fakeLiveLoopAccountReader{}, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "artifact snapshot") || !strings.Contains(err.Error(), "quantity") {
+		t.Fatalf("expected stale plan artifact snapshot error, got %v", err)
+	}
+	if executorCreated || accountReaderCreated {
+		t.Fatalf("stale plan artifact must stop before exchange readers: executor=%t account_reader=%t", executorCreated, accountReaderCreated)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
 	}
 }
 
@@ -1198,14 +1251,15 @@ func writeLiveLoopPlanArtifact(t *testing.T, artifact domainlive.LiveOrderPlanAr
 	return path
 }
 
-func liveLoopPlanArtifact(t *testing.T, decisionID string, runID string) domainlive.LiveOrderPlanArtifact {
+func liveLoopPlanArtifact(t *testing.T, decisionID string, runID string, decisionObservedAt time.Time) domainlive.LiveOrderPlanArtifact {
 	t.Helper()
 
 	identity, err := domainlive.NewDeterministicLiveLoopOrderIdentity(decisionID, runID)
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	createdAt := decisionObservedAt.UTC().Add(-2 * time.Second)
+	recordedAt := decisionObservedAt.UTC().Add(-time.Second)
 	return domainlive.LiveOrderPlanArtifact{
 		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
 		Source:              "decision-id",
@@ -1228,8 +1282,8 @@ func liveLoopPlanArtifact(t *testing.T, decisionID string, runID string) domainl
 		TakeProfit:          "102000",
 		Leverage:            "1",
 		Confidence:          82,
-		DecisionCreatedAt:   now.Add(-2 * time.Minute),
-		RecordedAt:          now.Add(-time.Minute),
-		SubmissionCreatedAt: now,
+		DecisionCreatedAt:   createdAt,
+		RecordedAt:          recordedAt,
+		SubmissionCreatedAt: recordedAt.Add(time.Second),
 	}
 }

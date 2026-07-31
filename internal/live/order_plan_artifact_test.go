@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 )
 
@@ -62,6 +64,55 @@ func TestLiveOrderPlanArtifactIdentityExpectation(t *testing.T) {
 	}
 }
 
+func TestValidateLiveOrderPlanArtifactSnapshotTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	artifact := validLiveOrderPlanArtifact(now)
+	snapshot := validLiveOrderPlanArtifactSnapshot(t, artifact)
+
+	tests := []struct {
+		name       string
+		mutate     func(*domainlive.LiveOrderPlanArtifact, *domainlive.LiveOrderPlanArtifactSnapshot)
+		wantErrSub string
+	}{
+		{name: "matches current rebuilt plan"},
+		{name: "decision mismatch", mutate: func(_ *domainlive.LiveOrderPlanArtifact, s *domainlive.LiveOrderPlanArtifactSnapshot) {
+			s.Submission.DecisionID = "risk_decision_live_artifact_0002"
+		}, wantErrSub: "decision_id"},
+		{name: "quantity mismatch", mutate: func(a *domainlive.LiveOrderPlanArtifact, _ *domainlive.LiveOrderPlanArtifactSnapshot) {
+			a.Quantity = "0.010"
+		}, wantErrSub: "quantity"},
+		{name: "max loss mismatch", mutate: func(a *domainlive.LiveOrderPlanArtifact, _ *domainlive.LiveOrderPlanArtifactSnapshot) {
+			a.MaxLoss = "10"
+		}, wantErrSub: "max_loss"},
+		{name: "decision created at mismatch", mutate: func(_ *domainlive.LiveOrderPlanArtifact, s *domainlive.LiveOrderPlanArtifactSnapshot) {
+			s.DecisionCreatedAt = s.DecisionCreatedAt.Add(time.Second)
+		}, wantErrSub: "decision_created_at"},
+		{name: "recorded at mismatch", mutate: func(_ *domainlive.LiveOrderPlanArtifact, s *domainlive.LiveOrderPlanArtifactSnapshot) {
+			s.RecordedAt = s.RecordedAt.Add(time.Second)
+		}, wantErrSub: "recorded_at"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := artifact
+			current := snapshot
+			if tt.mutate != nil {
+				tt.mutate(&candidate, &current)
+			}
+			err := domainlive.ValidateLiveOrderPlanArtifactSnapshot(candidate, current)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate artifact snapshot: %v", err)
+			}
+		})
+	}
+}
+
 func validLiveOrderPlanArtifact(now time.Time) domainlive.LiveOrderPlanArtifact {
 	return domainlive.LiveOrderPlanArtifact{
 		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
@@ -88,5 +139,46 @@ func validLiveOrderPlanArtifact(now time.Time) domainlive.LiveOrderPlanArtifact 
 		DecisionCreatedAt:   now.Add(-2 * time.Minute),
 		RecordedAt:          now.Add(-time.Minute),
 		SubmissionCreatedAt: now,
+	}
+}
+
+func validLiveOrderPlanArtifactSnapshot(
+	t *testing.T,
+	artifact domainlive.LiveOrderPlanArtifact,
+) domainlive.LiveOrderPlanArtifactSnapshot {
+	t.Helper()
+
+	submission, err := domainlive.NewOrderSubmission(domainlive.OrderSubmissionInput{
+		SubmissionID:     artifact.SubmissionID,
+		ClientOrderID:    artifact.ClientOrderID,
+		DecisionID:       artifact.DecisionID,
+		DecisionApproved: true,
+		IntentID:         "risk_intent_live_artifact_0001",
+		RiskMode:         domainlive.RiskModeLive,
+		Exchange:         artifact.Exchange,
+		Category:         artifact.Category,
+		Symbol:           artifact.Symbol,
+		Side:             artifact.Side,
+		Type:             artifact.OrderType,
+		TimeInForce:      artifact.TimeInForce,
+		Quantity:         decimal.RequireFromString(artifact.Quantity),
+		ReferencePrice:   decimal.RequireFromString(artifact.EntryPrice),
+		LimitPrice:       decimal.RequireFromString(artifact.LimitPrice),
+		StopLoss:         decimal.RequireFromString(artifact.StopLoss),
+		TakeProfit:       decimal.RequireFromString(artifact.TakeProfit),
+		Leverage:         decimal.RequireFromString(artifact.Leverage),
+		MaxLoss:          decimal.RequireFromString(artifact.MaxLoss),
+		Confidence:       artifact.Confidence,
+		Reason:           "risk_checks_passed",
+		CreatedAt:        artifact.SubmissionCreatedAt,
+	})
+	if err != nil {
+		t.Fatalf("new order submission: %v", err)
+	}
+	return domainlive.LiveOrderPlanArtifactSnapshot{
+		RunID:             artifact.RunID,
+		Submission:        submission,
+		DecisionCreatedAt: artifact.DecisionCreatedAt,
+		RecordedAt:        artifact.RecordedAt,
 	}
 }

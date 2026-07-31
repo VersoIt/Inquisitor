@@ -529,6 +529,7 @@ func (env liveLoopSmokeEnvironment) LookupEnv(name string) (string, bool) {
 type fakeLiveLoopSmokeExchange struct {
 	exchangeOrderID string
 	submission      domainlive.OrderSubmission
+	observedBase    time.Time
 	submitCalls     int
 	statusCalls     int
 	positionCalls   int
@@ -537,7 +538,10 @@ type fakeLiveLoopSmokeExchange struct {
 }
 
 func newFakeLiveLoopSmokeExchange(exchangeOrderID string) *fakeLiveLoopSmokeExchange {
-	return &fakeLiveLoopSmokeExchange{exchangeOrderID: strings.TrimSpace(exchangeOrderID)}
+	return &fakeLiveLoopSmokeExchange{
+		exchangeOrderID: strings.TrimSpace(exchangeOrderID),
+		observedBase:    time.Now().UTC().Add(-2 * time.Second),
+	}
 }
 
 func (e *fakeLiveLoopSmokeExchange) SubmitOrder(_ context.Context, submission domainlive.OrderSubmission) (domainlive.OrderAcknowledgement, error) {
@@ -624,7 +628,7 @@ func (e *fakeLiveLoopSmokeExchange) GetAccountSnapshot(_ context.Context, query 
 
 func (e *fakeLiveLoopSmokeExchange) nextObservedAt() time.Time {
 	e.observedSeq++
-	return time.Now().UTC().Add(-time.Duration(e.observedSeq) * time.Millisecond)
+	return e.observedBase.Add(time.Duration(e.observedSeq) * time.Millisecond)
 }
 
 func newLiveLoopSmokeFlatPositionSnapshot(query domainlive.PositionSnapshotQuery, observedAt time.Time) (domainlive.PositionSnapshot, error) {

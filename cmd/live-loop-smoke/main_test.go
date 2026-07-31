@@ -211,6 +211,7 @@ func TestLiveLoopSmokeDecisionIsValidAndMatchesOrderRiskMath(t *testing.T) {
 func TestFakeLiveLoopSmokeExchangeLifecycle(t *testing.T) {
 	exchange := newFakeLiveLoopSmokeExchange("smoke_order_0001")
 	query := domainlive.PositionSnapshotQuery{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"}
+	preflightReferenceAt := time.Now().UTC()
 
 	flat, err := exchange.GetPositionSnapshot(context.Background(), query)
 	if err != nil {
@@ -218,6 +219,9 @@ func TestFakeLiveLoopSmokeExchangeLifecycle(t *testing.T) {
 	}
 	if flat.Open {
 		t.Fatalf("pre-submit position must be flat: %#v", flat)
+	}
+	if flat.ObservedAt.After(preflightReferenceAt) {
+		t.Fatalf("flat position observed_at must be safe for preflight reference time: observed=%s reference=%s", flat.ObservedAt, preflightReferenceAt)
 	}
 
 	submission := validLiveLoopSmokeSubmission(t)
@@ -248,6 +252,9 @@ func TestFakeLiveLoopSmokeExchangeLifecycle(t *testing.T) {
 	}
 	if !open.Open || open.Side != submission.Side || !open.Size.Equal(submission.Quantity) {
 		t.Fatalf("post-submit position mismatch: %#v", open)
+	}
+	if !status.ObservedAt.After(flat.ObservedAt) || !open.ObservedAt.After(status.ObservedAt) {
+		t.Fatalf("smoke observed_at timestamps must advance: flat=%s status=%s open=%s", flat.ObservedAt, status.ObservedAt, open.ObservedAt)
 	}
 	if exchange.submitCalls != 1 || exchange.statusCalls != 1 || exchange.positionCalls != 2 {
 		t.Fatalf("exchange call counts mismatch: submit=%d status=%d position=%d", exchange.submitCalls, exchange.statusCalls, exchange.positionCalls)
