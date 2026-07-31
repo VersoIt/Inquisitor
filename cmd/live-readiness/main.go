@@ -82,6 +82,12 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	if err != nil {
 		return err
 	}
+	if hasPlanArtifact {
+		pendingQuery, err = liveReadinessPendingQueryWithPlanArtifact(pendingQuery, planArtifact)
+		if err != nil {
+			return err
+		}
+	}
 
 	cfg, err := deps.loadConfig(*configPath)
 	if err != nil {
@@ -206,6 +212,30 @@ func liveReadinessPendingQueryFromFlags(symbol string, limit int) (domainlive.Pe
 	}
 	if err := domainlive.ValidatePendingLiveDecisionQuery(query); err != nil {
 		return domainlive.PendingLiveDecisionQuery{}, err
+	}
+	return query, nil
+}
+
+func liveReadinessPendingQueryWithPlanArtifact(
+	query domainlive.PendingLiveDecisionQuery,
+	artifact domainlive.LiveOrderPlanArtifact,
+) (domainlive.PendingLiveDecisionQuery, error) {
+	if err := domainlive.ValidatePendingLiveDecisionQuery(query); err != nil {
+		return domainlive.PendingLiveDecisionQuery{}, err
+	}
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return domainlive.PendingLiveDecisionQuery{}, err
+	}
+	if artifact.Source != domainlive.LiveOrderPlanArtifactSourceSelectPending || artifact.PendingSymbol == "" {
+		return query, nil
+	}
+	artifactSymbol := strings.ToUpper(strings.TrimSpace(artifact.PendingSymbol))
+	if query.Symbol == "" {
+		query.Symbol = artifactSymbol
+		return query, nil
+	}
+	if query.Symbol != artifactSymbol {
+		return domainlive.PendingLiveDecisionQuery{}, fmt.Errorf("plan-file pending_symbol %q does not match -symbol %q", artifactSymbol, query.Symbol)
 	}
 	return query, nil
 }

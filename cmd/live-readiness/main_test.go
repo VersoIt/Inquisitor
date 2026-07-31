@@ -56,6 +56,80 @@ func TestLiveReadinessPendingQueryFromFlagsTableDriven(t *testing.T) {
 	}
 }
 
+func TestLiveReadinessPendingQueryWithPlanArtifactTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	artifact := liveReadinessPlanArtifactFromRecord(
+		t,
+		liveReadinessPendingDecision("risk_decision_live_ready_cli_0001", "BTCUSDT", now).Decision,
+		domainlive.LiveOrderPlanArtifactSourceSelectPending,
+	)
+	artifact.PendingSymbol = "BTCUSDT"
+	explicitArtifact := liveReadinessPlanArtifactFromRecord(
+		t,
+		liveReadinessPendingDecision("risk_decision_live_ready_cli_0001", "BTCUSDT", now).Decision,
+		domainlive.LiveOrderPlanArtifactSourceDecisionID,
+	)
+	withoutPendingSymbolArtifact := artifact
+	withoutPendingSymbolArtifact.PendingSymbol = ""
+
+	tests := []struct {
+		name       string
+		query      domainlive.PendingLiveDecisionQuery
+		artifact   domainlive.LiveOrderPlanArtifact
+		want       domainlive.PendingLiveDecisionQuery
+		wantErrSub string
+	}{
+		{
+			name:     "explicit decision artifact leaves query unchanged",
+			query:    domainlive.PendingLiveDecisionQuery{Limit: 1},
+			artifact: explicitArtifact,
+			want:     domainlive.PendingLiveDecisionQuery{Limit: 1},
+		},
+		{
+			name:     "select pending artifact without symbol leaves query unchanged",
+			query:    domainlive.PendingLiveDecisionQuery{Limit: 3},
+			artifact: withoutPendingSymbolArtifact,
+			want:     domainlive.PendingLiveDecisionQuery{Limit: 3},
+		},
+		{
+			name:     "select pending artifact fills omitted symbol",
+			query:    domainlive.PendingLiveDecisionQuery{Limit: 1},
+			artifact: artifact,
+			want:     domainlive.PendingLiveDecisionQuery{Symbol: "BTCUSDT", Limit: 1},
+		},
+		{
+			name:     "matching symbol is accepted",
+			query:    domainlive.PendingLiveDecisionQuery{Symbol: "BTCUSDT", Limit: 5},
+			artifact: artifact,
+			want:     domainlive.PendingLiveDecisionQuery{Symbol: "BTCUSDT", Limit: 5},
+		},
+		{
+			name:       "mismatched symbol is rejected",
+			query:      domainlive.PendingLiveDecisionQuery{Symbol: "ETHUSDT", Limit: 1},
+			artifact:   artifact,
+			wantErrSub: "pending_symbol",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := liveReadinessPendingQueryWithPlanArtifact(tt.query, tt.artifact)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("query with artifact: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("query mismatch: got %#v want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLiveReadinessAuditLimitFromFlagsTableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -288,6 +362,105 @@ func TestRunLiveReadinessValidatesPlanArtifact(t *testing.T) {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
 		}
+	}
+}
+
+func TestRunLiveReadinessUsesSelectPendingPlanSymbolWhenFlagOmitted(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	pending := liveReadinessPendingDecision("risk_decision_live_ready_cli_0001", "BTCUSDT", now)
+	artifact := liveReadinessPlanArtifactFromRecord(t, pending.Decision, domainlive.LiveOrderPlanArtifactSourceSelectPending)
+	artifact.PendingSymbol = "BTCUSDT"
+	artifactPath := writeLiveReadinessPlanArtifact(t, artifact)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	pendingReader := &fakeLiveReadinessPendingReader{candidates: []domainlive.PendingLiveDecision{pending}}
+	riskReader := &fakeLiveReadinessRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{pending.Decision}}
+	var output bytes.Buffer
+	err = runLiveReadiness(context.Background(), []string{
+		"-plan-file", artifactPath,
+		"-subaccount-confirmed",
+		"-max-initial-live-capital-usdt", "100",
+	}, liveReadinessDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			return validLiveReadinessConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newPendingReader: func(*sql.DB) domainlive.PendingLiveDecisionReader {
+			return pendingReader
+		},
+		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
+			return &fakeLiveReadinessAuditReader{runs: []domainlive.LiveLoopRunAudit{
+				liveReadinessAuditRun(now, domainlive.LiveLoopRunStatusCompleted),
+			}}
+		},
+		newKillSwitch: func(*sql.DB) domainrisk.KillSwitchRepository {
+			return &fakeLiveReadinessKillSwitchRepository{}
+		},
+		newRiskReader: func(*sql.DB) applive.RiskDecisionReader {
+			return riskReader
+		},
+		lookupEnv: mapLookupEnv(map[string]string{
+			"TRADING_LIVE_CONFIRM": "true",
+			"BYBIT_API_KEY":        "key",
+			"BYBIT_API_SECRET":     "secret",
+		}),
+		output: &output,
+	})
+	if err != nil {
+		t.Fatalf("run live readiness: %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+	if pendingReader.query.Symbol != "BTCUSDT" || pendingReader.query.Limit != 1 {
+		t.Fatalf("pending query must inherit artifact pending symbol: %#v", pendingReader.query)
+	}
+	if riskReader.calls != 1 || riskReader.query.DecisionID != pending.Decision.DecisionID {
+		t.Fatalf("risk reader query mismatch: calls=%d query=%#v", riskReader.calls, riskReader.query)
+	}
+	if !strings.Contains(output.String(), `"msg":"live readiness passed"`) {
+		t.Fatalf("expected readiness pass logs, got\n%s", output.String())
+	}
+}
+
+func TestRunLiveReadinessRejectsPlanPendingSymbolMismatchBeforeSideEffects(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	artifact := liveReadinessPlanArtifactFromRecord(
+		t,
+		liveReadinessPendingDecision("risk_decision_live_ready_cli_0001", "BTCUSDT", now).Decision,
+		domainlive.LiveOrderPlanArtifactSourceSelectPending,
+	)
+	artifact.PendingSymbol = "BTCUSDT"
+	artifactPath := writeLiveReadinessPlanArtifact(t, artifact)
+	var loaded bool
+	var opened bool
+
+	err := runLiveReadiness(context.Background(), []string{
+		"-symbol", "ETHUSDT",
+		"-plan-file", artifactPath,
+		"-subaccount-confirmed",
+	}, liveReadinessDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			loaded = true
+			return validLiveReadinessConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			opened = true
+			return nil, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "pending_symbol") || !strings.Contains(err.Error(), "ETHUSDT") {
+		t.Fatalf("expected plan pending symbol mismatch error, got %v", err)
+	}
+	if loaded || opened {
+		t.Fatalf("plan pending symbol mismatch must stop before side effects: loaded=%t opened=%t", loaded, opened)
 	}
 }
 
