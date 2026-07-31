@@ -263,6 +263,41 @@ func TestRunLiveLoopPlanFileDecisionMismatchStopsBeforeSideEffects(t *testing.T)
 	}
 }
 
+func TestRunLiveLoopPlanFileStaleArtifactStopsBeforeSideEffects(t *testing.T) {
+	var opened bool
+	var executorCreated bool
+	var accountReaderCreated bool
+	decisionTime := time.Now().UTC().Add(-2 * time.Second)
+	artifact := liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime)
+	artifact.SubmissionCreatedAt = time.Now().UTC().Add(-time.Hour)
+	planFile := writeLiveLoopPlanArtifact(t, artifact)
+
+	err := runLiveLoop(context.Background(), []string{
+		"-plan-file", planFile,
+		"-execute",
+	}, liveLoopDependencies{
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			opened = true
+			return nil, nil
+		},
+		newExecutor: func(_ *config.Config, _ string, _ string) (domainlive.OrderExecutor, error) {
+			executorCreated = true
+			return &fakeLiveLoopExecutor{}, nil
+		},
+		newAccountReader: func(*config.Config) (domainlive.AccountSnapshotReader, error) {
+			accountReaderCreated = true
+			return &fakeLiveLoopAccountReader{}, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "freshness") || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("expected stale plan artifact freshness error, got %v", err)
+	}
+	if opened || executorCreated || accountReaderCreated {
+		t.Fatalf("stale plan artifact must stop before side effects: db=%t executor=%t account_reader=%t", opened, executorCreated, accountReaderCreated)
+	}
+}
+
 func TestRunLiveLoopPlanFileStaleRiskSnapshotStopsBeforePreflightSideEffects(t *testing.T) {
 	decisionTime := time.Now().UTC().Add(-2 * time.Second)
 	artifact := liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime)

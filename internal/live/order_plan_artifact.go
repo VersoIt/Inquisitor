@@ -11,6 +11,8 @@ import (
 
 const LiveOrderPlanArtifactSchemaVersion = "inquisitor.live_order_plan.v1"
 
+const DefaultLiveOrderPlanArtifactMaxAge = 10 * time.Minute
+
 type LiveOrderPlanArtifact struct {
 	SchemaVersion       string      `json:"schema_version"`
 	Source              string      `json:"source"`
@@ -192,6 +194,36 @@ func ValidateLiveOrderPlanArtifactSnapshot(
 	problems = compactLiveOrderPlanArtifactProblems(problems)
 	if len(problems) > 0 {
 		return errors.New("live order plan artifact snapshot validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func ValidateLiveOrderPlanArtifactFreshness(
+	artifact LiveOrderPlanArtifact,
+	now time.Time,
+	maxAge time.Duration,
+) error {
+	if err := ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return err
+	}
+	var problems []string
+	if now.IsZero() {
+		problems = append(problems, "now is required")
+	}
+	if maxAge <= 0 {
+		problems = append(problems, "max_age must be positive")
+	}
+	if len(problems) == 0 {
+		age := now.UTC().Sub(artifact.SubmissionCreatedAt.UTC())
+		if age < 0 {
+			problems = append(problems, "submission_created_at must not be in the future")
+		}
+		if age > maxAge {
+			problems = append(problems, fmt.Sprintf("artifact is stale: age=%s max=%s", age, maxAge))
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New("live order plan artifact freshness validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
 }

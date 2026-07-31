@@ -54,6 +54,7 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	auditLimit := flags.Int("audit-limit", 10, "maximum recent live-loop audit runs to inspect, from 1 to 100")
 	requirePending := flags.Bool("require-pending", true, "fail readiness when no pending LIVE decision is available")
 	planFile := flags.String("plan-file", "", "optional JSON artifact written by live-order-plan; validates it against current readiness and risk snapshot")
+	maxPlanAge := flags.Duration("max-plan-age", domainlive.DefaultLiveOrderPlanArtifactMaxAge, "maximum accepted age for -plan-file based on submission_created_at")
 	maxInitialCapitalValue := flags.String("max-initial-live-capital-usdt", defaultMaxInitialLiveCapitalUSDT, "operator safety cap for configured live initial capital")
 	subaccountConfirmed := flags.Bool("subaccount-confirmed", false, "set only after verifying API keys belong to the dedicated live subaccount")
 	timeout := flags.Duration("timeout", 10*time.Second, "maximum live readiness command duration")
@@ -73,6 +74,9 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	maxInitialCapital, err := parsePositiveDecimalFlag("max-initial-live-capital-usdt", *maxInitialCapitalValue)
 	if err != nil {
 		return err
+	}
+	if *maxPlanAge <= 0 {
+		return fmt.Errorf("max-plan-age must be positive")
 	}
 	planArtifact, hasPlanArtifact, err := loadLiveReadinessPlanArtifact(*planFile)
 	if err != nil {
@@ -118,6 +122,7 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	}
 	req.HasPlanArtifact = hasPlanArtifact
 	req.PlanArtifact = planArtifact
+	req.MaxPlanArtifactAge = *maxPlanAge
 	report, err := service.BuildLiveReadinessReport(readinessCtx, req)
 	logLiveReadinessReport(log, report)
 	if err != nil {

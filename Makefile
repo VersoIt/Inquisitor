@@ -64,6 +64,7 @@ LIVE_LIMIT_PRICE ?=
 LIVE_EXPECTED_SUBMISSION_ID ?=
 LIVE_EXPECTED_CLIENT_ORDER_ID ?=
 LIVE_PLAN_FILE ?=
+LIVE_PLAN_MAX_AGE ?= 10m
 LIVE_LOOP_RUN_ID ?=
 LIVE_LOOP_MAX_ITERATIONS ?= 1
 LIVE_LOOP_MAX_RUNTIME ?= 15s
@@ -194,7 +195,7 @@ live-health:
 	$(GO) run ./cmd/live-health -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -run-id $(LIVE_HEALTH_RUN_ID) -max-iterations $(LIVE_HEALTH_MAX_ITERATIONS) -max-runtime $(LIVE_HEALTH_MAX_RUNTIME) -iteration-timeout $(LIVE_HEALTH_ITERATION_TIMEOUT) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
 
 live-loop:
-	$(GO) run ./cmd/live-loop -config $(CONFIG) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE),) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -max-iterations $(LIVE_LOOP_MAX_ITERATIONS) -max-runtime $(LIVE_LOOP_MAX_RUNTIME) -iteration-timeout $(LIVE_LOOP_ITERATION_TIMEOUT) $(if $(LIVE_PLAN_FILE),,-order-type $(LIVE_ORDER_TYPE)) $(if $(LIVE_LOOP_RUN_ID),-run-id $(LIVE_LOOP_RUN_ID),) $(if $(LIVE_EXPECTED_SUBMISSION_ID),-expected-submission-id $(LIVE_EXPECTED_SUBMISSION_ID),) $(if $(LIVE_EXPECTED_CLIENT_ORDER_ID),-expected-client-order-id $(LIVE_EXPECTED_CLIENT_ORDER_ID),) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)
+	$(GO) run ./cmd/live-loop -config $(CONFIG) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE) -max-plan-age $(LIVE_PLAN_MAX_AGE),) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -max-iterations $(LIVE_LOOP_MAX_ITERATIONS) -max-runtime $(LIVE_LOOP_MAX_RUNTIME) -iteration-timeout $(LIVE_LOOP_ITERATION_TIMEOUT) $(if $(LIVE_PLAN_FILE),,-order-type $(LIVE_ORDER_TYPE)) $(if $(LIVE_LOOP_RUN_ID),-run-id $(LIVE_LOOP_RUN_ID),) $(if $(LIVE_EXPECTED_SUBMISSION_ID),-expected-submission-id $(LIVE_EXPECTED_SUBMISSION_ID),) $(if $(LIVE_EXPECTED_CLIENT_ORDER_ID),-expected-client-order-id $(LIVE_EXPECTED_CLIENT_ORDER_ID),) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)
 
 live-loop-smoke:
 	$(GO) run ./cmd/live-loop-smoke -config $(CONFIG) -migrations $(MIGRATIONS) -run-id $(LIVE_SMOKE_RUN_ID) -decision-id $(LIVE_SMOKE_DECISION_ID) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -cleanup=$(if $(LIVE_SMOKE_CLEANUP),true,false) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,) $(if $(LIVE_SMOKE_REQUIRE_LIVE_CONFIG),-require-live-config,)
@@ -206,7 +207,7 @@ live-decision-scan:
 	$(GO) run ./cmd/live-decision-scan -config $(CONFIG) -limit $(LIVE_SCAN_LIMIT) $(if $(LIVE_SCAN_SYMBOL),-symbol $(LIVE_SCAN_SYMBOL),)
 
 live-readiness:
-	$(GO) run ./cmd/live-readiness -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -pending-limit $(LIVE_READINESS_PENDING_LIMIT) -audit-limit $(LIVE_READINESS_AUDIT_LIMIT) -require-pending=$(if $(LIVE_READINESS_REQUIRE_PENDING),true,false) $(if $(LIVE_READINESS_SYMBOL),-symbol $(LIVE_READINESS_SYMBOL),) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
+	$(GO) run ./cmd/live-readiness -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -pending-limit $(LIVE_READINESS_PENDING_LIMIT) -audit-limit $(LIVE_READINESS_AUDIT_LIMIT) -require-pending=$(if $(LIVE_READINESS_REQUIRE_PENDING),true,false) $(if $(LIVE_READINESS_SYMBOL),-symbol $(LIVE_READINESS_SYMBOL),) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE) -max-plan-age $(LIVE_PLAN_MAX_AGE),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
 
 live-order-plan:
 	$(GO) run ./cmd/live-order-plan -config $(CONFIG) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_LOOP_RUN_ID),-run-id $(LIVE_LOOP_RUN_ID),) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_PLAN_FILE),-artifact-path $(LIVE_PLAN_FILE),)

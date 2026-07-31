@@ -113,6 +113,47 @@ func TestValidateLiveOrderPlanArtifactSnapshotTableDriven(t *testing.T) {
 	}
 }
 
+func TestValidateLiveOrderPlanArtifactFreshnessTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	valid := validLiveOrderPlanArtifact(now.Add(-time.Minute))
+
+	tests := []struct {
+		name       string
+		artifact   domainlive.LiveOrderPlanArtifact
+		now        time.Time
+		maxAge     time.Duration
+		wantErrSub string
+	}{
+		{name: "fresh artifact", artifact: valid, now: now, maxAge: 10 * time.Minute},
+		{name: "stale artifact", artifact: mutateLiveOrderPlanArtifact(valid, func(a *domainlive.LiveOrderPlanArtifact) {
+			a.SubmissionCreatedAt = now.Add(-11 * time.Minute)
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "stale"},
+		{name: "future artifact", artifact: mutateLiveOrderPlanArtifact(valid, func(a *domainlive.LiveOrderPlanArtifact) {
+			a.SubmissionCreatedAt = now.Add(time.Second)
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "future"},
+		{name: "zero max age", artifact: valid, now: now, wantErrSub: "max_age"},
+		{name: "missing now", artifact: valid, maxAge: 10 * time.Minute, wantErrSub: "now"},
+		{name: "invalid artifact first", artifact: mutateLiveOrderPlanArtifact(valid, func(a *domainlive.LiveOrderPlanArtifact) {
+			a.OrderSubmitted = true
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "order_submitted"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := domainlive.ValidateLiveOrderPlanArtifactFreshness(tt.artifact, tt.now, tt.maxAge)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate artifact freshness: %v", err)
+			}
+		})
+	}
+}
+
 func validLiveOrderPlanArtifact(now time.Time) domainlive.LiveOrderPlanArtifact {
 	return domainlive.LiveOrderPlanArtifact{
 		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
@@ -140,6 +181,16 @@ func validLiveOrderPlanArtifact(now time.Time) domainlive.LiveOrderPlanArtifact 
 		RecordedAt:          now.Add(-time.Minute),
 		SubmissionCreatedAt: now,
 	}
+}
+
+func mutateLiveOrderPlanArtifact(
+	artifact domainlive.LiveOrderPlanArtifact,
+	mutate func(*domainlive.LiveOrderPlanArtifact),
+) domainlive.LiveOrderPlanArtifact {
+	if mutate != nil {
+		mutate(&artifact)
+	}
+	return artifact
 }
 
 func validLiveOrderPlanArtifactSnapshot(

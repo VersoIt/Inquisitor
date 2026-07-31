@@ -88,7 +88,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Read-only pending LIVE decision scanner that lists approved LIVE risk decisions with no live order submission yet, ordered FIFO, so an operator can choose an explicit `decision_id` for `live-loop` without enabling automatic discovery or order placement.
 - Explicitly armed pending LIVE decision selector for `live-loop` that can pick the oldest approved unsubmitted LIVE decision only when `-select-pending` and `-execute=true` are both provided, holds a PostgreSQL advisory lock so only one selector runs at a time, then runs the same bounded preflight, Kill Switch, submission, reconciliation, and audit pipeline for exactly one decision.
 - Read-only live readiness CLI that checks live config/env/operator confirmation, capital cap, pending selector DB-pool safety, inactive Kill Switch, pending LIVE decision availability, optional live order plan artifact freshness, and recent live-loop audit status without contacting Bybit or placing orders.
-- Read-only live order plan CLI that previews the exact `run_id`, deterministic `submission_id`/`client_order_id`, normalized order instructions, risk snapshot, notional, and safety side-effect flags for an explicit or FIFO-selected pending LIVE decision without reserving it, writing order rows, or contacting Bybit; `live-loop -plan-file` requires those IDs and revalidates the artifact against the current PostgreSQL risk snapshot before any startup preflight or exchange-capable work.
+- Read-only live order plan CLI that previews the exact `run_id`, deterministic `submission_id`/`client_order_id`, normalized order instructions, risk snapshot, notional, and safety side-effect flags for an explicit or FIFO-selected pending LIVE decision without reserving it, writing order rows, or contacting Bybit; `live-loop -plan-file` requires those IDs, requires a fresh artifact, and revalidates the artifact against the current PostgreSQL risk snapshot before any startup preflight or exchange-capable work.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
 The next Phase 7 slices should add deployment runbooks, operational observability, and explicit live readiness checklists before any always-on worker is considered.
@@ -499,7 +499,7 @@ go run ./cmd/live-readiness -config configs/live.local.yaml -symbol BTCUSDT -sub
 
 If you want to verify infrastructure readiness before a signal exists, pass `-require-pending=false`; before the first order path, keep the default `-require-pending=true`.
 
-After writing a `live-order-plan` artifact, pass it to readiness as a final read-only handoff check:
+After writing a `live-order-plan` artifact, pass it to readiness as a final read-only handoff check. The artifact age is capped by `-max-plan-age`, which defaults to `10m`; if this fails, regenerate the plan instead of reusing the old file:
 
 ```powershell
 go run ./cmd/live-readiness -config configs/live.local.yaml -symbol BTCUSDT -plan-file artifacts/live-order-plan.json -subaccount-confirmed -max-initial-live-capital-usdt 100
@@ -574,7 +574,7 @@ Run one explicitly armed bounded live-loop iteration for a persisted approved LI
 go run ./cmd/live-loop -config configs/live.local.yaml -decision-id risk_decision_live_001 -subaccount-confirmed -max-initial-live-capital-usdt 100 -run-id live_loop_001 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
 ```
 
-For the safest handoff from preview to execution, pass the JSON artifact to the armed `live-loop`. The artifact can provide `decision_id`, `run_id`, deterministic IDs, and order instructions; `live-loop` rebuilds the current order plan from PostgreSQL and fails before startup preflight or exchange setup if the selected decision/config/instructions/risk snapshot would produce a different execution plan:
+For the safest handoff from preview to execution, pass the JSON artifact to the armed `live-loop`. The artifact can provide `decision_id`, `run_id`, deterministic IDs, and order instructions; `live-loop` rejects artifacts older than `-max-plan-age` (`10m` by default), rebuilds the current order plan from PostgreSQL, and fails before startup preflight or exchange setup if the selected decision/config/instructions/risk snapshot would produce a different execution plan:
 
 ```powershell
 go run ./cmd/live-loop -config configs/live.local.yaml -plan-file artifacts/live-order-plan.json -subaccount-confirmed -max-initial-live-capital-usdt 100 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute

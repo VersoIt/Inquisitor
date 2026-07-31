@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -34,6 +35,7 @@ type BuildLiveReadinessReportRequest struct {
 	RequirePendingDecision      bool
 	HasPlanArtifact             bool
 	PlanArtifact                domainlive.LiveOrderPlanArtifact
+	MaxPlanArtifactAge          time.Duration
 }
 
 type LiveReadinessReport struct {
@@ -97,7 +99,7 @@ func (s *Service) BuildLiveReadinessReport(
 	report.Checks = append(report.Checks, liveReadinessPendingDecisionCheck(req, pending))
 
 	if req.HasPlanArtifact {
-		check, err := s.liveReadinessPlanArtifactCheck(ctx, req.PlanArtifact, pending)
+		check, err := s.liveReadinessPlanArtifactCheck(ctx, req.PlanArtifact, req.MaxPlanArtifactAge, pending)
 		if err != nil {
 			return report, err
 		}
@@ -251,9 +253,19 @@ func liveReadinessPendingDecisionCheck(
 func (s *Service) liveReadinessPlanArtifactCheck(
 	ctx context.Context,
 	artifact domainlive.LiveOrderPlanArtifact,
+	maxAge time.Duration,
 	pending PendingLiveDecisionReport,
 ) (domainlive.ReadinessCheck, error) {
 	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return domainlive.NewReadinessCheck("live_order_plan_artifact", domainlive.ReadinessCheckStatusFail, err.Error()), nil
+	}
+	if s == nil || s.clock == nil {
+		return domainlive.ReadinessCheck{}, fmt.Errorf("live readiness plan artifact check requires clock")
+	}
+	if maxAge == 0 {
+		maxAge = domainlive.DefaultLiveOrderPlanArtifactMaxAge
+	}
+	if err := domainlive.ValidateLiveOrderPlanArtifactFreshness(artifact, s.clock.Now(), maxAge); err != nil {
 		return domainlive.NewReadinessCheck("live_order_plan_artifact", domainlive.ReadinessCheckStatusFail, err.Error()), nil
 	}
 	if artifact.Source == "select-pending" {

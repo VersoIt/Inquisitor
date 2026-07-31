@@ -10,6 +10,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	applive "github.com/VersoIt/Inquisitor/internal/app/live"
+	"github.com/VersoIt/Inquisitor/internal/clock"
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
@@ -181,6 +182,7 @@ func TestServiceBuildLiveReadinessReportPassesWithPlanArtifact(t *testing.T) {
 		}}),
 		applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
 		applive.WithRiskDecisionReader(riskReader),
+		applive.WithClock(clock.FixedClock{Time: now}),
 	)
 	req := validLiveReadinessRequest()
 	req.HasPlanArtifact = true
@@ -227,6 +229,17 @@ func TestServiceBuildLiveReadinessReportPlanArtifactFailuresTableDriven(t *testi
 			wantDetailSub: "exchange_contacted",
 		},
 		{
+			name: "stale artifact age",
+			artifact: func() domainlive.LiveOrderPlanArtifact {
+				artifact := validArtifact
+				artifact.SubmissionCreatedAt = now.Add(-time.Hour)
+				return artifact
+			}(),
+			pending:       []domainlive.PendingLiveDecision{pendingLiveDecision("risk_decision_live_ready_0001", "BTCUSDT", now)},
+			riskRecords:   []domainrisk.DecisionAuditRecord{record},
+			wantDetailSub: "stale",
+		},
+		{
 			name: "stale risk quantity",
 			artifact: func() domainlive.LiveOrderPlanArtifact {
 				artifact := validArtifact
@@ -269,6 +282,7 @@ func TestServiceBuildLiveReadinessReportPlanArtifactFailuresTableDriven(t *testi
 				}}),
 				applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
 				applive.WithRiskDecisionReader(riskReader),
+				applive.WithClock(clock.FixedClock{Time: now}),
 			)
 			req := validLiveReadinessRequest()
 			req.HasPlanArtifact = true
@@ -321,6 +335,7 @@ func TestServiceBuildLiveReadinessReportRequiresRiskReaderForPlanArtifact(t *tes
 			liveLoopAuditRun(now, domainlive.LiveLoopRunStatusCompleted),
 		}}),
 		applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
+		applive.WithClock(clock.FixedClock{Time: now}),
 	)
 	req := validLiveReadinessRequest()
 	req.HasPlanArtifact = true

@@ -295,8 +295,7 @@ func TestRunLiveReadinessStalePlanArtifactFailsReadiness(t *testing.T) {
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	pending := liveReadinessPendingDecision("risk_decision_live_ready_cli_0001", "BTCUSDT", now)
 	artifact := liveReadinessPlanArtifactFromRecord(t, pending.Decision, "decision-id")
-	artifact.Quantity = "0.010"
-	artifact.Notional = "1000"
+	artifact.SubmissionCreatedAt = time.Now().UTC().Add(-time.Hour)
 	artifactPath := writeLiveReadinessPlanArtifact(t, artifact)
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -345,13 +344,13 @@ func TestRunLiveReadinessStalePlanArtifactFailsReadiness(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("sql expectations: %v", err)
 	}
-	if riskReader.calls != 1 {
+	if riskReader.calls != 0 {
 		t.Fatalf("risk reader calls mismatch: %d", riskReader.calls)
 	}
 	logs := output.String()
 	if !strings.Contains(logs, `"name":"live_order_plan_artifact"`) ||
 		!strings.Contains(logs, `"status":"FAIL"`) ||
-		!strings.Contains(logs, "quantity") {
+		!strings.Contains(logs, "stale") {
 		t.Fatalf("expected artifact failure logs, got\n%s", logs)
 	}
 }
@@ -562,7 +561,7 @@ func liveReadinessPlanArtifactFromRecord(
 		Confidence:          record.Confidence,
 		DecisionCreatedAt:   record.Decision.CreatedAt,
 		RecordedAt:          record.RecordedAt,
-		SubmissionCreatedAt: record.RecordedAt.Add(time.Second),
+		SubmissionCreatedAt: time.Now().UTC().Add(-time.Second),
 	}
 }
 

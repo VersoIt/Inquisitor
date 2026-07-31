@@ -66,6 +66,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	flags.SetOutput(deps.output)
 	configPath := flags.String("config", "configs/config.example.yaml", "path to YAML config")
 	planFile := flags.String("plan-file", "", "optional JSON artifact written by live-order-plan; validates decision, ids, and order instructions before execution")
+	maxPlanAge := flags.Duration("max-plan-age", domainlive.DefaultLiveOrderPlanArtifactMaxAge, "maximum accepted age for -plan-file based on submission_created_at")
 	decisionID := flags.String("decision-id", "", "persisted LIVE risk decision id to process")
 	selectPending := flags.Bool("select-pending", false, "select the oldest approved pending LIVE risk decision with no live order submission")
 	pendingSymbol := flags.String("pending-symbol", "", "optional symbol filter used with -select-pending")
@@ -88,6 +89,9 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	}
 	if !*execute {
 		return fmt.Errorf("refusing to run live loop without -execute=true")
+	}
+	if *maxPlanAge <= 0 {
+		return fmt.Errorf("max-plan-age must be positive")
 	}
 
 	planArtifact, hasPlanArtifact, err := loadLiveLoopPlanArtifact(*planFile)
@@ -116,6 +120,9 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			&effectiveExpectedSubmissionID,
 			&effectiveExpectedClientOrderID,
 		); err != nil {
+			return err
+		}
+		if err := domainlive.ValidateLiveOrderPlanArtifactFreshness(planArtifact, time.Now().UTC(), *maxPlanAge); err != nil {
 			return err
 		}
 	}
