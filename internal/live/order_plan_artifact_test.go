@@ -22,6 +22,17 @@ func TestValidateLiveOrderPlanArtifactTableDriven(t *testing.T) {
 		{name: "valid read-only market artifact"},
 		{name: "bad schema", mutate: func(a *domainlive.LiveOrderPlanArtifact) { a.SchemaVersion = "old" }, wantErrSub: "schema_version"},
 		{name: "bad source", mutate: func(a *domainlive.LiveOrderPlanArtifact) { a.Source = "auto" }, wantErrSub: "source"},
+		{name: "decision id source rejects pending symbol", mutate: func(a *domainlive.LiveOrderPlanArtifact) {
+			a.PendingSymbol = "BTCUSDT"
+		}, wantErrSub: "pending_symbol"},
+		{name: "select pending source accepts matching pending symbol", mutate: func(a *domainlive.LiveOrderPlanArtifact) {
+			a.Source = domainlive.LiveOrderPlanArtifactSourceSelectPending
+			a.PendingSymbol = "BTCUSDT"
+		}},
+		{name: "select pending source rejects mismatched pending symbol", mutate: func(a *domainlive.LiveOrderPlanArtifact) {
+			a.Source = domainlive.LiveOrderPlanArtifactSourceSelectPending
+			a.PendingSymbol = "ETHUSDT"
+		}, wantErrSub: "pending_symbol"},
 		{name: "missing decision id", mutate: func(a *domainlive.LiveOrderPlanArtifact) { a.DecisionID = "" }, wantErrSub: "decision_id"},
 		{name: "untrimmed run id", mutate: func(a *domainlive.LiveOrderPlanArtifact) { a.RunID = " " + a.RunID }, wantErrSub: "run_id"},
 		{name: "bad exchange normalization", mutate: func(a *domainlive.LiveOrderPlanArtifact) { a.Exchange = "BYBIT" }, wantErrSub: "exchange"},

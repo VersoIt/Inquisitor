@@ -79,6 +79,14 @@ func ValidateLiveOrderPlanArtifact(artifact LiveOrderPlanArtifact) error {
 	if artifact.PendingSymbol != strings.ToUpper(strings.TrimSpace(artifact.PendingSymbol)) {
 		problems = append(problems, "pending_symbol must be uppercase and trimmed")
 	}
+	if artifact.Source == LiveOrderPlanArtifactSourceDecisionID && artifact.PendingSymbol != "" {
+		problems = append(problems, "pending_symbol must be empty when source is decision-id")
+	}
+	if artifact.Source == LiveOrderPlanArtifactSourceSelectPending &&
+		artifact.PendingSymbol != "" &&
+		artifact.PendingSymbol != artifact.Symbol {
+		problems = append(problems, "pending_symbol must match symbol when source is select-pending")
+	}
 	if artifact.Exchange != strings.ToLower(strings.TrimSpace(artifact.Exchange)) {
 		problems = append(problems, "exchange must be lowercase and trimmed")
 	}

@@ -499,7 +499,7 @@ go run ./cmd/live-readiness -config configs/live.local.yaml -symbol BTCUSDT -sub
 
 If you want to verify infrastructure readiness before a signal exists, pass `-require-pending=false`; before the first order path, keep the default `-require-pending=true`.
 
-After writing a `live-order-plan` artifact, pass it to readiness as a final read-only handoff check. The artifact age is capped by `-max-plan-age`, which defaults to `10m`; if this fails, regenerate the plan instead of reusing the old file. FIFO `select-pending` artifacts carry their `pending_symbol` into readiness when `-symbol` is omitted, and an explicitly mismatched `-symbol` is rejected before config or database setup:
+After writing a `live-order-plan` artifact, pass it to readiness as a final read-only handoff check. The artifact age is capped by `-max-plan-age`, which defaults to `10m`; if this fails, regenerate the plan instead of reusing the old file. FIFO `select-pending` artifacts carry their `pending_symbol` into readiness when `-symbol` is omitted, require that filter to match the selected decision symbol, and reject an explicitly mismatched `-symbol` before config or database setup:
 
 ```powershell
 go run ./cmd/live-readiness -config configs/live.local.yaml -symbol BTCUSDT -plan-file artifacts/live-order-plan.json -subaccount-confirmed -max-initial-live-capital-usdt 100
