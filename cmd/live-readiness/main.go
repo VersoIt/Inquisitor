@@ -33,6 +33,7 @@ type liveReadinessDependencies struct {
 	newKillSwitch    func(*sql.DB) domainrisk.KillSwitchRepository
 	newRiskReader    func(*sql.DB) applive.RiskDecisionReader
 	lookupEnv        func(string) (string, bool)
+	now              func() time.Time
 	output           io.Writer
 }
 
@@ -55,6 +56,7 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	requirePending := flags.Bool("require-pending", true, "fail readiness when no pending LIVE decision is available")
 	planFile := flags.String("plan-file", "", "optional JSON artifact written by live-order-plan; validates it against current readiness and risk snapshot")
 	maxPlanAge := flags.Duration("max-plan-age", domainlive.DefaultLiveOrderPlanArtifactMaxAge, "maximum accepted age for -plan-file based on submission_created_at")
+	artifactPath := flags.String("artifact-path", "", "optional path to write a machine-readable JSON live readiness checklist artifact")
 	maxInitialCapitalValue := flags.String("max-initial-live-capital-usdt", defaultMaxInitialLiveCapitalUSDT, "operator safety cap for configured live initial capital")
 	subaccountConfirmed := flags.Bool("subaccount-confirmed", false, "set only after verifying API keys belong to the dedicated live subaccount")
 	timeout := flags.Duration("timeout", 10*time.Second, "maximum live readiness command duration")
@@ -77,6 +79,10 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	}
 	if *maxPlanAge <= 0 {
 		return fmt.Errorf("max-plan-age must be positive")
+	}
+	readinessArtifactPath, err := liveReadinessArtifactPathFromFlag(*artifactPath)
+	if err != nil {
+		return err
 	}
 	planArtifact, hasPlanArtifact, err := loadLiveReadinessPlanArtifact(*planFile)
 	if err != nil {
@@ -134,6 +140,26 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	if err != nil {
 		return err
 	}
+	if readinessArtifactPath != "" {
+		artifact := liveReadinessArtifactFromReport(
+			report,
+			req,
+			deps.now().UTC(),
+			strings.TrimSpace(*configPath),
+			strings.TrimSpace(*planFile),
+			hasPlanArtifact,
+		)
+		if err := writeLiveReadinessArtifact(readinessArtifactPath, artifact); err != nil {
+			return err
+		}
+		log.Info(
+			"live readiness artifact written",
+			"path", readinessArtifactPath,
+			"schema_version", artifact.SchemaVersion,
+			"ready", artifact.Ready,
+			"failed", artifact.Summary.Failed,
+		)
+	}
 	if !report.Ready {
 		return fmt.Errorf("live readiness failed: %s", liveReadinessFailedCheckNames(report.Checks))
 	}
@@ -170,6 +196,11 @@ func (deps liveReadinessDependencies) withDefaults() liveReadinessDependencies {
 	}
 	if deps.lookupEnv == nil {
 		deps.lookupEnv = os.LookupEnv
+	}
+	if deps.now == nil {
+		deps.now = func() time.Time {
+			return time.Now().UTC()
+		}
 	}
 	if deps.output == nil {
 		deps.output = os.Stdout

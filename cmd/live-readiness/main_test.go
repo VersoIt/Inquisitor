@@ -187,6 +187,31 @@ func TestRunLiveReadinessRejectsUnsafeFlagsBeforeSideEffects(t *testing.T) {
 	}
 }
 
+func TestRunLiveReadinessRejectsUntrimmedArtifactPathBeforeSideEffects(t *testing.T) {
+	var loaded bool
+	var opened bool
+
+	err := runLiveReadiness(context.Background(), []string{
+		"-artifact-path", " artifacts/live-readiness.json ",
+	}, liveReadinessDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			loaded = true
+			return &config.Config{}, nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			opened = true
+			return nil, nil
+		},
+		output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "artifact-path") {
+		t.Fatalf("expected artifact-path error, got %v", err)
+	}
+	if loaded || opened {
+		t.Fatalf("unsafe artifact path must stop before side effects: loaded=%t opened=%t", loaded, opened)
+	}
+}
+
 func TestLiveReadinessRequestFromConfigMapsEnvAndSafetyInputs(t *testing.T) {
 	cfg := validLiveReadinessConfig()
 	req, err := liveReadinessRequestFromConfig(
@@ -220,11 +245,13 @@ func TestLiveReadinessRequestFromConfigMapsEnvAndSafetyInputs(t *testing.T) {
 
 func TestRunLiveReadinessLogsReadyReport(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	createdAt := now.Add(time.Minute)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
+	artifactPath := filepath.Join(t.TempDir(), "artifacts", "live-readiness.json")
 
 	pendingReader := &fakeLiveReadinessPendingReader{candidates: []domainlive.PendingLiveDecision{
 		liveReadinessPendingDecision("risk_decision_live_ready_cli_0001", "BTCUSDT", now),
@@ -241,6 +268,7 @@ func TestRunLiveReadinessLogsReadyReport(t *testing.T) {
 		"-audit-limit", "10",
 		"-subaccount-confirmed",
 		"-max-initial-live-capital-usdt", "100",
+		"-artifact-path", artifactPath,
 	}, liveReadinessDependencies{
 		loadConfig: func(string) (*config.Config, error) {
 			return validLiveReadinessConfig(), nil
@@ -262,6 +290,9 @@ func TestRunLiveReadinessLogsReadyReport(t *testing.T) {
 			"BYBIT_API_KEY":        "key",
 			"BYBIT_API_SECRET":     "secret",
 		}),
+		now: func() time.Time {
+			return createdAt
+		},
 		output: &output,
 	})
 	if err != nil {
@@ -289,11 +320,43 @@ func TestRunLiveReadinessLogsReadyReport(t *testing.T) {
 		`"next_decision_id":"risk_decision_live_ready_cli_0001"`,
 		`"msg":"live readiness check"`,
 		`"status":"PASS"`,
+		`"msg":"live readiness artifact written"`,
 		`"msg":"live readiness passed"`,
 	} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
 		}
+	}
+
+	artifact := readLiveReadinessArtifact(t, artifactPath)
+	if artifact.SchemaVersion != liveReadinessArtifactSchemaVersion ||
+		!artifact.CreatedAt.Equal(createdAt) ||
+		artifact.ConfigPath != "configs/config.example.yaml" ||
+		!artifact.Ready ||
+		artifact.Summary.Failed != 0 ||
+		len(artifact.Checks) != artifact.Summary.Total ||
+		len(artifact.FailedChecks) != 0 {
+		t.Fatalf("readiness artifact summary mismatch: %#v", artifact)
+	}
+	if artifact.Pending.Symbol != "BTCUSDT" ||
+		artifact.Pending.Limit != 1 ||
+		!artifact.Pending.Required ||
+		artifact.Pending.Total != 1 ||
+		artifact.Pending.NextDecisionID != "risk_decision_live_ready_cli_0001" ||
+		artifact.Pending.NextSymbol != "BTCUSDT" ||
+		artifact.Pending.OldestAt == nil ||
+		artifact.Pending.NewestAt == nil {
+		t.Fatalf("readiness artifact pending mismatch: %#v", artifact.Pending)
+	}
+	if artifact.Audit.Limit != 10 ||
+		artifact.Audit.Total != 1 ||
+		artifact.Audit.Completed != 1 ||
+		artifact.Audit.Running != 0 ||
+		artifact.Audit.Failed != 0 {
+		t.Fatalf("readiness artifact audit mismatch: %#v", artifact.Audit)
+	}
+	if artifact.KillSwitch.Active || artifact.KillSwitch.UpdatedAt != nil || artifact.PlanFile != nil {
+		t.Fatalf("readiness artifact safety metadata mismatch: kill=%#v plan=%#v", artifact.KillSwitch, artifact.PlanFile)
 	}
 }
 
@@ -529,16 +592,19 @@ func TestRunLiveReadinessStalePlanArtifactFailsReadiness(t *testing.T) {
 }
 
 func TestRunLiveReadinessFailsWhenReportHasBlockingChecks(t *testing.T) {
+	now := time.Date(2026, 7, 28, 13, 0, 0, 0, time.UTC)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
+	artifactPath := filepath.Join(t.TempDir(), "live-readiness-failed.json")
 
 	var output bytes.Buffer
 	err = runLiveReadiness(context.Background(), []string{
 		"-symbol", "BTCUSDT",
 		"-subaccount-confirmed",
+		"-artifact-path", artifactPath,
 	}, liveReadinessDependencies{
 		loadConfig: func(string) (*config.Config, error) {
 			return validLiveReadinessConfig(), nil
@@ -560,6 +626,9 @@ func TestRunLiveReadinessFailsWhenReportHasBlockingChecks(t *testing.T) {
 			"BYBIT_API_KEY":        "key",
 			"BYBIT_API_SECRET":     "secret",
 		}),
+		now: func() time.Time {
+			return now
+		},
 		output: &output,
 	})
 	if err == nil || !strings.Contains(err.Error(), "pending_live_decision") {
@@ -570,6 +639,13 @@ func TestRunLiveReadinessFailsWhenReportHasBlockingChecks(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"ready":false`) || !strings.Contains(output.String(), `"status":"FAIL"`) {
 		t.Fatalf("expected failing readiness logs, got\n%s", output.String())
+	}
+	artifact := readLiveReadinessArtifact(t, artifactPath)
+	if !artifact.CreatedAt.Equal(now) ||
+		artifact.Ready ||
+		artifact.Summary.Failed == 0 ||
+		!stringSliceContains(artifact.FailedChecks, "pending_live_decision") {
+		t.Fatalf("expected failed readiness artifact with pending failure, got %#v", artifact)
 	}
 }
 
@@ -697,6 +773,32 @@ func writeLiveReadinessPlanArtifact(t *testing.T, artifact domainlive.LiveOrderP
 		t.Fatalf("write plan artifact: %v", err)
 	}
 	return path
+}
+
+func readLiveReadinessArtifact(t *testing.T, path string) liveReadinessArtifact {
+	t.Helper()
+
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read readiness artifact: %v", err)
+	}
+	var artifact liveReadinessArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		t.Fatalf("decode readiness artifact: %v", err)
+	}
+	if err := validateLiveReadinessArtifact(artifact); err != nil {
+		t.Fatalf("validate readiness artifact: %v", err)
+	}
+	return artifact
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func liveReadinessPlanArtifactFromRecord(
