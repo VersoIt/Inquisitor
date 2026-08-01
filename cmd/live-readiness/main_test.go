@@ -329,7 +329,7 @@ func TestRunLiveReadinessLogsReadyReport(t *testing.T) {
 	}
 
 	artifact := readLiveReadinessArtifact(t, artifactPath)
-	if artifact.SchemaVersion != liveReadinessArtifactSchemaVersion ||
+	if artifact.SchemaVersion != domainlive.LiveReadinessArtifactSchemaVersion ||
 		!artifact.CreatedAt.Equal(createdAt) ||
 		artifact.ConfigPath != "configs/config.example.yaml" ||
 		!artifact.Ready ||
@@ -775,18 +775,18 @@ func writeLiveReadinessPlanArtifact(t *testing.T, artifact domainlive.LiveOrderP
 	return path
 }
 
-func readLiveReadinessArtifact(t *testing.T, path string) liveReadinessArtifact {
+func readLiveReadinessArtifact(t *testing.T, path string) domainlive.LiveReadinessArtifact {
 	t.Helper()
 
 	payload, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read readiness artifact: %v", err)
 	}
-	var artifact liveReadinessArtifact
+	var artifact domainlive.LiveReadinessArtifact
 	if err := json.Unmarshal(payload, &artifact); err != nil {
 		t.Fatalf("decode readiness artifact: %v", err)
 	}
-	if err := validateLiveReadinessArtifact(artifact); err != nil {
+	if err := domainlive.ValidateLiveReadinessArtifact(artifact); err != nil {
 		t.Fatalf("validate readiness artifact: %v", err)
 	}
 	return artifact

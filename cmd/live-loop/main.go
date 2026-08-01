@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +68,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	configPath := flags.String("config", "configs/config.example.yaml", "path to YAML config")
 	planFile := flags.String("plan-file", "", "optional JSON artifact written by live-order-plan; validates decision, ids, and order instructions before execution")
 	maxPlanAge := flags.Duration("max-plan-age", domainlive.DefaultLiveOrderPlanArtifactMaxAge, "maximum accepted age for -plan-file based on submission_created_at")
+	readinessFile := flags.String("readiness-file", "", "optional JSON artifact written by live-readiness; requires a fresh PASS checklist before execution")
+	maxReadinessAge := flags.Duration("max-readiness-age", domainlive.DefaultLiveReadinessArtifactMaxAge, "maximum accepted age for -readiness-file based on created_at")
 	decisionID := flags.String("decision-id", "", "persisted LIVE risk decision id to process")
 	selectPending := flags.Bool("select-pending", false, "select the oldest approved pending LIVE risk decision with no live order submission")
 	pendingSymbol := flags.String("pending-symbol", "", "optional symbol filter used with -select-pending")
@@ -93,8 +96,15 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	if *maxPlanAge <= 0 {
 		return fmt.Errorf("max-plan-age must be positive")
 	}
+	if *maxReadinessAge <= 0 {
+		return fmt.Errorf("max-readiness-age must be positive")
+	}
 
 	planArtifact, hasPlanArtifact, err := loadLiveLoopPlanArtifact(*planFile)
+	if err != nil {
+		return err
+	}
+	readinessArtifact, hasReadinessArtifact, err := loadLiveLoopReadinessArtifact(*readinessFile)
 	if err != nil {
 		return err
 	}
@@ -123,6 +133,11 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			return err
 		}
 		if err := domainlive.ValidateLiveOrderPlanArtifactFreshness(planArtifact, time.Now().UTC(), *maxPlanAge); err != nil {
+			return err
+		}
+	}
+	if hasReadinessArtifact {
+		if err := domainlive.ValidateLiveReadinessArtifactFreshness(readinessArtifact, time.Now().UTC(), *maxReadinessAge); err != nil {
 			return err
 		}
 	}
@@ -168,6 +183,20 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			return err
 		}
 		if err := validateLiveLoopIdentityExpectation(identity, identityExpectation); err != nil {
+			return err
+		}
+	}
+	if hasReadinessArtifact {
+		if err := validateLiveLoopReadinessArtifactAgainstExecution(
+			readinessArtifact,
+			strings.TrimSpace(*configPath),
+			strings.TrimSpace(*planFile),
+			hasPlanArtifact,
+			planArtifact,
+			*selectPending,
+			pendingQuery,
+			selectedDecisionID,
+		); err != nil {
 			return err
 		}
 	}
@@ -250,6 +279,20 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		}
 		if err := validateLiveLoopIdentityExpectation(identity, identityExpectation); err != nil {
 			return err
+		}
+		if hasReadinessArtifact {
+			if err := validateLiveLoopReadinessArtifactAgainstExecution(
+				readinessArtifact,
+				strings.TrimSpace(*configPath),
+				strings.TrimSpace(*planFile),
+				hasPlanArtifact,
+				planArtifact,
+				*selectPending,
+				pendingQuery,
+				selectedDecisionID,
+			); err != nil {
+				return err
+			}
 		}
 		if hasPlanArtifact {
 			if err := validateLiveLoopPlanArtifactAgainstExecution(planArtifact, selectedDecisionID, identity, cfg, orderType, timeInForce, limitPrice); err != nil {
@@ -419,6 +462,28 @@ func loadLiveLoopPlanArtifact(path string) (domainlive.LiveOrderPlanArtifact, bo
 	}
 	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
 		return domainlive.LiveOrderPlanArtifact{}, false, err
+	}
+	return artifact, true, nil
+}
+
+func loadLiveLoopReadinessArtifact(path string) (domainlive.LiveReadinessArtifact, bool, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return domainlive.LiveReadinessArtifact{}, false, nil
+	}
+	if path != trimmedPath {
+		return domainlive.LiveReadinessArtifact{}, false, fmt.Errorf("readiness-file must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return domainlive.LiveReadinessArtifact{}, false, fmt.Errorf("read live readiness artifact %q: %w", trimmedPath, err)
+	}
+	var artifact domainlive.LiveReadinessArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		return domainlive.LiveReadinessArtifact{}, false, fmt.Errorf("decode live readiness artifact %q: %w", trimmedPath, err)
+	}
+	if err := domainlive.ValidateLiveReadinessArtifact(artifact); err != nil {
+		return domainlive.LiveReadinessArtifact{}, false, err
 	}
 	return artifact, true, nil
 }
@@ -672,6 +737,90 @@ func validateLiveLoopPlanArtifactAgainstCurrentDecision(
 		return err
 	}
 	return nil
+}
+
+func validateLiveLoopReadinessArtifactAgainstExecution(
+	artifact domainlive.LiveReadinessArtifact,
+	configPath string,
+	planPath string,
+	hasPlanArtifact bool,
+	planArtifact domainlive.LiveOrderPlanArtifact,
+	selectPending bool,
+	pendingQuery domainlive.PendingLiveDecisionQuery,
+	selectedDecisionID string,
+) error {
+	if err := domainlive.ValidateLiveReadinessArtifact(artifact); err != nil {
+		return err
+	}
+	var problems []string
+	if !artifact.Ready {
+		problems = append(problems, "ready must be true")
+	}
+	if artifact.Summary.Failed != 0 {
+		problems = append(problems, fmt.Sprintf("failed checks must be zero, got %d", artifact.Summary.Failed))
+	}
+	if artifact.ConfigPath != strings.TrimSpace(configPath) {
+		problems = append(problems, fmt.Sprintf("config_path %q does not match CLI config %q", artifact.ConfigPath, strings.TrimSpace(configPath)))
+	}
+	if !artifact.Pending.Required {
+		problems = append(problems, "pending readiness must be required")
+	}
+	if artifact.Pending.Total == 0 {
+		problems = append(problems, "pending readiness must include at least one pending decision")
+	}
+	selectedDecisionID = strings.TrimSpace(selectedDecisionID)
+	if selectedDecisionID != "" && artifact.Pending.NextDecisionID != selectedDecisionID {
+		problems = append(problems, fmt.Sprintf("pending next_decision_id %q does not match selected decision %q", artifact.Pending.NextDecisionID, selectedDecisionID))
+	}
+	if selectPending && pendingQuery.Symbol != "" && artifact.Pending.Symbol != pendingQuery.Symbol {
+		problems = append(problems, fmt.Sprintf("pending symbol %q does not match selector symbol %q", artifact.Pending.Symbol, pendingQuery.Symbol))
+	}
+	if hasPlanArtifact {
+		if artifact.PlanFile == nil {
+			problems = append(problems, "plan_file is required when -plan-file is used")
+		} else {
+			problems = append(problems, liveLoopReadinessPlanFileProblems(*artifact.PlanFile, planPath, planArtifact)...)
+		}
+	} else if artifact.PlanFile != nil {
+		problems = append(problems, "readiness-file plan_file requires -plan-file")
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("live readiness artifact execution validation failed: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func liveLoopReadinessPlanFileProblems(
+	readinessPlan domainlive.LiveReadinessArtifactPlanFile,
+	planPath string,
+	planArtifact domainlive.LiveOrderPlanArtifact,
+) []string {
+	var problems []string
+	if err := domainlive.ValidateLiveOrderPlanArtifact(planArtifact); err != nil {
+		return []string{err.Error()}
+	}
+	if !liveLoopSamePath(readinessPlan.Path, planPath) {
+		problems = append(problems, fmt.Sprintf("plan_file.path %q does not match -plan-file %q", readinessPlan.Path, strings.TrimSpace(planPath)))
+	}
+	compareText := map[string][2]string{
+		"plan_file.schema_version":  {readinessPlan.SchemaVersion, planArtifact.SchemaVersion},
+		"plan_file.source":          {readinessPlan.Source, planArtifact.Source},
+		"plan_file.pending_symbol":  {readinessPlan.PendingSymbol, planArtifact.PendingSymbol},
+		"plan_file.decision_id":     {readinessPlan.DecisionID, planArtifact.DecisionID},
+		"plan_file.submission_id":   {readinessPlan.SubmissionID, planArtifact.SubmissionID},
+		"plan_file.client_order_id": {readinessPlan.ClientOrderID, planArtifact.ClientOrderID},
+		"plan_file.symbol":          {readinessPlan.Symbol, planArtifact.Symbol},
+	}
+	for field, values := range compareText {
+		if values[0] != values[1] {
+			problems = append(problems, fmt.Sprintf("%s %q does not match plan artifact %q", field, values[0], values[1]))
+		}
+	}
+	return problems
+}
+
+func liveLoopSamePath(left string, right string) bool {
+	return filepath.Clean(strings.TrimSpace(left)) == filepath.Clean(strings.TrimSpace(right))
 }
 
 func liveLoopPendingDecisionQueryFromFlags(symbol string, enabled bool) (domainlive.PendingLiveDecisionQuery, error) {

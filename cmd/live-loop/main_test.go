@@ -124,7 +124,10 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	planFile := writeLiveLoopPlanArtifact(t, liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime))
+	configPath := writeLiveLoopConfig(t)
+	planArtifact := liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime)
+	planFile := writeLiveLoopPlanArtifact(t, planArtifact)
+	readinessFile := writeLiveLoopReadinessArtifact(t, liveLoopReadinessArtifact(t, configPath, planFile, planArtifact, now))
 	executor := &fakeLiveLoopExecutor{receivedAt: now}
 	accountReader := &fakeLiveLoopAccountReader{
 		snapshot: validLiveLoopAccountSnapshot(t),
@@ -132,8 +135,9 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 
 	var output bytes.Buffer
 	err = runLiveLoop(context.Background(), []string{
-		"-config", writeLiveLoopConfig(t),
+		"-config", configPath,
 		"-plan-file", planFile,
+		"-readiness-file", readinessFile,
 		"-subaccount-confirmed",
 		"-max-initial-live-capital-usdt", "100",
 		"-max-iterations", "1",
@@ -313,6 +317,107 @@ func TestRunLiveLoopPlanFileSourceMismatchStopsBeforeSideEffects(t *testing.T) {
 			}
 			if opened {
 				t.Fatal("database must not be opened when plan-file source mismatches execution mode")
+			}
+		})
+	}
+}
+
+func TestRunLiveLoopReadinessFileStopsBeforeSideEffects(t *testing.T) {
+	now := time.Now().UTC()
+	decisionTime := now.Add(-2 * time.Second)
+	configPath := "configs/live.local.yaml"
+	planArtifact := liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime)
+	planFile := writeLiveLoopPlanArtifact(t, planArtifact)
+	validReadiness := liveLoopReadinessArtifact(t, configPath, planFile, planArtifact, now)
+	readinessWithoutPlan := cloneLiveLoopReadinessArtifact(validReadiness)
+	readinessWithoutPlan.PlanFile = nil
+	readinessWithWrongPlan := cloneLiveLoopReadinessArtifact(validReadiness)
+	readinessWithWrongPlan.PlanFile = cloneLiveLoopReadinessPlanFile(validReadiness.PlanFile)
+	readinessWithWrongPlan.PlanFile.DecisionID = "risk_decision_live_cli_0002"
+	notReady := cloneLiveLoopReadinessArtifact(validReadiness)
+	notReady.Ready = false
+	notReady.Summary.Passed = 0
+	notReady.Summary.Failed = 1
+	notReady.FailedChecks = []string{"live_order_plan_artifact"}
+	notReady.Checks[0].Status = domainlive.ReadinessCheckStatusFail
+	notReady.Checks[0].Details = "no pending approved LIVE decisions without submissions"
+	configMismatch := cloneLiveLoopReadinessArtifact(validReadiness)
+	configMismatch.ConfigPath = "configs/other-live.yaml"
+	stale := cloneLiveLoopReadinessArtifact(validReadiness)
+	stale.CreatedAt = now.Add(-time.Hour)
+
+	tests := []struct {
+		name       string
+		args       func(string) []string
+		artifact   domainlive.LiveReadinessArtifact
+		wantErrSub string
+	}{
+		{
+			name: "stale readiness",
+			args: func(readinessFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-readiness-file", readinessFile, "-max-readiness-age", "10m", "-execute"}
+			},
+			artifact:   stale,
+			wantErrSub: "stale",
+		},
+		{
+			name: "not ready",
+			args: func(readinessFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-readiness-file", readinessFile, "-execute"}
+			},
+			artifact:   notReady,
+			wantErrSub: "ready",
+		},
+		{
+			name: "config mismatch",
+			args: func(readinessFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-readiness-file", readinessFile, "-execute"}
+			},
+			artifact:   configMismatch,
+			wantErrSub: "config_path",
+		},
+		{
+			name: "readiness plan requires plan file",
+			args: func(readinessFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-readiness-file", readinessFile, "-execute"}
+			},
+			artifact:   validReadiness,
+			wantErrSub: "requires -plan-file",
+		},
+		{
+			name: "plan file requires readiness plan",
+			args: func(readinessFile string) []string {
+				return []string{"-config", configPath, "-plan-file", planFile, "-readiness-file", readinessFile, "-execute"}
+			},
+			artifact:   readinessWithoutPlan,
+			wantErrSub: "plan_file is required",
+		},
+		{
+			name: "readiness plan metadata mismatch",
+			args: func(readinessFile string) []string {
+				return []string{"-config", configPath, "-plan-file", planFile, "-readiness-file", readinessFile, "-execute"}
+			},
+			artifact:   readinessWithWrongPlan,
+			wantErrSub: "plan_file.decision_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opened bool
+			readinessFile := writeLiveLoopReadinessArtifact(t, tt.artifact)
+			err := runLiveLoop(context.Background(), tt.args(readinessFile), liveLoopDependencies{
+				openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+					opened = true
+					return nil, nil
+				},
+				output: &bytes.Buffer{},
+			})
+			if err == nil || !strings.Contains(err.Error(), "readiness") || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected readiness error containing %q, got %v", tt.wantErrSub, err)
+			}
+			if opened {
+				t.Fatal("database must not be opened when readiness artifact fails before execution")
 			}
 		})
 	}
@@ -1339,6 +1444,95 @@ func writeLiveLoopPlanArtifact(t *testing.T, artifact domainlive.LiveOrderPlanAr
 		t.Fatalf("write plan artifact: %v", err)
 	}
 	return path
+}
+
+func writeLiveLoopReadinessArtifact(t *testing.T, artifact domainlive.LiveReadinessArtifact) string {
+	t.Helper()
+
+	if err := domainlive.ValidateLiveReadinessArtifact(artifact); err != nil {
+		t.Fatalf("validate readiness artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal readiness artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "live-readiness.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write readiness artifact: %v", err)
+	}
+	return path
+}
+
+func liveLoopReadinessArtifact(
+	t *testing.T,
+	configPath string,
+	planPath string,
+	plan domainlive.LiveOrderPlanArtifact,
+	createdAt time.Time,
+) domainlive.LiveReadinessArtifact {
+	t.Helper()
+
+	pendingSymbol := plan.PendingSymbol
+	if pendingSymbol == "" {
+		pendingSymbol = plan.Symbol
+	}
+	oldestAt := plan.DecisionCreatedAt
+	newestAt := plan.DecisionCreatedAt
+	return domainlive.LiveReadinessArtifact{
+		SchemaVersion: domainlive.LiveReadinessArtifactSchemaVersion,
+		CreatedAt:     createdAt.UTC(),
+		ConfigPath:    strings.TrimSpace(configPath),
+		Ready:         true,
+		Summary: domainlive.LiveReadinessArtifactSummary{
+			Total:  1,
+			Passed: 1,
+		},
+		Checks: []domainlive.LiveReadinessArtifactCheck{{
+			Name:    "live_order_plan_artifact",
+			Status:  domainlive.ReadinessCheckStatusPass,
+			Details: "artifact matches current PostgreSQL risk snapshot",
+		}},
+		Pending: domainlive.LiveReadinessArtifactPending{
+			Symbol:         pendingSymbol,
+			Limit:          1,
+			Required:       true,
+			Total:          1,
+			NextDecisionID: plan.DecisionID,
+			NextSymbol:     plan.Symbol,
+			OldestAt:       &oldestAt,
+			NewestAt:       &newestAt,
+		},
+		Audit: domainlive.LiveReadinessArtifactAudit{
+			Limit: 10,
+		},
+		KillSwitch: domainlive.LiveReadinessArtifactKillSwitch{},
+		PlanFile: &domainlive.LiveReadinessArtifactPlanFile{
+			Path:          strings.TrimSpace(planPath),
+			SchemaVersion: plan.SchemaVersion,
+			Source:        plan.Source,
+			PendingSymbol: plan.PendingSymbol,
+			DecisionID:    plan.DecisionID,
+			SubmissionID:  plan.SubmissionID,
+			ClientOrderID: plan.ClientOrderID,
+			Symbol:        plan.Symbol,
+			MaxAge:        domainlive.DefaultLiveOrderPlanArtifactMaxAge.String(),
+		},
+	}
+}
+
+func cloneLiveLoopReadinessPlanFile(plan *domainlive.LiveReadinessArtifactPlanFile) *domainlive.LiveReadinessArtifactPlanFile {
+	if plan == nil {
+		return nil
+	}
+	copy := *plan
+	return &copy
+}
+
+func cloneLiveLoopReadinessArtifact(artifact domainlive.LiveReadinessArtifact) domainlive.LiveReadinessArtifact {
+	artifact.FailedChecks = append([]string(nil), artifact.FailedChecks...)
+	artifact.Checks = append([]domainlive.LiveReadinessArtifactCheck(nil), artifact.Checks...)
+	artifact.PlanFile = cloneLiveLoopReadinessPlanFile(artifact.PlanFile)
+	return artifact
 }
 
 func liveLoopPlanArtifact(t *testing.T, decisionID string, runID string, decisionObservedAt time.Time) domainlive.LiveOrderPlanArtifact {
