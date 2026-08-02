@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -33,6 +34,8 @@ const (
 	defaultLiveLoopSmokeCommandTimeout     = 30 * time.Second
 	defaultLiveLoopSmokeAccountSnapshotAge = 5 * time.Second
 	defaultLiveLoopSmokePositionAge        = 5 * time.Second
+	defaultLiveLoopSmokePlanArtifactPath   = "artifacts/live-loop-smoke-plan.json"
+	defaultLiveLoopSmokeAuditLimit         = 10
 )
 
 type liveLoopSmokeIdentity struct {
@@ -57,6 +60,13 @@ type liveLoopSmokeVerification struct {
 	LoopRunStatus             string
 	LoopIterationAction       string
 	LoopIterationSubmitted    bool
+}
+
+type liveLoopSmokeHandoff struct {
+	PlanPath          string
+	PlanFileSHA256    string
+	PlanArtifact      domainlive.LiveOrderPlanArtifact
+	ReadinessArtifact domainlive.LiveReadinessArtifact
 }
 
 func main() {
@@ -147,6 +157,7 @@ func runLiveLoopSmoke(ctx context.Context, args []string, deps liveLoopSmokeDepe
 	exchange := newFakeLiveLoopSmokeExchange(identity.ExchangeOrder)
 	service := applive.NewService(
 		applive.WithRiskDecisionReader(postgres.NewRiskDecisionRepository(db)),
+		applive.WithPendingLiveDecisionReader(postgres.NewRiskDecisionRepository(db)),
 		applive.WithOrderExecutor(exchange),
 		applive.WithOrderJournal(liveOrderJournal),
 		applive.WithOrderStatusReader(exchange),
@@ -158,6 +169,29 @@ func runLiveLoopSmoke(ctx context.Context, args []string, deps liveLoopSmokeDepe
 		applive.WithKillSwitchRepository(killSwitch),
 		applive.WithLiveLoopJournal(postgres.NewLiveLoopJournalRepository(db)),
 		applive.WithEnvironmentReader(liveLoopSmokeEnvironmentFromConfig(cfg)),
+	)
+	handoff, err := buildAndValidateLiveLoopSmokeHandoff(
+		smokeCtx,
+		service,
+		cfg,
+		*configPath,
+		identity,
+		maxInitialCapital,
+		*subaccountConfirmed,
+		*requireLiveConfig,
+	)
+	if err != nil {
+		return err
+	}
+	log.Info(
+		"live-loop smoke handoff checked",
+		"ready", handoff.ReadinessArtifact.Ready,
+		"plan_path", handoff.PlanPath,
+		"plan_sha256", handoff.PlanFileSHA256,
+		"decision_id", handoff.PlanArtifact.DecisionID,
+		"submission_id", handoff.PlanArtifact.SubmissionID,
+		"client_order_id", handoff.PlanArtifact.ClientOrderID,
+		"next_decision_id", handoff.ReadinessArtifact.Pending.NextDecisionID,
 	)
 	applive.WithLiveLoopIterationRunner(applive.NewPersistedDecisionLiveLoopIterationRunner(service, applive.PersistedDecisionLiveLoopOrder{
 		DecisionID:    identity.DecisionID,
@@ -204,6 +238,9 @@ func runLiveLoopSmoke(ctx context.Context, args []string, deps liveLoopSmokeDepe
 		"exchange_status_calls", exchange.statusCalls,
 		"exchange_position_calls", exchange.positionCalls,
 		"exchange_account_calls", exchange.accountCalls,
+		"handoff_checked", true,
+		"handoff_ready", handoff.ReadinessArtifact.Ready,
+		"handoff_plan_sha256", handoff.PlanFileSHA256,
 		"uses_fake_exchange", true,
 		"require_live_config", *requireLiveConfig,
 	)
@@ -391,6 +428,164 @@ func liveLoopSmokeDecision(decisionID string, cfg *config.Config, now time.Time)
 	}
 }
 
+func buildAndValidateLiveLoopSmokeHandoff(
+	ctx context.Context,
+	service *applive.Service,
+	cfg *config.Config,
+	configPath string,
+	identity liveLoopSmokeIdentity,
+	maxInitialCapital decimal.Decimal,
+	subaccountConfirmed bool,
+	requireLiveConfig bool,
+) (liveLoopSmokeHandoff, error) {
+	if service == nil {
+		return liveLoopSmokeHandoff{}, fmt.Errorf("live-loop smoke handoff requires service")
+	}
+	if cfg == nil {
+		return liveLoopSmokeHandoff{}, fmt.Errorf("live-loop smoke handoff requires config")
+	}
+	plan, err := service.BuildLiveOrderPlan(ctx, applive.BuildLiveOrderPlanRequest{
+		DecisionID:    identity.DecisionID,
+		SubmissionID:  identity.SubmissionID,
+		ClientOrderID: identity.ClientOrderID,
+		Exchange:      strings.ToLower(strings.TrimSpace(cfg.Exchange.Primary)),
+		Category:      strings.ToLower(strings.TrimSpace(cfg.Exchange.Category)),
+		Type:          domainlive.OrderTypeMarket,
+		TimeInForce:   domainlive.TimeInForceIOC,
+		LimitPrice:    decimal.Zero,
+	})
+	if err != nil {
+		return liveLoopSmokeHandoff{}, fmt.Errorf("build live-loop smoke order plan artifact: %w", err)
+	}
+	planArtifact, err := applive.BuildLiveOrderPlanArtifact(
+		domainlive.LiveOrderPlanArtifactSourceDecisionID,
+		"",
+		identity.RunID,
+		plan,
+	)
+	if err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	planFileSHA256, err := liveLoopSmokePlanArtifactSHA256(planArtifact)
+	if err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	readinessReq, err := liveLoopSmokeReadinessRequestFromConfig(
+		cfg,
+		subaccountConfirmed,
+		maxInitialCapital,
+		requireLiveConfig,
+		planArtifact,
+	)
+	if err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	readinessReport, err := service.BuildLiveReadinessReport(ctx, readinessReq)
+	if err != nil {
+		return liveLoopSmokeHandoff{}, fmt.Errorf("build live-loop smoke readiness artifact: %w", err)
+	}
+	readinessArtifact, err := applive.BuildLiveReadinessArtifact(applive.BuildLiveReadinessArtifactRequest{
+		Report:         readinessReport,
+		Readiness:      readinessReq,
+		CreatedAt:      time.Now().UTC(),
+		ConfigPath:     strings.TrimSpace(configPath),
+		PlanFilePath:   defaultLiveLoopSmokePlanArtifactPath,
+		PlanFileSHA256: planFileSHA256,
+	})
+	if err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	if err := domainlive.ValidateLiveReadinessArtifactFreshness(
+		readinessArtifact,
+		time.Now().UTC(),
+		domainlive.DefaultLiveReadinessArtifactMaxAge,
+	); err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	if err := domainlive.ValidateLiveReadinessArtifactHandoff(readinessArtifact, domainlive.LiveReadinessArtifactHandoffExecution{
+		ConfigPath:         strings.TrimSpace(configPath),
+		PlanPath:           defaultLiveLoopSmokePlanArtifactPath,
+		HasPlanArtifact:    true,
+		PlanArtifact:       planArtifact,
+		PlanFileSHA256:     planFileSHA256,
+		SelectedDecisionID: identity.DecisionID,
+	}); err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	if !readinessReport.Ready {
+		return liveLoopSmokeHandoff{}, fmt.Errorf("live-loop smoke readiness handoff is not ready")
+	}
+	return liveLoopSmokeHandoff{
+		PlanPath:          defaultLiveLoopSmokePlanArtifactPath,
+		PlanFileSHA256:    planFileSHA256,
+		PlanArtifact:      planArtifact,
+		ReadinessArtifact: readinessArtifact,
+	}, nil
+}
+
+func liveLoopSmokeReadinessRequestFromConfig(
+	cfg *config.Config,
+	subaccountConfirmed bool,
+	maxInitialCapital decimal.Decimal,
+	requireLiveConfig bool,
+	planArtifact domainlive.LiveOrderPlanArtifact,
+) (applive.BuildLiveReadinessReportRequest, error) {
+	if cfg == nil {
+		return applive.BuildLiveReadinessReportRequest{}, fmt.Errorf("config is required")
+	}
+	initialCapital, err := decimalFromLiveLoopSmokeConfigFloat("live.initial_live_capital_usdt", cfg.Live.InitialLiveCapitalUSDT)
+	if err != nil {
+		return applive.BuildLiveReadinessReportRequest{}, err
+	}
+	tradingEnabled := true
+	tradingMode := "live"
+	allowLive := true
+	if requireLiveConfig {
+		tradingEnabled = cfg.Trading.Enabled
+		tradingMode = cfg.Trading.Mode
+		allowLive = cfg.Trading.AllowLive
+	}
+	env := liveLoopSmokeEnvironmentFromConfig(cfg)
+	return applive.BuildLiveReadinessReportRequest{
+		TradingEnabled:              tradingEnabled,
+		TradingMode:                 tradingMode,
+		AllowLive:                   allowLive,
+		RequireEnvConfirmation:      cfg.Live.RequireEnvConfirmation,
+		ConfirmationEnv:             cfg.Live.ConfirmationEnv,
+		ConfirmationAccepted:        liveLoopSmokeConfirmationAccepted(env, cfg),
+		APIKeyEnv:                   cfg.Live.APIKeyEnv,
+		APIKeyPresent:               liveLoopSmokeSecretPresent(env, cfg.Live.APIKeyEnv),
+		APISecretEnv:                cfg.Live.APISecretEnv,
+		APISecretPresent:            liveLoopSmokeSecretPresent(env, cfg.Live.APISecretEnv),
+		RequireSubaccount:           cfg.Live.RequireSubaccount,
+		SubaccountConfirmed:         subaccountConfirmed,
+		WithdrawalPermissionAllowed: cfg.Live.WithdrawalPermissionAllowed,
+		InitialLiveCapitalUSDT:      initialCapital,
+		MaxInitialLiveCapitalUSDT:   maxInitialCapital,
+		DatabaseMaxOpenConns:        cfg.Database.MaxOpenConns,
+		PendingSymbol:               planArtifact.Symbol,
+		PendingLimit:                1,
+		AuditLimit:                  defaultLiveLoopSmokeAuditLimit,
+		RequirePendingDecision:      true,
+		HasPlanArtifact:             true,
+		PlanArtifact:                planArtifact,
+		MaxPlanArtifactAge:          domainlive.DefaultLiveOrderPlanArtifactMaxAge,
+	}, nil
+}
+
+func liveLoopSmokePlanArtifactSHA256(artifact domainlive.LiveOrderPlanArtifact) (string, error) {
+	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return "", err
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode live-loop smoke order plan artifact: %w", err)
+	}
+	payload = append(payload, '\n')
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func cleanupLiveLoopSmokeRows(ctx context.Context, db *sql.DB, identity liveLoopSmokeIdentity) error {
 	statements := []struct {
 		name string
@@ -517,6 +712,36 @@ func liveLoopSmokeEnvironmentFromConfig(cfg *config.Config) liveLoopSmokeEnviron
 	env[strings.TrimSpace(cfg.Live.APIKeyEnv)] = "live-loop-smoke-api-key"
 	env[strings.TrimSpace(cfg.Live.APISecretEnv)] = "live-loop-smoke-api-secret"
 	return env
+}
+
+func liveLoopSmokeConfirmationAccepted(env liveLoopSmokeEnvironment, cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if !cfg.Live.RequireEnvConfirmation {
+		return true
+	}
+	if strings.TrimSpace(cfg.Live.ConfirmationEnv) == "" {
+		return false
+	}
+	value, ok := env.LookupEnv(cfg.Live.ConfirmationEnv)
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+func liveLoopSmokeSecretPresent(env liveLoopSmokeEnvironment, name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	value, ok := env.LookupEnv(name)
+	return ok && strings.TrimSpace(value) != ""
 }
 
 type liveLoopSmokeEnvironment map[string]string

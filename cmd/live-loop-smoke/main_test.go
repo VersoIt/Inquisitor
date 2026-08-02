@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	applive "github.com/VersoIt/Inquisitor/internal/app/live"
+	"github.com/VersoIt/Inquisitor/internal/clock"
 	"github.com/VersoIt/Inquisitor/internal/config"
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
@@ -123,6 +125,101 @@ func TestLiveLoopSmokePreflightConfigModesTableDriven(t *testing.T) {
 	}
 }
 
+func TestLiveLoopSmokeReadinessRequestConfigModesTableDriven(t *testing.T) {
+	cfg := liveLoopSmokeTestConfig()
+	plan := domainlive.LiveOrderPlanArtifact{
+		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
+		Source:              domainlive.LiveOrderPlanArtifactSourceDecisionID,
+		RunID:               "live_loop_smoke_001",
+		DecisionID:          "risk_decision_live_smoke_001",
+		SubmissionID:        "live_sub_smoke_001",
+		ClientOrderID:       "inq_live_smoke_001",
+		Exchange:            "bybit",
+		Category:            "linear",
+		Symbol:              "BTCUSDT",
+		Side:                domainlive.OrderSideLong,
+		OrderType:           domainlive.OrderTypeMarket,
+		TimeInForce:         domainlive.TimeInForceIOC,
+		LimitPrice:          "0",
+		Quantity:            "0.005",
+		EntryPrice:          "100000",
+		Notional:            "500",
+		MaxLoss:             "5",
+		StopLoss:            "99000",
+		TakeProfit:          "102000",
+		Leverage:            "1",
+		Confidence:          80,
+		DecisionCreatedAt:   time.Date(2026, 8, 2, 11, 59, 0, 0, time.UTC),
+		RecordedAt:          time.Date(2026, 8, 2, 11, 59, 30, 0, time.UTC),
+		SubmissionCreatedAt: time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC),
+	}
+
+	tests := []struct {
+		name              string
+		mutate            func(*config.Config)
+		requireLiveConfig bool
+		wantTrading       bool
+		wantMode          string
+		wantAllowLive     bool
+		wantAPIKeyPresent bool
+	}{
+		{
+			name:              "local smoke overrides paper config into readiness live mode",
+			wantTrading:       true,
+			wantMode:          "live",
+			wantAllowLive:     true,
+			wantAPIKeyPresent: true,
+		},
+		{
+			name:              "strict deployment mode preserves config flags",
+			requireLiveConfig: true,
+			wantTrading:       false,
+			wantMode:          "paper",
+			wantAllowLive:     false,
+			wantAPIKeyPresent: true,
+		},
+		{
+			name: "blank env names fail closed",
+			mutate: func(cfg *config.Config) {
+				cfg.Live.APIKeyEnv = ""
+			},
+			wantTrading:       true,
+			wantMode:          "live",
+			wantAllowLive:     true,
+			wantAPIKeyPresent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := cfg
+			if tt.mutate != nil {
+				tt.mutate(&candidate)
+			}
+			got, err := liveLoopSmokeReadinessRequestFromConfig(
+				&candidate,
+				true,
+				decimal.RequireFromString("100"),
+				tt.requireLiveConfig,
+				plan,
+			)
+			if err != nil {
+				t.Fatalf("readiness request: %v", err)
+			}
+			if got.TradingEnabled != tt.wantTrading ||
+				got.TradingMode != tt.wantMode ||
+				got.AllowLive != tt.wantAllowLive ||
+				got.APIKeyPresent != tt.wantAPIKeyPresent ||
+				got.PendingSymbol != "BTCUSDT" ||
+				got.PendingLimit != 1 ||
+				got.AuditLimit != defaultLiveLoopSmokeAuditLimit ||
+				!got.HasPlanArtifact {
+				t.Fatalf("readiness request mismatch: %#v", got)
+			}
+		})
+	}
+}
+
 func TestLiveLoopSmokeStaticPreflightGateTableDriven(t *testing.T) {
 	valid := validLiveLoopSmokePreflightRequest()
 	tests := []struct {
@@ -208,6 +305,53 @@ func TestLiveLoopSmokeDecisionIsValidAndMatchesOrderRiskMath(t *testing.T) {
 	}
 }
 
+func TestBuildAndValidateLiveLoopSmokeHandoffChecksArtifactChain(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	cfg := liveLoopSmokeTestConfig()
+	identity, err := deterministicLiveLoopSmokeIdentity("risk_decision_live_smoke_001", "live_loop_smoke_001")
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	decision := liveLoopSmokeDecision(identity.DecisionID, &cfg, now)
+	riskReader := &fakeLiveLoopSmokeRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{decision}}
+	pendingReader := &fakeLiveLoopSmokePendingReader{candidates: []domainlive.PendingLiveDecision{{Decision: decision}}}
+	auditReader := &fakeLiveLoopSmokeAuditReader{}
+	killSwitch := &fakeLiveLoopSmokeKillSwitch{}
+	service := applive.NewService(
+		applive.WithRiskDecisionReader(riskReader),
+		applive.WithPendingLiveDecisionReader(pendingReader),
+		applive.WithLiveLoopAuditReader(auditReader),
+		applive.WithKillSwitchRepository(killSwitch),
+		applive.WithClock(clock.FixedClock{Time: now.Add(time.Second)}),
+	)
+
+	handoff, err := buildAndValidateLiveLoopSmokeHandoff(
+		context.Background(),
+		service,
+		&cfg,
+		"configs/config.example.yaml",
+		identity,
+		decimal.RequireFromString("100"),
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("build smoke handoff: %v", err)
+	}
+	if handoff.PlanPath != defaultLiveLoopSmokePlanArtifactPath ||
+		len(handoff.PlanFileSHA256) != 64 ||
+		handoff.PlanArtifact.DecisionID != identity.DecisionID ||
+		handoff.PlanArtifact.SubmissionID != identity.SubmissionID ||
+		handoff.ReadinessArtifact.Pending.NextDecisionID != identity.DecisionID ||
+		handoff.ReadinessArtifact.PlanFile == nil ||
+		handoff.ReadinessArtifact.PlanFile.SHA256 != handoff.PlanFileSHA256 {
+		t.Fatalf("handoff mismatch: %#v", handoff)
+	}
+	if riskReader.calls != 2 || pendingReader.calls != 1 || auditReader.calls != 1 || killSwitch.calls != 1 {
+		t.Fatalf("reader calls mismatch: risk=%d pending=%d audit=%d kill=%d", riskReader.calls, pendingReader.calls, auditReader.calls, killSwitch.calls)
+	}
+}
+
 func TestFakeLiveLoopSmokeExchangeLifecycle(t *testing.T) {
 	exchange := newFakeLiveLoopSmokeExchange("smoke_order_0001")
 	query := domainlive.PositionSnapshotQuery{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"}
@@ -259,6 +403,85 @@ func TestFakeLiveLoopSmokeExchangeLifecycle(t *testing.T) {
 	if exchange.submitCalls != 1 || exchange.statusCalls != 1 || exchange.positionCalls != 2 {
 		t.Fatalf("exchange call counts mismatch: submit=%d status=%d position=%d", exchange.submitCalls, exchange.statusCalls, exchange.positionCalls)
 	}
+}
+
+type fakeLiveLoopSmokeRiskDecisionReader struct {
+	records []domainrisk.DecisionAuditRecord
+	calls   int
+	query   domainrisk.DecisionAuditQuery
+	err     error
+}
+
+func (r *fakeLiveLoopSmokeRiskDecisionReader) ListDecisions(
+	_ context.Context,
+	query domainrisk.DecisionAuditQuery,
+) ([]domainrisk.DecisionAuditRecord, error) {
+	r.calls++
+	r.query = query
+	if r.err != nil {
+		return nil, r.err
+	}
+	return append([]domainrisk.DecisionAuditRecord(nil), r.records...), nil
+}
+
+type fakeLiveLoopSmokePendingReader struct {
+	candidates []domainlive.PendingLiveDecision
+	calls      int
+	query      domainlive.PendingLiveDecisionQuery
+	err        error
+}
+
+func (r *fakeLiveLoopSmokePendingReader) ListPendingLiveDecisions(
+	_ context.Context,
+	query domainlive.PendingLiveDecisionQuery,
+) ([]domainlive.PendingLiveDecision, error) {
+	r.calls++
+	r.query = query
+	if r.err != nil {
+		return nil, r.err
+	}
+	return append([]domainlive.PendingLiveDecision(nil), r.candidates...), nil
+}
+
+type fakeLiveLoopSmokeAuditReader struct {
+	runs  []domainlive.LiveLoopRunAudit
+	calls int
+	query domainlive.LiveLoopAuditQuery
+	err   error
+}
+
+func (r *fakeLiveLoopSmokeAuditReader) ListLiveLoopRunAudits(
+	_ context.Context,
+	query domainlive.LiveLoopAuditQuery,
+) ([]domainlive.LiveLoopRunAudit, error) {
+	r.calls++
+	r.query = query
+	if r.err != nil {
+		return nil, r.err
+	}
+	return append([]domainlive.LiveLoopRunAudit(nil), r.runs...), nil
+}
+
+type fakeLiveLoopSmokeKillSwitch struct {
+	state domainrisk.KillSwitchState
+	calls int
+	err   error
+}
+
+func (r *fakeLiveLoopSmokeKillSwitch) AppendKillSwitchEvent(context.Context, domainrisk.KillSwitchEvent) (domainrisk.KillSwitchStats, error) {
+	return domainrisk.KillSwitchStats{}, errors.New("not implemented")
+}
+
+func (r *fakeLiveLoopSmokeKillSwitch) CurrentKillSwitchState(context.Context) (domainrisk.KillSwitchState, error) {
+	r.calls++
+	if r.err != nil {
+		return domainrisk.KillSwitchState{}, r.err
+	}
+	return r.state, nil
+}
+
+func (r *fakeLiveLoopSmokeKillSwitch) ListKillSwitchEvents(context.Context, domainrisk.KillSwitchEventQuery) ([]domainrisk.KillSwitchEvent, error) {
+	return nil, errors.New("not implemented")
 }
 
 func TestRunLiveLoopSmokeRejectsMissingSubaccountBeforeConfigAndDB(t *testing.T) {

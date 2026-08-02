@@ -145,8 +145,8 @@ func runLiveOrderPlan(ctx context.Context, args []string, deps liveOrderPlanDepe
 		return err
 	}
 	logLiveOrderPlan(log, source, pendingQuery.Symbol, identity.RunID, plan)
-	artifact := liveOrderPlanArtifactFromResult(source, pendingQuery.Symbol, identity.RunID, plan)
-	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
+	artifact, err := applive.BuildLiveOrderPlanArtifact(source, pendingQuery.Symbol, identity.RunID, plan)
+	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(*artifactPath) != "" {
@@ -344,46 +344,6 @@ func logLiveOrderPlan(
 		"exchange_contacted", plan.ExchangeContacted,
 		"order_submitted", plan.OrderSubmitted,
 	)
-}
-
-func liveOrderPlanArtifactFromResult(
-	source string,
-	pendingSymbol string,
-	runID string,
-	plan applive.BuildLiveOrderPlanResult,
-) domainlive.LiveOrderPlanArtifact {
-	submission := plan.Submission
-	decision := plan.Decision
-	return domainlive.LiveOrderPlanArtifact{
-		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
-		Source:              source,
-		PendingSymbol:       pendingSymbol,
-		RunID:               runID,
-		DecisionID:          submission.DecisionID,
-		SubmissionID:        submission.SubmissionID,
-		ClientOrderID:       submission.ClientOrderID,
-		Exchange:            submission.Exchange,
-		Category:            submission.Category,
-		Symbol:              submission.Symbol,
-		Side:                submission.Side,
-		OrderType:           submission.Type,
-		TimeInForce:         submission.TimeInForce,
-		LimitPrice:          submission.LimitPrice.String(),
-		Quantity:            submission.Quantity.String(),
-		EntryPrice:          submission.ReferencePrice.String(),
-		Notional:            submission.Notional.String(),
-		MaxLoss:             submission.MaxLoss.String(),
-		StopLoss:            submission.StopLoss.String(),
-		TakeProfit:          submission.TakeProfit.String(),
-		Leverage:            submission.Leverage.String(),
-		Confidence:          submission.Confidence,
-		DecisionCreatedAt:   decision.Decision.CreatedAt,
-		RecordedAt:          decision.RecordedAt,
-		SubmissionCreatedAt: submission.CreatedAt,
-		Reserved:            plan.SubmissionReserved,
-		ExchangeContacted:   plan.ExchangeContacted,
-		OrderSubmitted:      plan.OrderSubmitted,
-	}
 }
 
 func writeLiveOrderPlanArtifact(path string, artifact domainlive.LiveOrderPlanArtifact) error {

@@ -146,15 +146,17 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 		return err
 	}
 	if readinessArtifactPath != "" {
-		artifact := liveReadinessArtifactFromReport(
-			report,
-			req,
-			deps.now().UTC(),
-			strings.TrimSpace(*configPath),
-			strings.TrimSpace(*planFile),
-			planFileSHA256,
-			hasPlanArtifact,
-		)
+		artifact, err := applive.BuildLiveReadinessArtifact(applive.BuildLiveReadinessArtifactRequest{
+			Report:         report,
+			Readiness:      req,
+			CreatedAt:      deps.now().UTC(),
+			ConfigPath:     strings.TrimSpace(*configPath),
+			PlanFilePath:   strings.TrimSpace(*planFile),
+			PlanFileSHA256: planFileSHA256,
+		})
+		if err != nil {
+			return err
+		}
 		if err := writeLiveReadinessArtifact(readinessArtifactPath, artifact); err != nil {
 			return err
 		}
