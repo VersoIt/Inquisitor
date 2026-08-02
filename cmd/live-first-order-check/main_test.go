@@ -52,6 +52,9 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-deploy-check-file", bundle.DeployCheckFile)
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-run-id", "live_loop_first_order_001")
 				assertLiveFirstOrderFlag(t, bundle.SuggestedLiveLoop.Args, "-execute")
+
+				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderReview.Args, "-plan-file", bundle.PlanFile)
+				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderReview.Args, "-artifact-path", bundle.ReviewFile)
 			},
 		},
 		{
@@ -116,7 +119,8 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				bundle.PlanFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-order-plan.json") ||
 				bundle.ReadinessFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-readiness.json") ||
 				bundle.AuditFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-loop-audit.json") ||
-				bundle.DeployCheckFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-deploy-check.json") {
+				bundle.DeployCheckFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-deploy-check.json") ||
+				bundle.ReviewFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-first-order-review.json") {
 				t.Fatalf("artifact path mismatch: %#v", bundle)
 			}
 			tt.assert(t, bundle)
@@ -209,7 +213,9 @@ func TestRunLiveFirstOrderCheckPrintOnlyDoesNotCreateArtifactsOrRunCommands(t *t
 		`"step":"live-order-plan"`,
 		`"step":"live-deploy-check"`,
 		`"msg":"live first-order check final command"`,
+		`"msg":"live first-order check post-order command"`,
 		`./cmd/live-loop`,
+		`./cmd/live-first-order-review`,
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("expected output to contain %s, got\n%s", want, output.String())

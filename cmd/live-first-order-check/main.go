@@ -46,13 +46,15 @@ type liveFirstOrderCommand struct {
 }
 
 type liveFirstOrderCheckBundle struct {
-	ArtifactDir       string
-	PlanFile          string
-	ReadinessFile     string
-	AuditFile         string
-	DeployCheckFile   string
-	Commands          []liveFirstOrderCommand
-	SuggestedLiveLoop liveFirstOrderCommand
+	ArtifactDir              string
+	PlanFile                 string
+	ReadinessFile            string
+	AuditFile                string
+	DeployCheckFile          string
+	ReviewFile               string
+	Commands                 []liveFirstOrderCommand
+	SuggestedLiveLoop        liveFirstOrderCommand
+	SuggestedPostOrderReview liveFirstOrderCommand
 }
 
 type liveFirstOrderCheckRequest struct {
@@ -184,12 +186,14 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 		"readiness_file", bundle.ReadinessFile,
 		"audit_file", bundle.AuditFile,
 		"deploy_check_file", bundle.DeployCheckFile,
+		"review_file", bundle.ReviewFile,
 		"commands", len(bundle.Commands),
 	)
 	for _, command := range bundle.Commands {
 		log.Info("live first-order check step", "step", command.Name, "command", liveFirstOrderCommandLine(command.Args))
 	}
 	log.Info("live first-order check final command", "command", liveFirstOrderCommandLine(bundle.SuggestedLiveLoop.Args))
+	log.Info("live first-order check post-order command", "command", liveFirstOrderCommandLine(bundle.SuggestedPostOrderReview.Args))
 	if *printOnly {
 		return nil
 	}
@@ -209,7 +213,9 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 		"live first-order check passed",
 		"artifact_dir", bundle.ArtifactDir,
 		"deploy_check_file", bundle.DeployCheckFile,
+		"review_file", bundle.ReviewFile,
 		"live_loop_command", liveFirstOrderCommandLine(bundle.SuggestedLiveLoop.Args),
+		"post_order_review_command", liveFirstOrderCommandLine(bundle.SuggestedPostOrderReview.Args),
 	)
 	return nil
 }
@@ -236,6 +242,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 	readinessFile := filepath.Join(normalized.ArtifactDir, "live-readiness.json")
 	auditFile := filepath.Join(normalized.ArtifactDir, "live-loop-audit.json")
 	deployCheckFile := filepath.Join(normalized.ArtifactDir, "live-deploy-check.json")
+	reviewFile := filepath.Join(normalized.ArtifactDir, "live-first-order-review.json")
 
 	planArgs := normalized.goRunArgs("./cmd/live-order-plan",
 		"-config", normalized.ConfigPath,
@@ -325,12 +332,19 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 	)
 	liveLoopArgs = appendLiveFirstOrderSourceFlags(liveLoopArgs, normalized)
 
+	reviewArgs := normalized.goRunArgs("./cmd/live-first-order-review",
+		"-config", normalized.ConfigPath,
+		"-plan-file", planFile,
+		"-artifact-path", reviewFile,
+	)
+
 	return liveFirstOrderCheckBundle{
 		ArtifactDir:     normalized.ArtifactDir,
 		PlanFile:        planFile,
 		ReadinessFile:   readinessFile,
 		AuditFile:       auditFile,
 		DeployCheckFile: deployCheckFile,
+		ReviewFile:      reviewFile,
 		Commands: []liveFirstOrderCommand{
 			{Name: "live-order-plan", Args: planArgs},
 			{Name: "live-readiness", Args: readinessArgs},
@@ -338,7 +352,8 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 			{Name: "live-deploy-check", Args: deployArgs},
 			{Name: "live-handoff-verify", Args: verifyArgs},
 		},
-		SuggestedLiveLoop: liveFirstOrderCommand{Name: "live-loop", Args: liveLoopArgs},
+		SuggestedLiveLoop:        liveFirstOrderCommand{Name: "live-loop", Args: liveLoopArgs},
+		SuggestedPostOrderReview: liveFirstOrderCommand{Name: "live-first-order-review", Args: reviewArgs},
 	}, nil
 }
 

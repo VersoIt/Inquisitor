@@ -24,6 +24,7 @@ type Service struct {
 	loopRunner       LiveLoopIterationRunner
 	loopJournal      domainlive.LiveLoopJournal
 	loopAuditReader  domainlive.LiveLoopAuditReader
+	firstOrderReview domainlive.LiveFirstOrderReviewEvidenceReader
 	pendingDecisions domainlive.PendingLiveDecisionReader
 	journal          domainlive.OrderJournal
 	killSwitch       domainrisk.KillSwitchRepository
@@ -120,6 +121,12 @@ func WithLiveLoopJournal(journal domainlive.LiveLoopJournal) Option {
 func WithLiveLoopAuditReader(reader domainlive.LiveLoopAuditReader) Option {
 	return func(service *Service) {
 		service.loopAuditReader = reader
+	}
+}
+
+func WithLiveFirstOrderReviewEvidenceReader(reader domainlive.LiveFirstOrderReviewEvidenceReader) Option {
+	return func(service *Service) {
+		service.firstOrderReview = reader
 	}
 }
 
