@@ -269,10 +269,66 @@ func BuildLiveOpsReportArtifact(req BuildLiveOpsReportArtifactRequest) (domainli
 			LatestPositionSize: review.Evidence.LatestPositionSize,
 		}
 	}
+	if req.Report.HasPositionDrift {
+		artifact.PositionDrift = buildLiveOpsReportArtifactPositionDrift(req.Report.PositionDrift)
+	}
 	if err := domainlive.ValidateLiveOpsReportArtifact(artifact); err != nil {
 		return domainlive.LiveOpsReportArtifact{}, err
 	}
 	return artifact, nil
+}
+
+func buildLiveOpsReportArtifactPositionDrift(report LivePositionDriftReport) *domainlive.LiveOpsReportArtifactPositionDrift {
+	drift := &domainlive.LiveOpsReportArtifactPositionDrift{
+		Status: report.Status,
+		Summary: domainlive.LiveOpsReportArtifactSummary{
+			Total:  report.Summary.Total,
+			Passed: report.Summary.Passed,
+			Warned: report.Summary.Warned,
+			Failed: report.Summary.Failed,
+		},
+	}
+	for _, check := range report.Checks {
+		drift.Checks = append(drift.Checks, domainlive.LiveOpsReportArtifactCheck{
+			Name:    check.Name,
+			Status:  check.Status,
+			Details: check.Details,
+		})
+		if check.Status == domainlive.ReadinessCheckStatusFail {
+			drift.FailedChecks = append(drift.FailedChecks, check.Name)
+		}
+	}
+	for _, comparison := range report.Comparisons {
+		item := domainlive.LiveOpsReportArtifactPositionDriftItem{
+			Exchange:    comparison.Query.Exchange,
+			Category:    comparison.Query.Category,
+			Symbol:      comparison.Query.Symbol,
+			Status:      comparison.Status,
+			HasBaseline: comparison.HasBaseline,
+			Current:     buildLiveOpsReportArtifactPositionSnapshot(comparison.Current),
+		}
+		if comparison.HasBaseline {
+			baseline := buildLiveOpsReportArtifactPositionSnapshot(comparison.Baseline)
+			item.Baseline = &baseline
+		}
+		drift.Comparisons = append(drift.Comparisons, item)
+	}
+	return drift
+}
+
+func buildLiveOpsReportArtifactPositionSnapshot(snapshot domainlive.PositionSnapshot) domainlive.LiveOpsReportArtifactPositionSnapshot {
+	return domainlive.LiveOpsReportArtifactPositionSnapshot{
+		Open:               snapshot.Open,
+		Side:               snapshot.Side,
+		Size:               snapshot.Size.String(),
+		AveragePrice:       snapshot.AveragePrice.String(),
+		Leverage:           snapshot.Leverage.String(),
+		ExchangeStatus:     snapshot.ExchangeStatus,
+		PositionIndex:      snapshot.PositionIndex,
+		ExchangeReduceOnly: snapshot.ExchangeReduceOnly,
+		ExchangeCreatedAt:  liveArtifactTimePointer(snapshot.ExchangeCreatedAt),
+		ObservedAt:         snapshot.ObservedAt,
+	}
 }
 
 func buildLiveLoopAuditArtifactRun(

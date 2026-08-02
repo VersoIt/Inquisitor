@@ -92,7 +92,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Read-only live deploy check CLI that validates the final first-order operator command envelope before execution: fresh plan/readiness/audit artifacts, CLEAR audit review, no readiness warnings, explicit execute/subaccount flags, one bounded iteration, source-mode consistency, live micro capital/notional cap, and leverage no higher than `1`.
 - Operator-facing live first-order check CLI that builds a reproducible plan/readiness/audit/deploy-check artifact bundle, runs the final offline handoff verification, and prints the exact armed `live-loop` command without running the order-capable step.
 - Read-only live first-order review CLI that runs after the first armed micro order, correlates the saved plan artifact with PostgreSQL live-loop/order/ack/status/position journals, writes a JSON review artifact, and fails unless the order was submitted once, accepted, filled, and matched by the latest open position snapshot.
-- Read-only live ops report CLI that summarizes Kill Switch state, pending LIVE decisions, recent live-loop audit verdict, and optional first-order review artifact freshness into `CLEAR`, `ATTENTION`, or `BLOCKED`.
+- Read-only live ops report CLI that summarizes Kill Switch state, pending LIVE decisions, recent live-loop audit verdict, optional first-order review artifact freshness, and optional exchange-vs-DB position drift into `CLEAR`, `ATTENTION`, or `BLOCKED`.
 - Read-only live position drift CLI that compares fresh exchange position snapshots with the latest persisted DB baselines, ignores market-noise fields such as mark price/PnL, and blocks on exposure drift or abnormal exchange position status.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
@@ -615,10 +615,14 @@ go run ./cmd/live-first-order-review -config configs/live.local.yaml -plan-file 
 
 Manual `-expected-submission-id` and `-expected-client-order-id` flags are still available as a fallback when no artifact file is used.
 
-Use `live-ops-report` for a read-only operational snapshot before the next armed action. It checks the current Kill Switch, pending LIVE decisions, recent live-loop audit verdict, and optionally the fresh first-order review artifact. The command writes `CLEAR`, `ATTENTION`, or `BLOCKED` into a durable JSON artifact; by default it exits successfully even for non-clear statuses so the report is still captured, and `-fail-on-blocked` turns it into a hard gate:
+Use `live-ops-report` for a read-only operational snapshot before the next armed action. It checks the current Kill Switch, pending LIVE decisions, recent live-loop audit verdict, and optionally the fresh first-order review artifact. Add `-position-drift` when the report should also read current private exchange positions and compare them against the latest PostgreSQL baselines. The command writes `CLEAR`, `ATTENTION`, or `BLOCKED` into a durable JSON artifact; by default it exits successfully even for non-clear statuses so the report is still captured, and `-fail-on-blocked` turns it into a hard gate:
 
 ```powershell
 go run ./cmd/live-ops-report -config configs/live.local.yaml -symbol BTCUSDT -first-order-review-file artifacts/live-first-order/live-first-order-review.json -artifact-path artifacts/live-ops-report.json
+```
+
+```powershell
+go run ./cmd/live-ops-report -config configs/live.local.yaml -symbol BTCUSDT -position-drift -position-drift-symbols BTCUSDT,ETHUSDT -fail-on-blocked -artifact-path artifacts/live-ops-report.json
 ```
 
 Run `live-position-drift` when you need to compare current exchange positions against the latest persisted DB position baselines. It is read-only, uses private Bybit position reads plus PostgreSQL history, ignores volatile mark-price/PnL noise, reports stale/missing DB baselines as `ATTENTION`, and reports exposure drift or `LIQ`/`ADL` exchange status as `BLOCKED`:
@@ -708,6 +712,7 @@ make live-deploy-check CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/l
 make live-first-order-check CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-first-order-review CONFIG=configs/live.local.yaml LIVE_FIRST_ORDER_ARTIFACT_DIR=artifacts/live-first-order
 make live-ops-report CONFIG=configs/live.local.yaml LIVE_OPS_SYMBOL=BTCUSDT LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT=artifacts/live-first-order/live-first-order-review.json LIVE_OPS_ARTIFACT=artifacts/live-ops-report.json
+make live-ops-report CONFIG=configs/live.local.yaml LIVE_OPS_SYMBOL=BTCUSDT LIVE_OPS_POSITION_DRIFT=1 LIVE_OPS_POSITION_DRIFT_SYMBOLS=BTCUSDT,ETHUSDT LIVE_OPS_FAIL_ON_BLOCKED=1
 make live-position-drift CONFIG=configs/live.local.yaml LIVE_DRIFT_SYMBOLS=BTCUSDT,ETHUSDT LIVE_DRIFT_FAIL_ON_BLOCKED=1
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
 make live-loop CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_FILE=artifacts/live-readiness.json LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json LIVE_DEPLOY_ARTIFACT=artifacts/live-deploy-check.json LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1

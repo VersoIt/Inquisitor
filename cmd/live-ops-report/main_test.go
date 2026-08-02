@@ -87,6 +87,97 @@ func TestLiveOpsAuditLimitFromFlagsTableDriven(t *testing.T) {
 	}
 }
 
+func TestLiveOpsPositionDriftSymbolListFromFlagTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		value      string
+		want       []string
+		wantHas    bool
+		wantErrSub string
+	}{
+		{name: "empty disables drift symbols"},
+		{name: "single symbol uppercased", value: "btcusdt", want: []string{"BTCUSDT"}, wantHas: true},
+		{name: "multiple symbols", value: "BTCUSDT,ETHUSDT", want: []string{"BTCUSDT", "ETHUSDT"}, wantHas: true},
+		{name: "untrimmed list", value: " BTCUSDT ", wantErrSub: "trimmed"},
+		{name: "item whitespace", value: "BTCUSDT, ETHUSDT", wantErrSub: "whitespace"},
+		{name: "empty item", value: "BTCUSDT,,ETHUSDT", wantErrSub: "empty"},
+		{name: "duplicates", value: "BTCUSDT,btcusdt", wantErrSub: "duplicates"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, has, err := liveOpsPositionDriftSymbolListFromFlag(tt.value)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("symbol list from flag: %v", err)
+			}
+			if has != tt.wantHas || strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Fatalf("symbols mismatch: got %v has=%t want %v has=%t", got, has, tt.want, tt.wantHas)
+			}
+		})
+	}
+}
+
+func TestLiveOpsPositionDriftQueriesFromConfigTableDriven(t *testing.T) {
+	tests := []struct {
+		name               string
+		cfg                *config.Config
+		explicitSymbols    []string
+		hasExplicitSymbols bool
+		want               []domainlive.PositionSnapshotQuery
+		wantErrSub         string
+	}{
+		{
+			name: "uses config symbols by default",
+			cfg:  validLiveOpsConfig(),
+			want: []domainlive.PositionSnapshotQuery{
+				{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"},
+				{Exchange: "bybit", Category: "linear", Symbol: "ETHUSDT"},
+			},
+		},
+		{
+			name:               "explicit symbols override config",
+			cfg:                validLiveOpsConfig(),
+			explicitSymbols:    []string{"SOLUSDT"},
+			hasExplicitSymbols: true,
+			want: []domainlive.PositionSnapshotQuery{
+				{Exchange: "bybit", Category: "linear", Symbol: "SOLUSDT"},
+			},
+		},
+		{name: "nil config", wantErrSub: "config"},
+		{name: "missing symbols", cfg: &config.Config{Exchange: config.ExchangeConfig{Primary: "bybit", Category: "linear"}}, wantErrSub: "symbol"},
+		{name: "missing exchange", cfg: &config.Config{Exchange: config.ExchangeConfig{Category: "linear", Symbols: []string{"BTCUSDT"}}}, wantErrSub: "exchange"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := liveOpsPositionDriftQueriesFromConfig(tt.cfg, tt.explicitSymbols, tt.hasExplicitSymbols)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("queries from config: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("query count mismatch: got %#v want %#v", got, tt.want)
+			}
+			for index := range got {
+				if got[index] != tt.want[index] {
+					t.Fatalf("query[%d] mismatch: got %#v want %#v", index, got[index], tt.want[index])
+				}
+			}
+		})
+	}
+}
+
 func TestRunLiveOpsReportRejectsUnsafeFlagsBeforeSideEffects(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -100,6 +191,10 @@ func TestRunLiveOpsReportRejectsUnsafeFlagsBeforeSideEffects(t *testing.T) {
 		{name: "untrimmed first order review path", args: []string{"-first-order-review-file", " artifacts/live-first-order-review.json "}, wantErrSub: "first-order-review-file"},
 		{name: "bad timeout", args: []string{"-timeout", "0s"}, wantErrSub: "timeout"},
 		{name: "bad first order max age", args: []string{"-max-first-order-review-age", "0s"}, wantErrSub: "max-first-order-review-age"},
+		{name: "bad position drift current age", args: []string{"-position-drift-current-max-age", "0s"}, wantErrSub: "position-drift-current-max-age"},
+		{name: "bad position drift baseline age", args: []string{"-position-drift-baseline-max-age", "0s"}, wantErrSub: "position-drift-baseline-max-age"},
+		{name: "untrimmed position drift symbols", args: []string{"-position-drift-symbols", " BTCUSDT "}, wantErrSub: "position-drift-symbols"},
+		{name: "position drift symbol item whitespace", args: []string{"-position-drift-symbols", "BTCUSDT, ETHUSDT"}, wantErrSub: "position-drift-symbols"},
 	}
 
 	for _, tt := range tests {
@@ -124,6 +219,155 @@ func TestRunLiveOpsReportRejectsUnsafeFlagsBeforeSideEffects(t *testing.T) {
 				t.Fatalf("unsafe flags must stop before side effects: loaded=%t opened=%t", loaded, opened)
 			}
 		})
+	}
+}
+
+func TestRunLiveOpsReportIncludesPositionDriftWhenExplicitlyEnabled(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	query := domainlive.PositionSnapshotQuery{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	artifactPath := filepath.Join(t.TempDir(), "artifacts", "live-ops-report.json")
+	positionReader := &fakeLiveOpsPositionReader{snapshots: map[string]domainlive.PositionSnapshot{
+		liveOpsPositionKey(query): liveOpsPositionSnapshot(t, query, now.Add(-time.Second), false),
+	}}
+	positionHistory := &fakeLiveOpsPositionHistoryReader{snapshots: map[string]domainlive.PositionSnapshot{
+		liveOpsPositionKey(query): liveOpsPositionSnapshot(t, query, now.Add(-time.Minute), false),
+	}}
+	var output bytes.Buffer
+	err = runLiveOpsReport(context.Background(), []string{
+		"-symbol", "BTCUSDT",
+		"-position-drift",
+		"-position-drift-symbols", "BTCUSDT",
+		"-artifact-path", artifactPath,
+	}, liveOpsReportDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			return validLiveOpsConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newPendingReader: func(*sql.DB) domainlive.PendingLiveDecisionReader {
+			return &fakeLiveOpsPendingReader{candidates: []domainlive.PendingLiveDecision{
+				liveOpsPendingDecision("risk_decision_live_ops_cli_0001", "BTCUSDT", now.Add(-2*time.Minute)),
+			}}
+		},
+		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
+			return &fakeLiveOpsAuditReader{runs: []domainlive.LiveLoopRunAudit{
+				liveOpsAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
+			}}
+		},
+		newKillSwitch: func(*sql.DB) domainrisk.KillSwitchRepository {
+			return &fakeLiveOpsKillSwitchRepository{}
+		},
+		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
+			return positionReader, nil
+		},
+		newPositionHistory: func(*sql.DB) domainlive.PositionSnapshotHistoryReader {
+			return positionHistory
+		},
+		now: func() time.Time {
+			return now
+		},
+		output: &output,
+	})
+	if err != nil {
+		t.Fatalf("run live ops report with drift: %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+	if positionReader.calls != 1 || positionHistory.calls != 1 ||
+		positionReader.queries[0] != query || positionHistory.queries[0] != query {
+		t.Fatalf("position drift query mismatch: reader=%#v history=%#v", positionReader.queries, positionHistory.queries)
+	}
+	logs := output.String()
+	for _, want := range []string{
+		`"position_drift":true`,
+		`"position_drift_status":"CLEAR"`,
+		`"msg":"live ops position drift comparison"`,
+		`"symbol":"BTCUSDT"`,
+		`"status":"CLEAR"`,
+		`"name":"position_exposure_drift"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
+		}
+	}
+	artifact := readLiveOpsReportArtifact(t, artifactPath)
+	if artifact.PositionDrift == nil ||
+		artifact.PositionDrift.Status != domainlive.LiveOpsStatusClear ||
+		len(artifact.PositionDrift.Comparisons) != 1 ||
+		artifact.PositionDrift.Comparisons[0].Symbol != "BTCUSDT" {
+		t.Fatalf("position drift artifact mismatch: %#v", artifact.PositionDrift)
+	}
+}
+
+func TestRunLiveOpsReportCanFailOnBlockedPositionDrift(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	query := domainlive.PositionSnapshotQuery{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	positionReader := &fakeLiveOpsPositionReader{snapshots: map[string]domainlive.PositionSnapshot{
+		liveOpsPositionKey(query): liveOpsPositionSnapshot(t, query, now.Add(-time.Second), true),
+	}}
+	positionHistory := &fakeLiveOpsPositionHistoryReader{snapshots: map[string]domainlive.PositionSnapshot{
+		liveOpsPositionKey(query): liveOpsPositionSnapshot(t, query, now.Add(-time.Minute), false),
+	}}
+	var output bytes.Buffer
+	err = runLiveOpsReport(context.Background(), []string{
+		"-symbol", "BTCUSDT",
+		"-position-drift-symbols", "BTCUSDT",
+		"-fail-on-blocked",
+	}, liveOpsReportDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			return validLiveOpsConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newPendingReader: func(*sql.DB) domainlive.PendingLiveDecisionReader {
+			return &fakeLiveOpsPendingReader{candidates: []domainlive.PendingLiveDecision{
+				liveOpsPendingDecision("risk_decision_live_ops_cli_0001", "BTCUSDT", now.Add(-2*time.Minute)),
+			}}
+		},
+		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
+			return &fakeLiveOpsAuditReader{runs: []domainlive.LiveLoopRunAudit{
+				liveOpsAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
+			}}
+		},
+		newKillSwitch: func(*sql.DB) domainrisk.KillSwitchRepository {
+			return &fakeLiveOpsKillSwitchRepository{}
+		},
+		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
+			return positionReader, nil
+		},
+		newPositionHistory: func(*sql.DB) domainlive.PositionSnapshotHistoryReader {
+			return positionHistory
+		},
+		now: func() time.Time {
+			return now
+		},
+		output: &output,
+	})
+	if err == nil || !strings.Contains(err.Error(), "position_exposure_drift") {
+		t.Fatalf("expected drift blocked error, got %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+	if !strings.Contains(output.String(), `"position_drift_status":"BLOCKED"`) ||
+		!strings.Contains(output.String(), `"name":"position_exposure_drift"`) ||
+		!strings.Contains(output.String(), `"status":"FAIL"`) {
+		t.Fatalf("expected blocked drift logs, got\n%s", output.String())
 	}
 }
 
@@ -390,9 +634,67 @@ func (r *fakeLiveOpsKillSwitchRepository) ListKillSwitchEvents(context.Context, 
 	return nil, fmt.Errorf("not implemented")
 }
 
+type fakeLiveOpsPositionReader struct {
+	snapshots map[string]domainlive.PositionSnapshot
+	queries   []domainlive.PositionSnapshotQuery
+	calls     int
+	err       error
+}
+
+func (r *fakeLiveOpsPositionReader) GetPositionSnapshot(
+	_ context.Context,
+	query domainlive.PositionSnapshotQuery,
+) (domainlive.PositionSnapshot, error) {
+	r.calls++
+	r.queries = append(r.queries, query)
+	if r.err != nil {
+		return domainlive.PositionSnapshot{}, r.err
+	}
+	snapshot, ok := r.snapshots[liveOpsPositionKey(query)]
+	if !ok {
+		return domainlive.PositionSnapshot{}, fmt.Errorf("missing current position fixture")
+	}
+	return snapshot, nil
+}
+
+type fakeLiveOpsPositionHistoryReader struct {
+	snapshots map[string]domainlive.PositionSnapshot
+	missing   map[string]bool
+	queries   []domainlive.PositionSnapshotQuery
+	calls     int
+	err       error
+}
+
+func (r *fakeLiveOpsPositionHistoryReader) GetLatestPositionSnapshot(
+	_ context.Context,
+	query domainlive.PositionSnapshotQuery,
+) (domainlive.PositionSnapshot, bool, error) {
+	r.calls++
+	r.queries = append(r.queries, query)
+	if r.err != nil {
+		return domainlive.PositionSnapshot{}, false, r.err
+	}
+	key := liveOpsPositionKey(query)
+	if r.missing[key] {
+		return domainlive.PositionSnapshot{}, false, nil
+	}
+	snapshot, ok := r.snapshots[key]
+	return snapshot, ok, nil
+}
+
 func validLiveOpsConfig() *config.Config {
 	return &config.Config{
 		App: config.AppConfig{LogLevel: "info"},
+		Exchange: config.ExchangeConfig{
+			Primary:     "bybit",
+			RestBaseURL: "https://api-testnet.bybit.com",
+			Category:    "linear",
+			Symbols:     []string{"BTCUSDT", "ETHUSDT"},
+		},
+		Live: config.LiveConfig{
+			APIKeyEnv:    "BYBIT_API_KEY",
+			APISecretEnv: "BYBIT_API_SECRET",
+		},
 	}
 }
 
@@ -535,4 +837,40 @@ func liveOpsAuditRun(startedAt time.Time, status domainlive.LiveLoopRunStatus) d
 		run.FinishedAt = startedAt.Add(time.Second)
 	}
 	return run
+}
+
+func liveOpsPositionSnapshot(
+	t *testing.T,
+	query domainlive.PositionSnapshotQuery,
+	observedAt time.Time,
+	open bool,
+) domainlive.PositionSnapshot {
+	t.Helper()
+
+	input := domainlive.PositionSnapshotInput{
+		Exchange:   query.Exchange,
+		Category:   query.Category,
+		Symbol:     query.Symbol,
+		ObservedAt: observedAt,
+	}
+	if open {
+		input.Side = domainlive.OrderSideLong
+		input.Size = decimal.RequireFromString("0.005")
+		input.AveragePrice = decimal.RequireFromString("100000")
+		input.PositionValue = decimal.RequireFromString("500")
+		input.MarkPrice = decimal.RequireFromString("100050")
+		input.Leverage = decimal.RequireFromString("1")
+		input.ExchangeStatus = domainlive.ExchangePositionStatusNormal
+		input.ExchangeCreatedAt = observedAt.Add(-time.Minute)
+		input.ExchangeUpdatedAt = observedAt
+	}
+	snapshot, err := domainlive.NewPositionSnapshot(input)
+	if err != nil {
+		t.Fatalf("new position snapshot: %v", err)
+	}
+	return snapshot
+}
+
+func liveOpsPositionKey(query domainlive.PositionSnapshotQuery) string {
+	return query.Exchange + "/" + query.Category + "/" + query.Symbol
 }

@@ -178,6 +178,9 @@ func TestBuildLiveLoopAuditArtifactRejectsInconsistentReport(t *testing.T) {
 func TestBuildLiveOpsReportArtifactMapsAndValidatesReport(t *testing.T) {
 	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 	firstOrderReview := validAppLiveOpsFirstOrderReviewArtifact(t, now.Add(-time.Minute))
+	driftQuery := domainlive.PositionSnapshotQuery{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"}
+	driftCurrent := validLiveStartupFlatPositionSnapshot(t, driftQuery, now.Add(-time.Second))
+	driftBaseline := validLiveStartupFlatPositionSnapshot(t, driftQuery, now.Add(-time.Minute))
 	service := applive.NewService(
 		applive.WithClock(clock.FixedClock{Time: now}),
 		applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
@@ -187,11 +190,18 @@ func TestBuildLiveOpsReportArtifactMapsAndValidatesReport(t *testing.T) {
 		applive.WithLiveLoopAuditReader(&fakeLiveLoopAuditReader{runs: []domainlive.LiveLoopRunAudit{
 			liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
 		}}),
+		applive.WithPositionSnapshotReader(&fakeLivePositionDriftSnapshotReader{snapshots: map[string]domainlive.PositionSnapshot{
+			appPositionDriftKey(driftQuery): driftCurrent,
+		}}),
+		applive.WithPositionSnapshotHistoryReader(&fakeLivePositionDriftHistoryReader{snapshots: map[string]domainlive.PositionSnapshot{
+			appPositionDriftKey(driftQuery): driftBaseline,
+		}}),
 	)
 	report, err := service.BuildLiveOpsReport(context.Background(), applive.LiveOpsReportRequest{
 		PendingSymbol:               "BTCUSDT",
 		HasFirstOrderReviewArtifact: true,
 		FirstOrderReviewArtifact:    firstOrderReview,
+		PositionDriftQueries:        []domainlive.PositionSnapshotQuery{driftQuery},
 	})
 	if err != nil {
 		t.Fatalf("build ops report: %v", err)
@@ -226,6 +236,15 @@ func TestBuildLiveOpsReportArtifactMapsAndValidatesReport(t *testing.T) {
 		!artifact.FirstOrderReview.Ready ||
 		artifact.FirstOrderReview.LatestOrderStatus != domainlive.ExchangeOrderStatusFilled {
 		t.Fatalf("first-order metadata mismatch: %#v", artifact.FirstOrderReview)
+	}
+	if artifact.PositionDrift == nil ||
+		artifact.PositionDrift.Status != domainlive.LiveOpsStatusClear ||
+		artifact.PositionDrift.Summary.Total != 4 ||
+		len(artifact.PositionDrift.Comparisons) != 1 ||
+		artifact.PositionDrift.Comparisons[0].Symbol != "BTCUSDT" ||
+		!artifact.PositionDrift.Comparisons[0].HasBaseline ||
+		artifact.PositionDrift.Comparisons[0].Baseline == nil {
+		t.Fatalf("position drift metadata mismatch: %#v", artifact.PositionDrift)
 	}
 }
 
@@ -270,6 +289,10 @@ func TestBuildLiveOpsReportArtifactRejectsInconsistentReport(t *testing.T) {
 			r.Checks = append(r.Checks, domainlive.NewReadinessCheck("first_order_review", domainlive.ReadinessCheckStatusPass, "first-order review passed"))
 			r.Summary = domainlive.SummarizeReadinessChecks(r.Checks)
 		}, wantErrSub: "first_order_review.path"},
+		{name: "position drift metadata requires drift checks", mutate: func(r *applive.LiveOpsReport) {
+			r.HasPositionDrift = true
+			r.PositionDrift = applive.LivePositionDriftReport{Status: domainlive.LiveOpsStatusClear}
+		}, wantErrSub: "position_drift.checks"},
 	}
 
 	for _, tt := range tests {

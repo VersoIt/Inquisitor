@@ -139,6 +139,70 @@ func TestValidateLiveOpsReportArtifactFreshnessTableDriven(t *testing.T) {
 	}
 }
 
+func TestValidateLiveOpsReportArtifactPositionDriftTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	valid := validLiveOpsReportArtifactWithPositionDrift(now)
+
+	tests := []struct {
+		name       string
+		mutate     func(*domainlive.LiveOpsReportArtifact)
+		wantErrSub string
+	}{
+		{name: "valid position drift metadata"},
+		{name: "position drift summary mismatch", mutate: func(a *domainlive.LiveOpsReportArtifact) {
+			a.PositionDrift.Summary.Passed--
+		}, wantErrSub: "position_drift.summary"},
+		{name: "position drift status mismatch", mutate: func(a *domainlive.LiveOpsReportArtifact) {
+			a.PositionDrift.Status = domainlive.LiveOpsStatusBlocked
+		}, wantErrSub: "position_drift.status"},
+		{name: "position drift failed checks mismatch", mutate: func(a *domainlive.LiveOpsReportArtifact) {
+			a.PositionDrift.Checks[0].Status = domainlive.ReadinessCheckStatusFail
+			a.PositionDrift.Checks[0].Details = "current snapshot stale"
+			a.PositionDrift.Status = domainlive.LiveOpsStatusBlocked
+			a.PositionDrift.Summary.Passed--
+			a.PositionDrift.Summary.Failed++
+		}, wantErrSub: "position_drift.failed_checks"},
+		{name: "position drift check missing from top level", mutate: func(a *domainlive.LiveOpsReportArtifact) {
+			a.Checks = a.Checks[:len(a.Checks)-1]
+			a.Summary.Total--
+			a.Summary.Passed--
+		}, wantErrSub: "position_drift checks"},
+		{name: "position drift baseline required", mutate: func(a *domainlive.LiveOpsReportArtifact) {
+			a.PositionDrift.Comparisons[0].Baseline = nil
+		}, wantErrSub: "baseline is required"},
+		{name: "position drift baseline omitted when absent", mutate: func(a *domainlive.LiveOpsReportArtifact) {
+			a.PositionDrift.Comparisons[0].HasBaseline = false
+		}, wantErrSub: "baseline must be omitted"},
+		{name: "position drift current size decimal", mutate: func(a *domainlive.LiveOpsReportArtifact) {
+			a.PositionDrift.Comparisons[0].Current.Size = "not-a-decimal"
+		}, wantErrSub: "size must be a decimal"},
+		{name: "position drift open snapshot requires side", mutate: func(a *domainlive.LiveOpsReportArtifact) {
+			a.PositionDrift.Comparisons[0].Current.Open = true
+			a.PositionDrift.Comparisons[0].Current.Size = "0.005"
+			a.PositionDrift.Comparisons[0].Current.Side = ""
+			a.PositionDrift.Comparisons[0].Current.ExchangeStatus = domainlive.ExchangePositionStatusNormal
+			createdAt := now.Add(-time.Hour)
+			a.PositionDrift.Comparisons[0].Current.ExchangeCreatedAt = &createdAt
+		}, wantErrSub: "side"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			artifact := mutateLiveOpsReportArtifact(valid, tt.mutate)
+			err := domainlive.ValidateLiveOpsReportArtifact(artifact)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate live ops artifact with drift: %v", err)
+			}
+		})
+	}
+}
+
 func validLiveOpsReportArtifact(createdAt time.Time) domainlive.LiveOpsReportArtifact {
 	oldestAt := createdAt.Add(-2 * time.Minute)
 	newestAt := createdAt.Add(-time.Minute)
@@ -194,12 +258,67 @@ func validLiveOpsReportArtifact(createdAt time.Time) domainlive.LiveOpsReportArt
 	}
 }
 
+func validLiveOpsReportArtifactWithPositionDrift(createdAt time.Time) domainlive.LiveOpsReportArtifact {
+	artifact := validLiveOpsReportArtifact(createdAt)
+	driftChecks := []domainlive.LiveOpsReportArtifactCheck{
+		{Name: "current_position_snapshot", Status: domainlive.ReadinessCheckStatusPass, Details: "BTCUSDT current exchange position snapshot is fresh"},
+		{Name: "db_position_baseline", Status: domainlive.ReadinessCheckStatusPass, Details: "BTCUSDT DB position baseline is fresh"},
+		{Name: "position_exchange_status", Status: domainlive.ReadinessCheckStatusPass, Details: "BTCUSDT exchange position status is normal"},
+		{Name: "position_exposure_drift", Status: domainlive.ReadinessCheckStatusPass, Details: "BTCUSDT current exchange exposure matches DB baseline"},
+	}
+	artifact.Checks = append(artifact.Checks, driftChecks...)
+	artifact.Summary.Total += len(driftChecks)
+	artifact.Summary.Passed += len(driftChecks)
+	artifact.PositionDrift = &domainlive.LiveOpsReportArtifactPositionDrift{
+		Status:  domainlive.LiveOpsStatusClear,
+		Summary: domainlive.LiveOpsReportArtifactSummary{Total: 4, Passed: 4},
+		Checks:  append([]domainlive.LiveOpsReportArtifactCheck(nil), driftChecks...),
+		Comparisons: []domainlive.LiveOpsReportArtifactPositionDriftItem{{
+			Exchange:    "bybit",
+			Category:    "linear",
+			Symbol:      "BTCUSDT",
+			Status:      domainlive.LiveOpsStatusClear,
+			HasBaseline: true,
+			Current: domainlive.LiveOpsReportArtifactPositionSnapshot{
+				Open:          false,
+				Size:          "0",
+				AveragePrice:  "0",
+				Leverage:      "0",
+				PositionIndex: 0,
+				ObservedAt:    createdAt.Add(-time.Second),
+			},
+			Baseline: &domainlive.LiveOpsReportArtifactPositionSnapshot{
+				Open:          false,
+				Size:          "0",
+				AveragePrice:  "0",
+				Leverage:      "0",
+				PositionIndex: 0,
+				ObservedAt:    createdAt.Add(-time.Minute),
+			},
+		}},
+	}
+	return artifact
+}
+
 func mutateLiveOpsReportArtifact(
 	artifact domainlive.LiveOpsReportArtifact,
 	mutate func(*domainlive.LiveOpsReportArtifact),
 ) domainlive.LiveOpsReportArtifact {
 	artifact.Checks = append([]domainlive.LiveOpsReportArtifactCheck(nil), artifact.Checks...)
 	artifact.FailedChecks = append([]string(nil), artifact.FailedChecks...)
+	if artifact.PositionDrift != nil {
+		drift := *artifact.PositionDrift
+		drift.FailedChecks = append([]string(nil), drift.FailedChecks...)
+		drift.Checks = append([]domainlive.LiveOpsReportArtifactCheck(nil), drift.Checks...)
+		drift.Comparisons = append([]domainlive.LiveOpsReportArtifactPositionDriftItem(nil), drift.Comparisons...)
+		for index := range drift.Comparisons {
+			if drift.Comparisons[index].Baseline != nil {
+				baseline := *drift.Comparisons[index].Baseline
+				drift.Comparisons[index].Baseline = &baseline
+			}
+		}
+		artifact.PositionDrift = &drift
+	}
 	if artifact.FirstOrderReview != nil {
 		review := *artifact.FirstOrderReview
 		review.FailedChecks = append([]string(nil), review.FailedChecks...)

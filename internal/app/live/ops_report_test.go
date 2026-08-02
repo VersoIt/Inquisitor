@@ -139,6 +139,47 @@ func TestServiceBuildLiveOpsReportTableDriven(t *testing.T) {
 	}
 }
 
+func TestServiceBuildLiveOpsReportIncludesOptionalPositionDrift(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	query := domainlive.PositionSnapshotQuery{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"}
+	current := validLiveStartupFlatPositionSnapshot(t, query, now.Add(-time.Second))
+	baseline := validLiveStartupFlatPositionSnapshot(t, query, now.Add(-time.Minute))
+	service := applive.NewService(
+		applive.WithClock(clock.FixedClock{Time: now}),
+		applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
+		applive.WithPendingLiveDecisionReader(&fakePendingLiveDecisionReader{candidates: []domainlive.PendingLiveDecision{
+			pendingLiveDecision("risk_decision_live_ops_0001", "BTCUSDT", now.Add(-2*time.Minute)),
+		}}),
+		applive.WithLiveLoopAuditReader(&fakeLiveLoopAuditReader{runs: []domainlive.LiveLoopRunAudit{
+			liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
+		}}),
+		applive.WithPositionSnapshotReader(&fakeLivePositionDriftSnapshotReader{snapshots: map[string]domainlive.PositionSnapshot{
+			appPositionDriftKey(query): current,
+		}}),
+		applive.WithPositionSnapshotHistoryReader(&fakeLivePositionDriftHistoryReader{snapshots: map[string]domainlive.PositionSnapshot{
+			appPositionDriftKey(query): baseline,
+		}}),
+	)
+
+	got, err := service.BuildLiveOpsReport(context.Background(), applive.LiveOpsReportRequest{
+		PendingSymbol:        "BTCUSDT",
+		PositionDriftQueries: []domainlive.PositionSnapshotQuery{query},
+	})
+	if err != nil {
+		t.Fatalf("build live ops report: %v", err)
+	}
+	if got.Status != domainlive.LiveOpsStatusClear ||
+		!got.HasPositionDrift ||
+		got.PositionDrift.Status != domainlive.LiveOpsStatusClear ||
+		len(got.PositionDrift.Comparisons) != 1 ||
+		!appLiveOpsHasCheck(got.Checks, "position_exposure_drift") {
+		t.Fatalf("position drift report mismatch: %#v", got)
+	}
+	if got.Summary.Total != len(got.Checks) || got.Summary.Total != 7 {
+		t.Fatalf("summary should include base and drift checks: %#v checks=%#v", got.Summary, got.Checks)
+	}
+}
+
 func TestServiceBuildLiveOpsReportRejectsUnsafeInputsTableDriven(t *testing.T) {
 	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 
@@ -200,6 +241,25 @@ func TestServiceBuildLiveOpsReportRejectsUnsafeInputsTableDriven(t *testing.T) {
 				}),
 			},
 			wantErrSub: "",
+		},
+		{
+			name: "position drift requires extra dependencies only when requested",
+			service: applive.NewService(
+				applive.WithClock(clock.FixedClock{Time: now}),
+				applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
+				applive.WithPendingLiveDecisionReader(&fakePendingLiveDecisionReader{candidates: []domainlive.PendingLiveDecision{
+					pendingLiveDecision("risk_decision_live_ops_0001", "BTCUSDT", now),
+				}}),
+				applive.WithLiveLoopAuditReader(&fakeLiveLoopAuditReader{runs: []domainlive.LiveLoopRunAudit{
+					liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
+				}}),
+			),
+			req: applive.LiveOpsReportRequest{PositionDriftQueries: []domainlive.PositionSnapshotQuery{{
+				Exchange: "bybit",
+				Category: "linear",
+				Symbol:   "BTCUSDT",
+			}}},
+			wantErrSub: "position snapshot reader",
 		},
 	}
 

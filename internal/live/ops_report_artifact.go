@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 const LiveOpsReportArtifactSchemaVersion = "inquisitor.live_ops_report.v1"
@@ -22,6 +24,7 @@ type LiveOpsReportArtifact struct {
 	Pending          LiveOpsReportArtifactPending           `json:"pending"`
 	Audit            LiveOpsReportArtifactAudit             `json:"audit"`
 	KillSwitch       LiveOpsReportArtifactKillSwitch        `json:"kill_switch"`
+	PositionDrift    *LiveOpsReportArtifactPositionDrift    `json:"position_drift,omitempty"`
 	FirstOrderReview *LiveOpsReportArtifactFirstOrderReview `json:"first_order_review,omitempty"`
 }
 
@@ -65,6 +68,37 @@ type LiveOpsReportArtifactKillSwitch struct {
 	Reason    string     `json:"reason,omitempty"`
 	Source    string     `json:"source,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+type LiveOpsReportArtifactPositionDrift struct {
+	Status       LiveOpsStatus                            `json:"status"`
+	Summary      LiveOpsReportArtifactSummary             `json:"summary"`
+	FailedChecks []string                                 `json:"failed_checks,omitempty"`
+	Checks       []LiveOpsReportArtifactCheck             `json:"checks"`
+	Comparisons  []LiveOpsReportArtifactPositionDriftItem `json:"comparisons"`
+}
+
+type LiveOpsReportArtifactPositionDriftItem struct {
+	Exchange    string                                 `json:"exchange"`
+	Category    string                                 `json:"category"`
+	Symbol      string                                 `json:"symbol"`
+	Status      LiveOpsStatus                          `json:"status"`
+	HasBaseline bool                                   `json:"has_baseline"`
+	Current     LiveOpsReportArtifactPositionSnapshot  `json:"current"`
+	Baseline    *LiveOpsReportArtifactPositionSnapshot `json:"baseline,omitempty"`
+}
+
+type LiveOpsReportArtifactPositionSnapshot struct {
+	Open               bool                   `json:"open"`
+	Side               OrderSide              `json:"side,omitempty"`
+	Size               string                 `json:"size"`
+	AveragePrice       string                 `json:"average_price"`
+	Leverage           string                 `json:"leverage"`
+	ExchangeStatus     ExchangePositionStatus `json:"exchange_status,omitempty"`
+	PositionIndex      int                    `json:"position_index"`
+	ExchangeReduceOnly bool                   `json:"exchange_reduce_only"`
+	ExchangeCreatedAt  *time.Time             `json:"exchange_created_at,omitempty"`
+	ObservedAt         time.Time              `json:"observed_at"`
 }
 
 type LiveOpsReportArtifactFirstOrderReview struct {
@@ -143,6 +177,15 @@ func ValidateLiveOpsReportArtifact(artifact LiveOpsReportArtifact) error {
 	problems = append(problems, validateLiveOpsReportArtifactPendingProblems(artifact.Pending)...)
 	problems = append(problems, validateLiveOpsReportArtifactAuditProblems(artifact.Audit)...)
 	problems = append(problems, validateLiveOpsReportArtifactKillSwitchProblems(artifact.KillSwitch)...)
+	if artifact.PositionDrift != nil {
+		problems = append(problems, validateLiveOpsReportArtifactPositionDriftProblems(*artifact.PositionDrift)...)
+		for _, check := range artifact.PositionDrift.Checks {
+			if !liveOpsReportArtifactContainsCheck(artifact.Checks, check) {
+				problems = append(problems, "position_drift checks must be included in top-level checks")
+				break
+			}
+		}
+	}
 	if artifact.FirstOrderReview != nil {
 		problems = append(problems, validateLiveOpsReportArtifactFirstOrderReviewProblems(*artifact.FirstOrderReview)...)
 		if !liveOpsReportArtifactHasCheck(artifact.Checks, "first_order_review") {
@@ -279,6 +322,151 @@ func validateLiveOpsReportArtifactKillSwitchProblems(killSwitch LiveOpsReportArt
 	return problems
 }
 
+func validateLiveOpsReportArtifactPositionDriftProblems(drift LiveOpsReportArtifactPositionDrift) []string {
+	var problems []string
+	if err := ValidateLiveOpsStatus(drift.Status); err != nil {
+		problems = append(problems, "position_drift."+err.Error())
+	}
+	checks := make([]ReadinessCheck, 0, len(drift.Checks))
+	var failedChecks []string
+	for index, check := range drift.Checks {
+		domainCheck := ReadinessCheck{
+			Name:    check.Name,
+			Status:  check.Status,
+			Details: check.Details,
+		}
+		if err := ValidateReadinessCheck(domainCheck); err != nil {
+			problems = append(problems, fmt.Sprintf("position_drift.checks[%d]: %v", index, err))
+			continue
+		}
+		checks = append(checks, domainCheck)
+		if check.Status == ReadinessCheckStatusFail {
+			failedChecks = append(failedChecks, check.Name)
+		}
+	}
+	if len(checks) == 0 {
+		problems = append(problems, "position_drift.checks are required")
+	} else if len(checks) == len(drift.Checks) {
+		summary := SummarizeReadinessChecks(checks)
+		if summary.Total != drift.Summary.Total ||
+			summary.Passed != drift.Summary.Passed ||
+			summary.Warned != drift.Summary.Warned ||
+			summary.Failed != drift.Summary.Failed {
+			problems = append(problems, "position_drift.summary must match checks")
+		}
+		status, err := SummarizeLiveOpsStatus(checks)
+		if err != nil {
+			problems = append(problems, "position_drift."+err.Error())
+		} else if status != drift.Status {
+			problems = append(problems, "position_drift.status must match checks")
+		}
+		if !sameStringSet(failedChecks, drift.FailedChecks) {
+			problems = append(problems, "position_drift.failed_checks must match failing checks")
+		}
+	}
+	if len(drift.Comparisons) == 0 {
+		problems = append(problems, "position_drift.comparisons are required")
+	}
+	for index, comparison := range drift.Comparisons {
+		problems = append(problems, validateLiveOpsReportArtifactPositionDriftItemProblems(index, comparison)...)
+	}
+	return problems
+}
+
+func validateLiveOpsReportArtifactPositionDriftItemProblems(index int, comparison LiveOpsReportArtifactPositionDriftItem) []string {
+	prefix := fmt.Sprintf("position_drift.comparisons[%d]", index)
+	var problems []string
+	query := PositionSnapshotQuery{
+		Exchange: comparison.Exchange,
+		Category: comparison.Category,
+		Symbol:   comparison.Symbol,
+	}
+	if err := ValidatePositionSnapshotQuery(query); err != nil {
+		problems = append(problems, prefix+": "+err.Error())
+	}
+	if err := ValidateLiveOpsStatus(comparison.Status); err != nil {
+		problems = append(problems, prefix+"."+err.Error())
+	}
+	problems = append(problems, validateLiveOpsReportArtifactPositionSnapshotProblems(prefix+".current", comparison.Current)...)
+	if comparison.HasBaseline {
+		if comparison.Baseline == nil {
+			problems = append(problems, prefix+".baseline is required when has_baseline is true")
+		} else {
+			problems = append(problems, validateLiveOpsReportArtifactPositionSnapshotProblems(prefix+".baseline", *comparison.Baseline)...)
+		}
+	} else if comparison.Baseline != nil {
+		problems = append(problems, prefix+".baseline must be omitted when has_baseline is false")
+	}
+	return problems
+}
+
+func validateLiveOpsReportArtifactPositionSnapshotProblems(prefix string, snapshot LiveOpsReportArtifactPositionSnapshot) []string {
+	var problems []string
+	size, sizeOK := validateLiveOpsReportArtifactDecimal(prefix, "size", snapshot.Size, false, &problems)
+	averagePrice, averagePriceOK := validateLiveOpsReportArtifactDecimal(prefix, "average_price", snapshot.AveragePrice, false, &problems)
+	validateLiveOpsReportArtifactDecimal(prefix, "leverage", snapshot.Leverage, false, &problems)
+	if sizeOK && snapshot.Open != size.IsPositive() {
+		problems = append(problems, prefix+".open must match positive size")
+	}
+	if snapshot.Open {
+		if !KnownOrderSide(snapshot.Side) {
+			problems = append(problems, prefix+".side must be LONG or SHORT for open position")
+		}
+		if !KnownExchangePositionStatus(snapshot.ExchangeStatus) {
+			problems = append(problems, prefix+".exchange_status is unknown")
+		}
+		if averagePriceOK && averagePrice.LessThanOrEqual(decimal.Zero) {
+			problems = append(problems, prefix+".average_price must be positive for open position")
+		}
+		if snapshot.ExchangeCreatedAt == nil || snapshot.ExchangeCreatedAt.IsZero() {
+			problems = append(problems, prefix+".exchange_created_at is required for open position")
+		}
+	} else {
+		if strings.TrimSpace(string(snapshot.Side)) != "" {
+			problems = append(problems, prefix+".side must be empty for flat position")
+		}
+		if snapshot.ExchangeStatus != "" && !KnownExchangePositionStatus(snapshot.ExchangeStatus) {
+			problems = append(problems, prefix+".exchange_status is unknown")
+		}
+	}
+	if snapshot.PositionIndex < 0 {
+		problems = append(problems, prefix+".position_index must be non-negative")
+	}
+	if snapshot.ObservedAt.IsZero() {
+		problems = append(problems, prefix+".observed_at is required")
+	}
+	return problems
+}
+
+func validateLiveOpsReportArtifactDecimal(
+	prefix string,
+	field string,
+	value string,
+	allowNegative bool,
+	problems *[]string,
+) (decimal.Decimal, bool) {
+	trimmed := strings.TrimSpace(value)
+	name := prefix + "." + field
+	if trimmed == "" {
+		*problems = append(*problems, name+" is required")
+		return decimal.Zero, false
+	}
+	if value != trimmed {
+		*problems = append(*problems, name+" must be trimmed")
+		return decimal.Zero, false
+	}
+	parsed, err := decimal.NewFromString(trimmed)
+	if err != nil {
+		*problems = append(*problems, name+" must be a decimal")
+		return decimal.Zero, false
+	}
+	if !allowNegative && parsed.IsNegative() {
+		*problems = append(*problems, name+" must be non-negative")
+		return decimal.Zero, false
+	}
+	return parsed, true
+}
+
 func validateLiveOpsReportArtifactFirstOrderReviewProblems(review LiveOpsReportArtifactFirstOrderReview) []string {
 	var problems []string
 	required := map[string]string{
@@ -365,6 +553,15 @@ func validateLiveOpsReportArtifactFirstOrderSummaryProblems(review LiveOpsReport
 func liveOpsReportArtifactHasCheck(checks []LiveOpsReportArtifactCheck, name string) bool {
 	for _, check := range checks {
 		if check.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func liveOpsReportArtifactContainsCheck(checks []LiveOpsReportArtifactCheck, expected LiveOpsReportArtifactCheck) bool {
+	for _, check := range checks {
+		if check.Name == expected.Name && check.Status == expected.Status && check.Details == expected.Details {
 			return true
 		}
 	}

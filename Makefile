@@ -101,6 +101,10 @@ LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT ?=
 LIVE_OPS_FIRST_ORDER_REVIEW_MAX_AGE ?= 24h
 LIVE_OPS_REQUIRE_FIRST_ORDER_REVIEW ?=
 LIVE_OPS_FAIL_ON_BLOCKED ?=
+LIVE_OPS_POSITION_DRIFT ?=
+LIVE_OPS_POSITION_DRIFT_SYMBOLS ?=
+LIVE_OPS_POSITION_DRIFT_CURRENT_MAX_AGE ?= 5s
+LIVE_OPS_POSITION_DRIFT_BASELINE_MAX_AGE ?= 10m
 LIVE_DRIFT_SYMBOLS ?=
 LIVE_DRIFT_CURRENT_MAX_AGE ?= 5s
 LIVE_DRIFT_BASELINE_MAX_AGE ?= 10m
@@ -240,7 +244,7 @@ live-readiness:
 	$(GO) run ./cmd/live-readiness -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -pending-limit $(LIVE_READINESS_PENDING_LIMIT) -audit-limit $(LIVE_READINESS_AUDIT_LIMIT) -require-pending=$(if $(LIVE_READINESS_REQUIRE_PENDING),true,false) $(if $(LIVE_READINESS_SYMBOL),-symbol $(LIVE_READINESS_SYMBOL),) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE) -max-plan-age $(LIVE_PLAN_MAX_AGE),) $(if $(LIVE_READINESS_ARTIFACT),-artifact-path $(LIVE_READINESS_ARTIFACT),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
 
 live-ops-report:
-	$(GO) run ./cmd/live-ops-report -config $(CONFIG) -pending-limit $(LIVE_OPS_PENDING_LIMIT) -audit-limit $(LIVE_OPS_AUDIT_LIMIT) $(if $(LIVE_OPS_SYMBOL),-symbol $(LIVE_OPS_SYMBOL),) $(if $(LIVE_OPS_ARTIFACT),-artifact-path $(LIVE_OPS_ARTIFACT),) $(if $(LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT),-first-order-review-file $(LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT) -max-first-order-review-age $(LIVE_OPS_FIRST_ORDER_REVIEW_MAX_AGE),) $(if $(LIVE_OPS_REQUIRE_FIRST_ORDER_REVIEW),-require-first-order-review,) $(if $(LIVE_OPS_FAIL_ON_BLOCKED),-fail-on-blocked,)
+	$(GO) run ./cmd/live-ops-report -config $(CONFIG) -pending-limit $(LIVE_OPS_PENDING_LIMIT) -audit-limit $(LIVE_OPS_AUDIT_LIMIT) $(if $(LIVE_OPS_SYMBOL),-symbol $(LIVE_OPS_SYMBOL),) $(if $(LIVE_OPS_ARTIFACT),-artifact-path $(LIVE_OPS_ARTIFACT),) $(if $(LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT),-first-order-review-file $(LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT) -max-first-order-review-age $(LIVE_OPS_FIRST_ORDER_REVIEW_MAX_AGE),) $(if $(LIVE_OPS_REQUIRE_FIRST_ORDER_REVIEW),-require-first-order-review,) $(if $(LIVE_OPS_POSITION_DRIFT),-position-drift -position-drift-current-max-age $(LIVE_OPS_POSITION_DRIFT_CURRENT_MAX_AGE) -position-drift-baseline-max-age $(LIVE_OPS_POSITION_DRIFT_BASELINE_MAX_AGE),) $(if $(LIVE_OPS_POSITION_DRIFT_SYMBOLS),-position-drift-symbols $(LIVE_OPS_POSITION_DRIFT_SYMBOLS),) $(if $(LIVE_OPS_FAIL_ON_BLOCKED),-fail-on-blocked,)
 
 live-position-drift:
 	$(GO) run ./cmd/live-position-drift -config $(CONFIG) -current-max-age $(LIVE_DRIFT_CURRENT_MAX_AGE) -baseline-max-age $(LIVE_DRIFT_BASELINE_MAX_AGE) $(if $(LIVE_DRIFT_SYMBOLS),-symbols $(LIVE_DRIFT_SYMBOLS),) $(if $(LIVE_DRIFT_FAIL_ON_BLOCKED),-fail-on-blocked,)

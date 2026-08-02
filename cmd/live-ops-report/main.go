@@ -14,6 +14,7 @@ import (
 	applive "github.com/VersoIt/Inquisitor/internal/app/live"
 	"github.com/VersoIt/Inquisitor/internal/clock"
 	"github.com/VersoIt/Inquisitor/internal/config"
+	bybitrest "github.com/VersoIt/Inquisitor/internal/exchanges/bybit/rest"
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	"github.com/VersoIt/Inquisitor/internal/logger"
 	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
@@ -21,13 +22,15 @@ import (
 )
 
 type liveOpsReportDependencies struct {
-	loadConfig       func(string) (*config.Config, error)
-	openDB           func(context.Context, config.DatabaseConfig) (*sql.DB, error)
-	newPendingReader func(*sql.DB) domainlive.PendingLiveDecisionReader
-	newAuditReader   func(*sql.DB) domainlive.LiveLoopAuditReader
-	newKillSwitch    func(*sql.DB) domainrisk.KillSwitchRepository
-	now              func() time.Time
-	output           io.Writer
+	loadConfig         func(string) (*config.Config, error)
+	openDB             func(context.Context, config.DatabaseConfig) (*sql.DB, error)
+	newPendingReader   func(*sql.DB) domainlive.PendingLiveDecisionReader
+	newAuditReader     func(*sql.DB) domainlive.LiveLoopAuditReader
+	newKillSwitch      func(*sql.DB) domainrisk.KillSwitchRepository
+	newPositionReader  func(*config.Config) (domainlive.PositionSnapshotReader, error)
+	newPositionHistory func(*sql.DB) domainlive.PositionSnapshotHistoryReader
+	now                func() time.Time
+	output             io.Writer
 }
 
 func main() {
@@ -49,6 +52,10 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	firstOrderReviewFile := flags.String("first-order-review-file", "", "optional JSON artifact written by live-first-order-review after the first armed order")
 	requireFirstOrderReview := flags.Bool("require-first-order-review", false, "mark the ops report BLOCKED when no first-order review artifact is provided")
 	maxFirstOrderReviewAge := flags.Duration("max-first-order-review-age", domainlive.DefaultLiveFirstOrderReviewArtifactMaxAge, "maximum accepted age for -first-order-review-file")
+	checkPositionDrift := flags.Bool("position-drift", false, "include read-only current exchange vs latest DB position drift checks")
+	positionDriftSymbolsValue := flags.String("position-drift-symbols", "", "optional comma-separated symbols for -position-drift; defaults to exchange.symbols from config")
+	positionDriftCurrentMaxAge := flags.Duration("position-drift-current-max-age", domainlive.DefaultPositionDriftCurrentMaxAge, "maximum accepted age for current exchange position snapshots")
+	positionDriftBaselineMaxAge := flags.Duration("position-drift-baseline-max-age", domainlive.DefaultPositionDriftBaselineMaxAge, "maximum age before DB position baselines become ATTENTION")
 	artifactPath := flags.String("artifact-path", "", "optional path to write a machine-readable JSON live ops report artifact")
 	failOnBlocked := flags.Bool("fail-on-blocked", false, "return a non-zero exit code when the computed ops status is BLOCKED")
 	timeout := flags.Duration("timeout", 10*time.Second, "maximum live ops report command duration")
@@ -65,6 +72,12 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	if *maxFirstOrderReviewAge <= 0 {
 		return fmt.Errorf("max-first-order-review-age must be positive")
 	}
+	if *positionDriftCurrentMaxAge <= 0 {
+		return fmt.Errorf("position-drift-current-max-age must be positive")
+	}
+	if *positionDriftBaselineMaxAge <= 0 {
+		return fmt.Errorf("position-drift-baseline-max-age must be positive")
+	}
 
 	pendingQuery, err := liveOpsPendingQueryFromFlags(*symbolValue, *pendingLimit)
 	if err != nil {
@@ -78,6 +91,11 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	if err != nil {
 		return err
 	}
+	positionDriftSymbols, hasPositionDriftSymbols, err := liveOpsPositionDriftSymbolListFromFlag(*positionDriftSymbolsValue)
+	if err != nil {
+		return err
+	}
+	positionDriftEnabled := *checkPositionDrift || hasPositionDriftSymbols
 	firstOrderReview, hasFirstOrderReview, err := loadLiveOpsFirstOrderReviewArtifactFile(*firstOrderReviewFile)
 	if err != nil {
 		return err
@@ -92,6 +110,13 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 		effectiveLogLevel = cfg.App.LogLevel
 	}
 	log := logger.NewWithWriter(effectiveLogLevel, deps.output)
+	var positionDriftQueries []domainlive.PositionSnapshotQuery
+	if positionDriftEnabled {
+		positionDriftQueries, err = liveOpsPositionDriftQueriesFromConfig(cfg, positionDriftSymbols, hasPositionDriftSymbols)
+		if err != nil {
+			return err
+		}
+	}
 
 	reportCtx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
@@ -101,14 +126,28 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 		return fmt.Errorf("connect postgres for live ops report: %w", err)
 	}
 	defer db.Close()
+	var positionReader domainlive.PositionSnapshotReader
+	if positionDriftEnabled {
+		positionReader, err = deps.newPositionReader(cfg)
+		if err != nil {
+			return fmt.Errorf("create live position reader for ops report: %w", err)
+		}
+	}
 
 	reportNow := deps.now().UTC()
-	service := applive.NewService(
+	options := []applive.Option{
 		applive.WithKillSwitchRepository(deps.newKillSwitch(db)),
 		applive.WithPendingLiveDecisionReader(deps.newPendingReader(db)),
 		applive.WithLiveLoopAuditReader(deps.newAuditReader(db)),
 		applive.WithClock(clock.FixedClock{Time: reportNow}),
-	)
+	}
+	if positionDriftEnabled {
+		options = append(options,
+			applive.WithPositionSnapshotReader(positionReader),
+			applive.WithPositionSnapshotHistoryReader(deps.newPositionHistory(db)),
+		)
+	}
+	service := applive.NewService(options...)
 	report, err := service.BuildLiveOpsReport(reportCtx, applive.LiveOpsReportRequest{
 		PendingSymbol:                   pendingQuery.Symbol,
 		PendingLimit:                    pendingQuery.Limit,
@@ -117,6 +156,9 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 		FirstOrderReviewArtifact:        firstOrderReview.Artifact,
 		RequireFirstOrderReviewArtifact: *requireFirstOrderReview,
 		MaxFirstOrderReviewArtifactAge:  *maxFirstOrderReviewAge,
+		PositionDriftQueries:            positionDriftQueries,
+		PositionDriftCurrentMaxAge:      *positionDriftCurrentMaxAge,
+		PositionDriftBaselineMaxAge:     *positionDriftBaselineMaxAge,
 	})
 	if err != nil {
 		return err
@@ -174,6 +216,14 @@ func (deps liveOpsReportDependencies) withDefaults() liveOpsReportDependencies {
 			return postgres.NewRiskKillSwitchRepository(db)
 		}
 	}
+	if deps.newPositionReader == nil {
+		deps.newPositionReader = newBybitLiveOpsPositionReader
+	}
+	if deps.newPositionHistory == nil {
+		deps.newPositionHistory = func(db *sql.DB) domainlive.PositionSnapshotHistoryReader {
+			return postgres.NewLiveOrderJournalRepository(db)
+		}
+	}
 	if deps.now == nil {
 		deps.now = func() time.Time {
 			return time.Now().UTC()
@@ -183,6 +233,16 @@ func (deps liveOpsReportDependencies) withDefaults() liveOpsReportDependencies {
 		deps.output = os.Stdout
 	}
 	return deps
+}
+
+func newBybitLiveOpsPositionReader(cfg *config.Config) (domainlive.PositionSnapshotReader, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	return bybitrest.New(
+		cfg.Exchange.RestBaseURL,
+		bybitrest.WithHMACAuth(liveOpsEnvValue(cfg.Live.APIKeyEnv), liveOpsEnvValue(cfg.Live.APISecretEnv)),
+	)
 }
 
 func liveOpsPendingQueryFromFlags(symbol string, limit int) (domainlive.PendingLiveDecisionQuery, error) {
@@ -219,6 +279,64 @@ func liveOpsAuditLimitFromFlags(limit int) (int, error) {
 	return query.Limit, nil
 }
 
+func liveOpsPositionDriftSymbolListFromFlag(value string) ([]string, bool, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, false, nil
+	}
+	if value != trimmed {
+		return nil, false, fmt.Errorf("position-drift-symbols must be trimmed")
+	}
+	seen := map[string]bool{}
+	var symbols []string
+	for _, raw := range strings.Split(trimmed, ",") {
+		item := strings.TrimSpace(raw)
+		if item == "" {
+			return nil, false, fmt.Errorf("position-drift-symbols must not contain empty items")
+		}
+		if raw != item {
+			return nil, false, fmt.Errorf("position-drift-symbols must be comma-separated without item whitespace")
+		}
+		symbol := strings.ToUpper(item)
+		if seen[symbol] {
+			return nil, false, fmt.Errorf("position-drift-symbols must not contain duplicates: %s", symbol)
+		}
+		seen[symbol] = true
+		symbols = append(symbols, symbol)
+	}
+	return symbols, true, nil
+}
+
+func liveOpsPositionDriftQueriesFromConfig(
+	cfg *config.Config,
+	explicitSymbols []string,
+	hasExplicitSymbols bool,
+) ([]domainlive.PositionSnapshotQuery, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	symbols := explicitSymbols
+	if !hasExplicitSymbols {
+		symbols = cfg.Exchange.Symbols
+	}
+	if len(symbols) == 0 {
+		return nil, fmt.Errorf("at least one position-drift symbol is required")
+	}
+	queries := make([]domainlive.PositionSnapshotQuery, 0, len(symbols))
+	for _, symbol := range symbols {
+		query := domainlive.PositionSnapshotQuery{
+			Exchange: strings.ToLower(strings.TrimSpace(cfg.Exchange.Primary)),
+			Category: strings.ToLower(strings.TrimSpace(cfg.Exchange.Category)),
+			Symbol:   strings.ToUpper(strings.TrimSpace(symbol)),
+		}
+		if err := domainlive.ValidatePositionSnapshotQuery(query); err != nil {
+			return nil, err
+		}
+		queries = append(queries, query)
+	}
+	return queries, nil
+}
+
 func logLiveOpsReport(
 	log *slog.Logger,
 	configPath string,
@@ -246,6 +364,9 @@ func logLiveOpsReport(
 		"first_order_review", report.HasFirstOrderReview,
 		"first_order_review_file", firstOrderReviewFile,
 		"first_order_review_sha256", firstOrderReviewSHA256,
+		"position_drift", report.HasPositionDrift,
+		"position_drift_status", report.PositionDrift.Status,
+		"position_drift_symbols", len(report.PositionDrift.Comparisons),
 	)
 	for _, check := range report.Checks {
 		log.Info(
@@ -270,6 +391,29 @@ func logLiveOpsReport(
 			"latest_position_size", report.FirstOrderReview.Evidence.LatestPositionSize,
 		)
 	}
+	if report.HasPositionDrift {
+		for _, comparison := range report.PositionDrift.Comparisons {
+			log.Info(
+				"live ops position drift comparison",
+				"exchange", comparison.Query.Exchange,
+				"category", comparison.Query.Category,
+				"symbol", comparison.Query.Symbol,
+				"status", comparison.Status,
+				"has_db_baseline", comparison.HasBaseline,
+				"current_open", comparison.Current.Open,
+				"current_side", comparison.Current.Side,
+				"current_size", comparison.Current.Size.String(),
+				"current_average_price", comparison.Current.AveragePrice.String(),
+				"current_exchange_status", comparison.Current.ExchangeStatus,
+				"current_observed_at", comparison.Current.ObservedAt,
+				"baseline_open", comparison.Baseline.Open,
+				"baseline_side", comparison.Baseline.Side,
+				"baseline_size", comparison.Baseline.Size.String(),
+				"baseline_average_price", comparison.Baseline.AveragePrice.String(),
+				"baseline_observed_at", comparison.Baseline.ObservedAt,
+			)
+		}
+	}
 }
 
 func liveOpsFailedCheckNames(checks []domainlive.ReadinessCheck) string {
@@ -283,4 +427,9 @@ func liveOpsFailedCheckNames(checks []domainlive.ReadinessCheck) string {
 		return "unknown"
 	}
 	return strings.Join(names, ", ")
+}
+
+func liveOpsEnvValue(name string) string {
+	value, _ := os.LookupEnv(strings.TrimSpace(name))
+	return strings.TrimSpace(value)
 }

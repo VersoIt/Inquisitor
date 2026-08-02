@@ -18,6 +18,9 @@ type LiveOpsReportRequest struct {
 	FirstOrderReviewArtifact        domainlive.LiveFirstOrderReviewArtifact
 	RequireFirstOrderReviewArtifact bool
 	MaxFirstOrderReviewArtifactAge  time.Duration
+	PositionDriftQueries            []domainlive.PositionSnapshotQuery
+	PositionDriftCurrentMaxAge      time.Duration
+	PositionDriftBaselineMaxAge     time.Duration
 }
 
 type LiveOpsReport struct {
@@ -29,6 +32,8 @@ type LiveOpsReport struct {
 	KillSwitch          domainrisk.KillSwitchState
 	HasFirstOrderReview bool
 	FirstOrderReview    domainlive.LiveFirstOrderReviewArtifact
+	HasPositionDrift    bool
+	PositionDrift       LivePositionDriftReport
 }
 
 func (s *Service) BuildLiveOpsReport(ctx context.Context, req LiveOpsReportRequest) (LiveOpsReport, error) {
@@ -78,6 +83,20 @@ func (s *Service) BuildLiveOpsReport(ctx context.Context, req LiveOpsReportReque
 	}
 	report.Audit = audit
 	report.Checks = append(report.Checks, liveReadinessAuditCheck(audit))
+
+	if len(req.PositionDriftQueries) > 0 {
+		drift, err := s.BuildLivePositionDriftReport(ctx, LivePositionDriftReportRequest{
+			Queries:        req.PositionDriftQueries,
+			CurrentMaxAge:  req.PositionDriftCurrentMaxAge,
+			BaselineMaxAge: req.PositionDriftBaselineMaxAge,
+		})
+		if err != nil {
+			return report, err
+		}
+		report.HasPositionDrift = true
+		report.PositionDrift = drift
+		report.Checks = append(report.Checks, drift.Checks...)
+	}
 
 	if req.HasFirstOrderReviewArtifact || req.RequireFirstOrderReviewArtifact {
 		report.HasFirstOrderReview = req.HasFirstOrderReviewArtifact
