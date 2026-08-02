@@ -80,6 +80,10 @@ type PositionSnapshotReader interface {
 	GetPositionSnapshot(ctx context.Context, query PositionSnapshotQuery) (PositionSnapshot, error)
 }
 
+type PositionSnapshotHistoryReader interface {
+	GetLatestPositionSnapshot(ctx context.Context, query PositionSnapshotQuery) (PositionSnapshot, bool, error)
+}
+
 type PositionSnapshotJournal interface {
 	RecordPositionSnapshot(ctx context.Context, snapshot PositionSnapshot) (PositionSnapshotStats, error)
 }

@@ -287,6 +287,79 @@ func TestLiveOrderJournalRepositorySQLMockTableDriven(t *testing.T) {
 			},
 		},
 		{
+			name: "reads latest live position snapshot",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLivePositionSnapshot(now.Add(3 * time.Second))
+				query := domainlive.PositionSnapshotQuery{
+					Exchange: snapshot.Exchange,
+					Category: snapshot.Category,
+					Symbol:   snapshot.Symbol,
+				}
+				mock.ExpectQuery("SELECT\\s+exchange, category, symbol, open, side, size").
+					WithArgs(query.Exchange, query.Category, query.Symbol).
+					WillReturnRows(livePositionSnapshotRows(snapshot))
+
+				got, ok, err := postgres.NewLiveOrderJournalRepository(db).GetLatestPositionSnapshot(ctx, query)
+				if err != nil {
+					t.Fatalf("get latest position snapshot: %v", err)
+				}
+				if !ok || got.Symbol != snapshot.Symbol || !got.Size.Equal(snapshot.Size) || !got.ObservedAt.Equal(snapshot.ObservedAt) {
+					t.Fatalf("latest position mismatch: ok=%t got=%#v", ok, got)
+				}
+			},
+		},
+		{
+			name: "latest live position snapshot returns false when absent",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				query := domainlive.PositionSnapshotQuery{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"}
+				mock.ExpectQuery("SELECT\\s+exchange, category, symbol, open, side, size").
+					WithArgs(query.Exchange, query.Category, query.Symbol).
+					WillReturnError(sql.ErrNoRows)
+
+				got, ok, err := postgres.NewLiveOrderJournalRepository(db).GetLatestPositionSnapshot(ctx, query)
+				if err != nil {
+					t.Fatalf("get missing latest position snapshot: %v", err)
+				}
+				if ok || got.Symbol != "" {
+					t.Fatalf("expected missing latest snapshot, ok=%t got=%#v", ok, got)
+				}
+			},
+		},
+		{
+			name: "latest live position snapshot rejects unsafe query before SQL",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				_, _, err := postgres.NewLiveOrderJournalRepository(db).GetLatestPositionSnapshot(ctx, domainlive.PositionSnapshotQuery{
+					Exchange: "BYBIT",
+					Category: "linear",
+					Symbol:   "BTCUSDT",
+				})
+				if err == nil || !strings.Contains(err.Error(), "exchange") {
+					t.Fatalf("expected query validation error, got %v", err)
+				}
+			},
+		},
+		{
+			name: "latest live position snapshot rejects corrupted decimal",
+			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
+				snapshot := testLivePositionSnapshot(now.Add(3 * time.Second))
+				query := domainlive.PositionSnapshotQuery{
+					Exchange: snapshot.Exchange,
+					Category: snapshot.Category,
+					Symbol:   snapshot.Symbol,
+				}
+				rows := sqlmock.NewRows(livePositionSnapshotRowColumns()).
+					AddRow("bybit", "linear", "BTCUSDT", true, "LONG", "not-a-decimal", "100001", "25000.25", "100100", "50000", "1", "24.75", "-15", "10", "NORMAL", 0, int64(12345), false, snapshot.ExchangeCreatedAt, snapshot.ExchangeUpdatedAt, snapshot.ObservedAt)
+				mock.ExpectQuery("SELECT\\s+exchange, category, symbol, open, side, size").
+					WithArgs(query.Exchange, query.Category, query.Symbol).
+					WillReturnRows(rows)
+
+				_, _, err := postgres.NewLiveOrderJournalRepository(db).GetLatestPositionSnapshot(ctx, query)
+				if err == nil || !strings.Contains(err.Error(), "size") {
+					t.Fatalf("expected decimal scan error, got %v", err)
+				}
+			},
+		},
+		{
 			name: "records live account snapshot",
 			run: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) {
 				snapshot := testLiveAccountSnapshot(now.Add(5 * time.Second))
@@ -651,6 +724,59 @@ func livePositionSnapshotSQLDriverArgs(snapshot domainlive.PositionSnapshot) []d
 		nullableLivePositionDriverTime(snapshot.ExchangeCreatedAt),
 		nullableLivePositionDriverTime(snapshot.ExchangeUpdatedAt),
 		snapshot.ObservedAt.UTC(),
+	}
+}
+
+func livePositionSnapshotRows(snapshot domainlive.PositionSnapshot) *sqlmock.Rows {
+	return sqlmock.NewRows(livePositionSnapshotRowColumns()).
+		AddRow(
+			snapshot.Exchange,
+			snapshot.Category,
+			snapshot.Symbol,
+			snapshot.Open,
+			string(snapshot.Side),
+			snapshot.Size.String(),
+			snapshot.AveragePrice.String(),
+			snapshot.PositionValue.String(),
+			snapshot.MarkPrice.String(),
+			snapshot.LiquidationPrice.String(),
+			snapshot.Leverage.String(),
+			snapshot.UnrealisedPnL.String(),
+			snapshot.CurrentRealisedPnL.String(),
+			snapshot.CumulativeRealisedPnL.String(),
+			string(snapshot.ExchangeStatus),
+			snapshot.PositionIndex,
+			snapshot.Sequence,
+			snapshot.ExchangeReduceOnly,
+			nullableLivePositionDriverTime(snapshot.ExchangeCreatedAt),
+			nullableLivePositionDriverTime(snapshot.ExchangeUpdatedAt),
+			snapshot.ObservedAt.UTC(),
+		)
+}
+
+func livePositionSnapshotRowColumns() []string {
+	return []string{
+		"exchange",
+		"category",
+		"symbol",
+		"open",
+		"side",
+		"size",
+		"average_price",
+		"position_value",
+		"mark_price",
+		"liquidation_price",
+		"leverage",
+		"unrealised_pnl",
+		"current_realised_pnl",
+		"cumulative_realised_pnl",
+		"exchange_status",
+		"position_index",
+		"sequence",
+		"exchange_reduce_only",
+		"exchange_created_at",
+		"exchange_updated_at",
+		"observed_at",
 	}
 }
 

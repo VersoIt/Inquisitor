@@ -18,6 +18,7 @@ type Service struct {
 	statusReader     domainlive.OrderStatusReader
 	statusJournal    domainlive.OrderStatusJournal
 	positionReader   domainlive.PositionSnapshotReader
+	positionHistory  domainlive.PositionSnapshotHistoryReader
 	positionJournal  domainlive.PositionSnapshotJournal
 	accountReader    domainlive.AccountSnapshotReader
 	accountJournal   domainlive.AccountSnapshotJournal
@@ -85,6 +86,12 @@ func WithOrderStatusJournal(journal domainlive.OrderStatusJournal) Option {
 func WithPositionSnapshotReader(reader domainlive.PositionSnapshotReader) Option {
 	return func(service *Service) {
 		service.positionReader = reader
+	}
+}
+
+func WithPositionSnapshotHistoryReader(reader domainlive.PositionSnapshotHistoryReader) Option {
+	return func(service *Service) {
+		service.positionHistory = reader
 	}
 }
 

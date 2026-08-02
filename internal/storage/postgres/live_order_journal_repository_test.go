@@ -259,6 +259,22 @@ func TestLiveOrderJournalRepositoryIntegrationTableDriven(t *testing.T) {
 			},
 		},
 		{
+			name: "returns latest live position snapshot",
+			run: func(t *testing.T) {
+				query := domainlive.PositionSnapshotQuery{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"}
+				got, ok, err := repo.GetLatestPositionSnapshot(ctx, query)
+				if err != nil {
+					t.Fatalf("get latest live position snapshot: %v", err)
+				}
+				if !ok {
+					t.Fatalf("expected latest live position snapshot")
+				}
+				if got.Open || !got.Size.IsZero() || !got.ObservedAt.Equal(now.Add(5*time.Second)) {
+					t.Fatalf("latest position snapshot mismatch: %#v", got)
+				}
+			},
+		},
+		{
 			name: "records live account snapshot",
 			run: func(t *testing.T) {
 				snapshot := testLiveAccountSnapshot(now.Add(6 * time.Second))
