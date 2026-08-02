@@ -506,7 +506,7 @@ func applyLiveLoopPlanArtifact(
 	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
 		return err
 	}
-	if err := validateLiveLoopPlanArtifactSource(artifact, selectPending); err != nil {
+	if err := domainlive.ValidateLiveOrderPlanArtifactExecutionSource(artifact, selectPending); err != nil {
 		return err
 	}
 	if !selectPending {
@@ -538,26 +538,6 @@ func applyLiveLoopPlanArtifact(
 		return err
 	}
 	return nil
-}
-
-func validateLiveLoopPlanArtifactSource(artifact domainlive.LiveOrderPlanArtifact, selectPending bool) error {
-	expectedSource := domainlive.LiveOrderPlanArtifactSourceDecisionID
-	if selectPending {
-		expectedSource = domainlive.LiveOrderPlanArtifactSourceSelectPending
-	}
-	if artifact.Source == expectedSource {
-		return nil
-	}
-	if selectPending {
-		return fmt.Errorf(
-			"plan-file source %q does not match -select-pending execution; regenerate with live-order-plan -select-pending or run live-loop without -select-pending",
-			artifact.Source,
-		)
-	}
-	return fmt.Errorf(
-		"plan-file source %q does not match explicit decision execution; run live-loop with -select-pending or regenerate with live-order-plan -decision-id",
-		artifact.Source,
-	)
 }
 
 func applyLiveLoopPlanString(args []string, flagName string, artifactValue string, target *string) error {

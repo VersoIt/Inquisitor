@@ -75,6 +75,43 @@ func TestLiveOrderPlanArtifactIdentityExpectation(t *testing.T) {
 	}
 }
 
+func TestValidateLiveOrderPlanArtifactExecutionSourceTableDriven(t *testing.T) {
+	decisionArtifact := validLiveOrderPlanArtifact(time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
+	selectArtifact := decisionArtifact
+	selectArtifact.Source = domainlive.LiveOrderPlanArtifactSourceSelectPending
+	selectArtifact.PendingSymbol = selectArtifact.Symbol
+
+	tests := []struct {
+		name          string
+		artifact      domainlive.LiveOrderPlanArtifact
+		selectPending bool
+		wantErrSub    string
+	}{
+		{name: "explicit decision artifact matches explicit execution", artifact: decisionArtifact},
+		{name: "select pending artifact matches selector execution", artifact: selectArtifact, selectPending: true},
+		{name: "select pending artifact rejects explicit execution", artifact: selectArtifact, wantErrSub: "explicit decision execution"},
+		{name: "decision artifact rejects selector execution", artifact: decisionArtifact, selectPending: true, wantErrSub: "-select-pending execution"},
+		{name: "invalid artifact fails before source comparison", artifact: mutateLiveOrderPlanArtifact(decisionArtifact, func(a *domainlive.LiveOrderPlanArtifact) {
+			a.SchemaVersion = "old"
+		}), wantErrSub: "schema_version"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := domainlive.ValidateLiveOrderPlanArtifactExecutionSource(tt.artifact, tt.selectPending)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate execution source: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateLiveOrderPlanArtifactSnapshotTableDriven(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	artifact := validLiveOrderPlanArtifact(now)

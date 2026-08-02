@@ -140,6 +140,29 @@ func (artifact LiveOrderPlanArtifact) IdentityExpectation() LiveLoopOrderIdentit
 	}
 }
 
+func ValidateLiveOrderPlanArtifactExecutionSource(artifact LiveOrderPlanArtifact, selectPending bool) error {
+	if err := ValidateLiveOrderPlanArtifact(artifact); err != nil {
+		return err
+	}
+	expectedSource := LiveOrderPlanArtifactSourceDecisionID
+	if selectPending {
+		expectedSource = LiveOrderPlanArtifactSourceSelectPending
+	}
+	if artifact.Source == expectedSource {
+		return nil
+	}
+	if selectPending {
+		return fmt.Errorf(
+			"plan-file source %q does not match -select-pending execution; regenerate with live-order-plan -select-pending or run live-loop without -select-pending",
+			artifact.Source,
+		)
+	}
+	return fmt.Errorf(
+		"plan-file source %q does not match explicit decision execution; run live-loop with -select-pending or regenerate with live-order-plan -decision-id",
+		artifact.Source,
+	)
+}
+
 func ValidateLiveOrderPlanArtifactSnapshot(
 	artifact LiveOrderPlanArtifact,
 	snapshot LiveOrderPlanArtifactSnapshot,
