@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -29,6 +31,7 @@ func liveReadinessArtifactFromReport(
 	createdAt time.Time,
 	configPath string,
 	planFilePath string,
+	planFileSHA256 string,
 	hasPlanArtifact bool,
 ) domainlive.LiveReadinessArtifact {
 	artifact := domainlive.LiveReadinessArtifact{
@@ -79,6 +82,7 @@ func liveReadinessArtifactFromReport(
 	if hasPlanArtifact {
 		artifact.PlanFile = &domainlive.LiveReadinessArtifactPlanFile{
 			Path:          strings.TrimSpace(planFilePath),
+			SHA256:        strings.TrimSpace(planFileSHA256),
 			SchemaVersion: req.PlanArtifact.SchemaVersion,
 			Source:        req.PlanArtifact.Source,
 			PendingSymbol: req.PlanArtifact.PendingSymbol,
@@ -125,4 +129,20 @@ func writeLiveReadinessArtifact(path string, artifact domainlive.LiveReadinessAr
 		return fmt.Errorf("write live readiness artifact %q: %w", trimmedPath, err)
 	}
 	return nil
+}
+
+func liveReadinessFileSHA256(path string) (string, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if path != trimmedPath {
+		return "", fmt.Errorf("path must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return "", fmt.Errorf("read file for sha256 %q: %w", trimmedPath, err)
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
 }

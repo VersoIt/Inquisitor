@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -100,7 +102,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		return fmt.Errorf("max-readiness-age must be positive")
 	}
 
-	planArtifact, hasPlanArtifact, err := loadLiveLoopPlanArtifact(*planFile)
+	planArtifact, hasPlanArtifact, planArtifactSHA256, err := loadLiveLoopPlanArtifact(*planFile)
 	if err != nil {
 		return err
 	}
@@ -193,6 +195,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			strings.TrimSpace(*planFile),
 			hasPlanArtifact,
 			planArtifact,
+			planArtifactSHA256,
 			*selectPending,
 			pendingQuery,
 			selectedDecisionID,
@@ -287,6 +290,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 				strings.TrimSpace(*planFile),
 				hasPlanArtifact,
 				planArtifact,
+				planArtifactSHA256,
 				*selectPending,
 				pendingQuery,
 				selectedDecisionID,
@@ -444,26 +448,27 @@ func validateLiveLoopIdentityExpectation(
 	}, expectation)
 }
 
-func loadLiveLoopPlanArtifact(path string) (domainlive.LiveOrderPlanArtifact, bool, error) {
+func loadLiveLoopPlanArtifact(path string) (domainlive.LiveOrderPlanArtifact, bool, string, error) {
 	trimmedPath := strings.TrimSpace(path)
 	if trimmedPath == "" {
-		return domainlive.LiveOrderPlanArtifact{}, false, nil
+		return domainlive.LiveOrderPlanArtifact{}, false, "", nil
 	}
 	if path != trimmedPath {
-		return domainlive.LiveOrderPlanArtifact{}, false, fmt.Errorf("plan-file must be trimmed")
+		return domainlive.LiveOrderPlanArtifact{}, false, "", fmt.Errorf("plan-file must be trimmed")
 	}
 	payload, err := os.ReadFile(trimmedPath)
 	if err != nil {
-		return domainlive.LiveOrderPlanArtifact{}, false, fmt.Errorf("read live order plan artifact %q: %w", trimmedPath, err)
+		return domainlive.LiveOrderPlanArtifact{}, false, "", fmt.Errorf("read live order plan artifact %q: %w", trimmedPath, err)
 	}
 	var artifact domainlive.LiveOrderPlanArtifact
 	if err := json.Unmarshal(payload, &artifact); err != nil {
-		return domainlive.LiveOrderPlanArtifact{}, false, fmt.Errorf("decode live order plan artifact %q: %w", trimmedPath, err)
+		return domainlive.LiveOrderPlanArtifact{}, false, "", fmt.Errorf("decode live order plan artifact %q: %w", trimmedPath, err)
 	}
 	if err := domainlive.ValidateLiveOrderPlanArtifact(artifact); err != nil {
-		return domainlive.LiveOrderPlanArtifact{}, false, err
+		return domainlive.LiveOrderPlanArtifact{}, false, "", err
 	}
-	return artifact, true, nil
+	sum := sha256.Sum256(payload)
+	return artifact, true, hex.EncodeToString(sum[:]), nil
 }
 
 func loadLiveLoopReadinessArtifact(path string) (domainlive.LiveReadinessArtifact, bool, error) {
@@ -745,6 +750,7 @@ func validateLiveLoopReadinessArtifactAgainstExecution(
 	planPath string,
 	hasPlanArtifact bool,
 	planArtifact domainlive.LiveOrderPlanArtifact,
+	planFileSHA256 string,
 	selectPending bool,
 	pendingQuery domainlive.PendingLiveDecisionQuery,
 	selectedDecisionID string,
@@ -779,7 +785,7 @@ func validateLiveLoopReadinessArtifactAgainstExecution(
 		if artifact.PlanFile == nil {
 			problems = append(problems, "plan_file is required when -plan-file is used")
 		} else {
-			problems = append(problems, liveLoopReadinessPlanFileProblems(*artifact.PlanFile, planPath, planArtifact)...)
+			problems = append(problems, liveLoopReadinessPlanFileProblems(*artifact.PlanFile, planPath, planArtifact, planFileSHA256)...)
 		}
 	} else if artifact.PlanFile != nil {
 		problems = append(problems, "readiness-file plan_file requires -plan-file")
@@ -794,6 +800,7 @@ func liveLoopReadinessPlanFileProblems(
 	readinessPlan domainlive.LiveReadinessArtifactPlanFile,
 	planPath string,
 	planArtifact domainlive.LiveOrderPlanArtifact,
+	planFileSHA256 string,
 ) []string {
 	var problems []string
 	if err := domainlive.ValidateLiveOrderPlanArtifact(planArtifact); err != nil {
@@ -801,6 +808,9 @@ func liveLoopReadinessPlanFileProblems(
 	}
 	if !liveLoopSamePath(readinessPlan.Path, planPath) {
 		problems = append(problems, fmt.Sprintf("plan_file.path %q does not match -plan-file %q", readinessPlan.Path, strings.TrimSpace(planPath)))
+	}
+	if readinessPlan.SHA256 != strings.TrimSpace(planFileSHA256) {
+		problems = append(problems, fmt.Sprintf("plan_file.sha256 %q does not match -plan-file sha256 %q", readinessPlan.SHA256, strings.TrimSpace(planFileSHA256)))
 	}
 	compareText := map[string][2]string{
 		"plan_file.schema_version":  {readinessPlan.SchemaVersion, planArtifact.SchemaVersion},

@@ -66,6 +66,7 @@ type LiveReadinessArtifactKillSwitch struct {
 
 type LiveReadinessArtifactPlanFile struct {
 	Path          string `json:"path"`
+	SHA256        string `json:"sha256"`
 	SchemaVersion string `json:"schema_version"`
 	Source        string `json:"source"`
 	PendingSymbol string `json:"pending_symbol,omitempty"`
@@ -184,6 +185,7 @@ func validateLiveReadinessArtifactPlanFileProblems(plan LiveReadinessArtifactPla
 	var problems []string
 	required := map[string]string{
 		"plan_file.path":            plan.Path,
+		"plan_file.sha256":          plan.SHA256,
 		"plan_file.schema_version":  plan.SchemaVersion,
 		"plan_file.source":          plan.Source,
 		"plan_file.decision_id":     plan.DecisionID,
@@ -203,6 +205,9 @@ func validateLiveReadinessArtifactPlanFileProblems(plan LiveReadinessArtifactPla
 	}
 	if plan.SchemaVersion != LiveOrderPlanArtifactSchemaVersion {
 		problems = append(problems, "plan_file.schema_version must be "+LiveOrderPlanArtifactSchemaVersion)
+	}
+	if strings.TrimSpace(plan.SHA256) != "" && !isLowerHexSHA256(plan.SHA256) {
+		problems = append(problems, "plan_file.sha256 must be a lowercase SHA-256 hex digest")
 	}
 	switch plan.Source {
 	case LiveOrderPlanArtifactSourceDecisionID, LiveOrderPlanArtifactSourceSelectPending:
@@ -227,6 +232,18 @@ func validateLiveReadinessArtifactPlanFileProblems(plan LiveReadinessArtifactPla
 		problems = append(problems, "plan_file.max_age must be a duration")
 	}
 	return problems
+}
+
+func isLowerHexSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func sameStringSet(left []string, right []string) bool {

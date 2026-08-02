@@ -45,6 +45,9 @@ func TestValidateLiveReadinessArtifactTableDriven(t *testing.T) {
 		{name: "missing plan decision id", mutate: func(a *domainlive.LiveReadinessArtifact) {
 			a.PlanFile.DecisionID = ""
 		}, wantErrSub: "plan_file.decision_id"},
+		{name: "invalid plan file sha256", mutate: func(a *domainlive.LiveReadinessArtifact) {
+			a.PlanFile.SHA256 = "ABC"
+		}, wantErrSub: "plan_file.sha256"},
 		{name: "bad plan max age", mutate: func(a *domainlive.LiveReadinessArtifact) {
 			a.PlanFile.MaxAge = "soon"
 		}, wantErrSub: "plan_file.max_age"},
@@ -160,6 +163,7 @@ func validLiveReadinessArtifact(createdAt time.Time) domainlive.LiveReadinessArt
 		KillSwitch: domainlive.LiveReadinessArtifactKillSwitch{},
 		PlanFile: &domainlive.LiveReadinessArtifactPlanFile{
 			Path:          "artifacts/live-order-plan.json",
+			SHA256:        strings.Repeat("a", 64),
 			SchemaVersion: domainlive.LiveOrderPlanArtifactSchemaVersion,
 			Source:        domainlive.LiveOrderPlanArtifactSourceDecisionID,
 			DecisionID:    "risk_decision_live_ready_0001",

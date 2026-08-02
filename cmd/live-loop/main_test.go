@@ -334,6 +334,9 @@ func TestRunLiveLoopReadinessFileStopsBeforeSideEffects(t *testing.T) {
 	readinessWithWrongPlan := cloneLiveLoopReadinessArtifact(validReadiness)
 	readinessWithWrongPlan.PlanFile = cloneLiveLoopReadinessPlanFile(validReadiness.PlanFile)
 	readinessWithWrongPlan.PlanFile.DecisionID = "risk_decision_live_cli_0002"
+	readinessWithWrongPlanSHA := cloneLiveLoopReadinessArtifact(validReadiness)
+	readinessWithWrongPlanSHA.PlanFile = cloneLiveLoopReadinessPlanFile(validReadiness.PlanFile)
+	readinessWithWrongPlanSHA.PlanFile.SHA256 = strings.Repeat("b", 64)
 	notReady := cloneLiveLoopReadinessArtifact(validReadiness)
 	notReady.Ready = false
 	notReady.Summary.Passed = 0
@@ -399,6 +402,14 @@ func TestRunLiveLoopReadinessFileStopsBeforeSideEffects(t *testing.T) {
 			},
 			artifact:   readinessWithWrongPlan,
 			wantErrSub: "plan_file.decision_id",
+		},
+		{
+			name: "readiness plan sha mismatch",
+			args: func(readinessFile string) []string {
+				return []string{"-config", configPath, "-plan-file", planFile, "-readiness-file", readinessFile, "-execute"}
+			},
+			artifact:   readinessWithWrongPlanSHA,
+			wantErrSub: "plan_file.sha256",
 		},
 	}
 
@@ -1478,6 +1489,10 @@ func liveLoopReadinessArtifact(
 	}
 	oldestAt := plan.DecisionCreatedAt
 	newestAt := plan.DecisionCreatedAt
+	_, _, planFileSHA256, err := loadLiveLoopPlanArtifact(planPath)
+	if err != nil {
+		t.Fatalf("load plan artifact for readiness sha256: %v", err)
+	}
 	return domainlive.LiveReadinessArtifact{
 		SchemaVersion: domainlive.LiveReadinessArtifactSchemaVersion,
 		CreatedAt:     createdAt.UTC(),
@@ -1508,6 +1523,7 @@ func liveLoopReadinessArtifact(
 		KillSwitch: domainlive.LiveReadinessArtifactKillSwitch{},
 		PlanFile: &domainlive.LiveReadinessArtifactPlanFile{
 			Path:          strings.TrimSpace(planPath),
+			SHA256:        planFileSHA256,
 			SchemaVersion: plan.SchemaVersion,
 			Source:        plan.Source,
 			PendingSymbol: plan.PendingSymbol,

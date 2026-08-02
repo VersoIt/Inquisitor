@@ -363,7 +363,8 @@ func TestRunLiveReadinessLogsReadyReport(t *testing.T) {
 func TestRunLiveReadinessValidatesPlanArtifact(t *testing.T) {
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	pending := liveReadinessPendingDecision("risk_decision_live_ready_cli_0001", "BTCUSDT", now)
-	artifactPath := writeLiveReadinessPlanArtifact(t, liveReadinessPlanArtifactFromRecord(t, pending.Decision, "decision-id"))
+	planArtifactPath := writeLiveReadinessPlanArtifact(t, liveReadinessPlanArtifactFromRecord(t, pending.Decision, "decision-id"))
+	readinessArtifactPath := filepath.Join(t.TempDir(), "live-readiness.json")
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -376,7 +377,8 @@ func TestRunLiveReadinessValidatesPlanArtifact(t *testing.T) {
 	var output bytes.Buffer
 	err = runLiveReadiness(context.Background(), []string{
 		"-symbol", "BTCUSDT",
-		"-plan-file", artifactPath,
+		"-plan-file", planArtifactPath,
+		"-artifact-path", readinessArtifactPath,
 		"-subaccount-confirmed",
 		"-max-initial-live-capital-usdt", "100",
 	}, liveReadinessDependencies{
@@ -405,6 +407,9 @@ func TestRunLiveReadinessValidatesPlanArtifact(t *testing.T) {
 			"BYBIT_API_KEY":        "key",
 			"BYBIT_API_SECRET":     "secret",
 		}),
+		now: func() time.Time {
+			return now
+		},
 		output: &output,
 	})
 	if err != nil {
@@ -420,11 +425,30 @@ func TestRunLiveReadinessValidatesPlanArtifact(t *testing.T) {
 	for _, want := range []string{
 		`"name":"live_order_plan_artifact"`,
 		`"status":"PASS"`,
+		`"msg":"live readiness artifact written"`,
 		`"msg":"live readiness passed"`,
 	} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
 		}
+	}
+	readinessArtifact := readLiveReadinessArtifact(t, readinessArtifactPath)
+	planFile := readinessArtifact.PlanFile
+	if planFile == nil {
+		t.Fatalf("expected readiness artifact to include plan_file metadata: %#v", readinessArtifact)
+	}
+	expectedSHA256, err := liveReadinessFileSHA256(planArtifactPath)
+	if err != nil {
+		t.Fatalf("hash plan artifact: %v", err)
+	}
+	if planFile.Path != planArtifactPath ||
+		planFile.SHA256 != expectedSHA256 ||
+		planFile.SchemaVersion != domainlive.LiveOrderPlanArtifactSchemaVersion ||
+		planFile.Source != domainlive.LiveOrderPlanArtifactSourceDecisionID ||
+		planFile.DecisionID != pending.Decision.DecisionID ||
+		planFile.Symbol != "BTCUSDT" ||
+		planFile.MaxAge != domainlive.DefaultLiveOrderPlanArtifactMaxAge.String() {
+		t.Fatalf("readiness plan_file metadata mismatch: %#v", planFile)
 	}
 }
 

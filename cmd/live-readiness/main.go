@@ -88,7 +88,12 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 	if err != nil {
 		return err
 	}
+	planFileSHA256 := ""
 	if hasPlanArtifact {
+		planFileSHA256, err = liveReadinessFileSHA256(*planFile)
+		if err != nil {
+			return err
+		}
 		pendingQuery, err = liveReadinessPendingQueryWithPlanArtifact(pendingQuery, planArtifact)
 		if err != nil {
 			return err
@@ -147,6 +152,7 @@ func runLiveReadiness(ctx context.Context, args []string, deps liveReadinessDepe
 			deps.now().UTC(),
 			strings.TrimSpace(*configPath),
 			strings.TrimSpace(*planFile),
+			planFileSHA256,
 			hasPlanArtifact,
 		)
 		if err := writeLiveReadinessArtifact(readinessArtifactPath, artifact); err != nil {
