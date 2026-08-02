@@ -127,7 +127,11 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	configPath := writeLiveLoopConfig(t)
 	planArtifact := liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime)
 	planFile := writeLiveLoopPlanArtifact(t, planArtifact)
-	readinessFile := writeLiveLoopReadinessArtifact(t, liveLoopReadinessArtifact(t, configPath, planFile, planArtifact, now))
+	auditArtifact := liveLoopAuditArtifact(now, configPath)
+	auditFile := writeLiveLoopAuditArtifact(t, auditArtifact)
+	readinessArtifact := liveLoopReadinessArtifact(t, configPath, planFile, planArtifact, now)
+	readinessArtifact.Audit = liveLoopReadinessAuditFromAuditArtifact(auditArtifact)
+	readinessFile := writeLiveLoopReadinessArtifact(t, readinessArtifact)
 	executor := &fakeLiveLoopExecutor{receivedAt: now}
 	accountReader := &fakeLiveLoopAccountReader{
 		snapshot: validLiveLoopAccountSnapshot(t),
@@ -138,6 +142,7 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 		"-config", configPath,
 		"-plan-file", planFile,
 		"-readiness-file", readinessFile,
+		"-audit-file", auditFile,
 		"-subaccount-confirmed",
 		"-max-initial-live-capital-usdt", "100",
 		"-max-iterations", "1",
@@ -429,6 +434,103 @@ func TestRunLiveLoopReadinessFileStopsBeforeSideEffects(t *testing.T) {
 			}
 			if opened {
 				t.Fatal("database must not be opened when readiness artifact fails before execution")
+			}
+		})
+	}
+}
+
+func TestRunLiveLoopAuditFileStopsBeforeSideEffects(t *testing.T) {
+	configPath := writeLiveLoopConfig(t)
+	now := time.Now().UTC()
+	decisionTime := now.Add(-2 * time.Second)
+	planArtifact := liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime)
+	planFile := writeLiveLoopPlanArtifact(t, planArtifact)
+	validAudit := liveLoopAuditArtifact(now.Add(-time.Second), configPath)
+	validReadiness := liveLoopReadinessArtifact(t, configPath, planFile, planArtifact, now)
+	validReadiness.Audit = liveLoopReadinessAuditFromAuditArtifact(validAudit)
+
+	tests := []struct {
+		name            string
+		args            func(readinessFile string, auditFile string) []string
+		audit           domainlive.LiveLoopAuditArtifact
+		mutateReadiness func(*domainlive.LiveReadinessArtifact)
+		wantErrSub      string
+	}{
+		{
+			name: "audit file requires readiness file",
+			args: func(_ string, auditFile string) []string {
+				return []string{"-config", configPath, "-plan-file", planFile, "-audit-file", auditFile, "-execute"}
+			},
+			audit:      validAudit,
+			wantErrSub: "requires -readiness-file",
+		},
+		{
+			name: "stale audit artifact",
+			args: func(readinessFile string, auditFile string) []string {
+				return []string{"-config", configPath, "-plan-file", planFile, "-readiness-file", readinessFile, "-audit-file", auditFile, "-max-audit-age", "10m", "-execute"}
+			},
+			audit: func() domainlive.LiveLoopAuditArtifact {
+				artifact := validAudit
+				artifact.CreatedAt = now.Add(-time.Hour)
+				return artifact
+			}(),
+			wantErrSub: "stale",
+		},
+		{
+			name: "readiness audit mismatch",
+			args: func(readinessFile string, auditFile string) []string {
+				return []string{"-config", configPath, "-plan-file", planFile, "-readiness-file", readinessFile, "-audit-file", auditFile, "-execute"}
+			},
+			audit: validAudit,
+			mutateReadiness: func(a *domainlive.LiveReadinessArtifact) {
+				a.Audit.Completed = 1
+			},
+			wantErrSub: "audit.completed",
+		},
+		{
+			name: "audit config mismatch",
+			args: func(readinessFile string, auditFile string) []string {
+				return []string{"-config", configPath, "-plan-file", planFile, "-readiness-file", readinessFile, "-audit-file", auditFile, "-execute"}
+			},
+			audit: func() domainlive.LiveLoopAuditArtifact {
+				artifact := validAudit
+				artifact.ConfigPath = "configs/other-live.yaml"
+				return artifact
+			}(),
+			wantErrSub: "audit config_path",
+		},
+		{
+			name: "nonpositive max audit age",
+			args: func(readinessFile string, auditFile string) []string {
+				return []string{"-config", configPath, "-plan-file", planFile, "-readiness-file", readinessFile, "-audit-file", auditFile, "-max-audit-age", "0s", "-execute"}
+			},
+			audit:      validAudit,
+			wantErrSub: "max-audit-age",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opened bool
+			readiness := cloneLiveLoopReadinessArtifact(validReadiness)
+			readiness.Audit = liveLoopReadinessAuditFromAuditArtifact(tt.audit)
+			if tt.mutateReadiness != nil {
+				tt.mutateReadiness(&readiness)
+			}
+			readinessFile := writeLiveLoopReadinessArtifact(t, readiness)
+			auditFile := writeLiveLoopAuditArtifact(t, tt.audit)
+			err := runLiveLoop(context.Background(), tt.args(readinessFile, auditFile), liveLoopDependencies{
+				openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+					opened = true
+					return nil, nil
+				},
+				output: &bytes.Buffer{},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected audit error containing %q, got %v", tt.wantErrSub, err)
+			}
+			if opened {
+				t.Fatal("database must not be opened when audit artifact fails before execution")
 			}
 		})
 	}
@@ -1472,6 +1574,54 @@ func writeLiveLoopReadinessArtifact(t *testing.T, artifact domainlive.LiveReadin
 		t.Fatalf("write readiness artifact: %v", err)
 	}
 	return path
+}
+
+func writeLiveLoopAuditArtifact(t *testing.T, artifact domainlive.LiveLoopAuditArtifact) string {
+	t.Helper()
+
+	if err := domainlive.ValidateLiveLoopAuditArtifact(artifact); err != nil {
+		t.Fatalf("validate audit artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal audit artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "live-loop-audit.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write audit artifact: %v", err)
+	}
+	return path
+}
+
+func liveLoopAuditArtifact(createdAt time.Time, configPath string) domainlive.LiveLoopAuditArtifact {
+	return domainlive.LiveLoopAuditArtifact{
+		SchemaVersion: domainlive.LiveLoopAuditArtifactSchemaVersion,
+		CreatedAt:     createdAt.UTC(),
+		ConfigPath:    strings.TrimSpace(configPath),
+		Query: domainlive.LiveLoopAuditArtifactQuery{
+			Limit:             10,
+			IncludeIterations: true,
+		},
+		Summary: domainlive.LiveLoopAuditArtifactSummary{
+			ReviewStatus:           domainlive.LiveLoopAuditReviewStatusClear,
+			ReviewReason:           "no recent live-loop audit runs found",
+			OperatorActionRequired: false,
+		},
+	}
+}
+
+func liveLoopReadinessAuditFromAuditArtifact(artifact domainlive.LiveLoopAuditArtifact) domainlive.LiveReadinessArtifactAudit {
+	return domainlive.LiveReadinessArtifactAudit{
+		Limit:                  artifact.Query.Limit,
+		Total:                  artifact.Summary.Total,
+		Running:                artifact.Summary.Running,
+		Completed:              artifact.Summary.Completed,
+		Failed:                 artifact.Summary.Failed,
+		ReviewStatus:           artifact.Summary.ReviewStatus,
+		ReviewRunID:            artifact.Summary.ReviewRunID,
+		ReviewReason:           artifact.Summary.ReviewReason,
+		OperatorActionRequired: artifact.Summary.OperatorActionRequired,
+	}
 }
 
 func liveLoopReadinessArtifact(

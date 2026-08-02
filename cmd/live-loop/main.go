@@ -71,6 +71,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	maxPlanAge := flags.Duration("max-plan-age", domainlive.DefaultLiveOrderPlanArtifactMaxAge, "maximum accepted age for -plan-file based on submission_created_at")
 	readinessFile := flags.String("readiness-file", "", "optional JSON artifact written by live-readiness; requires a fresh PASS checklist before execution")
 	maxReadinessAge := flags.Duration("max-readiness-age", domainlive.DefaultLiveReadinessArtifactMaxAge, "maximum accepted age for -readiness-file based on created_at")
+	auditFile := flags.String("audit-file", "", "optional JSON artifact written by live-loop-audit; validates readiness audit verdict before execution")
+	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum accepted age for -audit-file based on created_at")
 	decisionID := flags.String("decision-id", "", "persisted LIVE risk decision id to process")
 	selectPending := flags.Bool("select-pending", false, "select the oldest approved pending LIVE risk decision with no live order submission")
 	pendingSymbol := flags.String("pending-symbol", "", "optional symbol filter used with -select-pending")
@@ -100,6 +102,9 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	if *maxReadinessAge <= 0 {
 		return fmt.Errorf("max-readiness-age must be positive")
 	}
+	if *maxAuditAge <= 0 {
+		return fmt.Errorf("max-audit-age must be positive")
+	}
 
 	planArtifact, hasPlanArtifact, planArtifactSHA256, err := loadLiveLoopPlanArtifact(*planFile)
 	if err != nil {
@@ -108,6 +113,13 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	readinessArtifact, hasReadinessArtifact, err := loadLiveLoopReadinessArtifact(*readinessFile)
 	if err != nil {
 		return err
+	}
+	auditArtifact, hasAuditArtifact, err := loadLiveLoopAuditArtifact(*auditFile)
+	if err != nil {
+		return err
+	}
+	if hasAuditArtifact && !hasReadinessArtifact {
+		return fmt.Errorf("audit-file requires -readiness-file")
 	}
 	effectiveDecisionID := *decisionID
 	effectivePendingSymbol := *pendingSymbol
@@ -139,6 +151,11 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	}
 	if hasReadinessArtifact {
 		if err := domainlive.ValidateLiveReadinessArtifactFreshness(readinessArtifact, time.Now().UTC(), *maxReadinessAge); err != nil {
+			return err
+		}
+	}
+	if hasAuditArtifact {
+		if err := domainlive.ValidateLiveLoopAuditArtifactFreshness(auditArtifact, time.Now().UTC(), *maxAuditAge); err != nil {
 			return err
 		}
 	}
@@ -194,6 +211,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			HasPlanArtifact:    hasPlanArtifact,
 			PlanArtifact:       planArtifact,
 			PlanFileSHA256:     planArtifactSHA256,
+			HasAuditArtifact:   hasAuditArtifact,
+			AuditArtifact:      auditArtifact,
 			SelectPending:      *selectPending,
 			PendingQuery:       pendingQuery,
 			SelectedDecisionID: selectedDecisionID,
@@ -288,6 +307,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 				HasPlanArtifact:    hasPlanArtifact,
 				PlanArtifact:       planArtifact,
 				PlanFileSHA256:     planArtifactSHA256,
+				HasAuditArtifact:   hasAuditArtifact,
+				AuditArtifact:      auditArtifact,
 				SelectPending:      *selectPending,
 				PendingQuery:       pendingQuery,
 				SelectedDecisionID: selectedDecisionID,
@@ -486,6 +507,28 @@ func loadLiveLoopReadinessArtifact(path string) (domainlive.LiveReadinessArtifac
 	}
 	if err := domainlive.ValidateLiveReadinessArtifact(artifact); err != nil {
 		return domainlive.LiveReadinessArtifact{}, false, err
+	}
+	return artifact, true, nil
+}
+
+func loadLiveLoopAuditArtifact(path string) (domainlive.LiveLoopAuditArtifact, bool, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return domainlive.LiveLoopAuditArtifact{}, false, nil
+	}
+	if path != trimmedPath {
+		return domainlive.LiveLoopAuditArtifact{}, false, fmt.Errorf("audit-file must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return domainlive.LiveLoopAuditArtifact{}, false, fmt.Errorf("read live-loop audit artifact %q: %w", trimmedPath, err)
+	}
+	var artifact domainlive.LiveLoopAuditArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		return domainlive.LiveLoopAuditArtifact{}, false, fmt.Errorf("decode live-loop audit artifact %q: %w", trimmedPath, err)
+	}
+	if err := domainlive.ValidateLiveLoopAuditArtifact(artifact); err != nil {
+		return domainlive.LiveLoopAuditArtifact{}, false, err
 	}
 	return artifact, true, nil
 }
