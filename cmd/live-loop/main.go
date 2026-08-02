@@ -12,7 +12,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -189,17 +188,16 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		}
 	}
 	if hasReadinessArtifact {
-		if err := validateLiveLoopReadinessArtifactAgainstExecution(
-			readinessArtifact,
-			strings.TrimSpace(*configPath),
-			strings.TrimSpace(*planFile),
-			hasPlanArtifact,
-			planArtifact,
-			planArtifactSHA256,
-			*selectPending,
-			pendingQuery,
-			selectedDecisionID,
-		); err != nil {
+		if err := domainlive.ValidateLiveReadinessArtifactHandoff(readinessArtifact, domainlive.LiveReadinessArtifactHandoffExecution{
+			ConfigPath:         strings.TrimSpace(*configPath),
+			PlanPath:           strings.TrimSpace(*planFile),
+			HasPlanArtifact:    hasPlanArtifact,
+			PlanArtifact:       planArtifact,
+			PlanFileSHA256:     planArtifactSHA256,
+			SelectPending:      *selectPending,
+			PendingQuery:       pendingQuery,
+			SelectedDecisionID: selectedDecisionID,
+		}); err != nil {
 			return err
 		}
 	}
@@ -284,17 +282,16 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			return err
 		}
 		if hasReadinessArtifact {
-			if err := validateLiveLoopReadinessArtifactAgainstExecution(
-				readinessArtifact,
-				strings.TrimSpace(*configPath),
-				strings.TrimSpace(*planFile),
-				hasPlanArtifact,
-				planArtifact,
-				planArtifactSHA256,
-				*selectPending,
-				pendingQuery,
-				selectedDecisionID,
-			); err != nil {
+			if err := domainlive.ValidateLiveReadinessArtifactHandoff(readinessArtifact, domainlive.LiveReadinessArtifactHandoffExecution{
+				ConfigPath:         strings.TrimSpace(*configPath),
+				PlanPath:           strings.TrimSpace(*planFile),
+				HasPlanArtifact:    hasPlanArtifact,
+				PlanArtifact:       planArtifact,
+				PlanFileSHA256:     planArtifactSHA256,
+				SelectPending:      *selectPending,
+				PendingQuery:       pendingQuery,
+				SelectedDecisionID: selectedDecisionID,
+			}); err != nil {
 				return err
 			}
 		}
@@ -742,95 +739,6 @@ func validateLiveLoopPlanArtifactAgainstCurrentDecision(
 		return err
 	}
 	return nil
-}
-
-func validateLiveLoopReadinessArtifactAgainstExecution(
-	artifact domainlive.LiveReadinessArtifact,
-	configPath string,
-	planPath string,
-	hasPlanArtifact bool,
-	planArtifact domainlive.LiveOrderPlanArtifact,
-	planFileSHA256 string,
-	selectPending bool,
-	pendingQuery domainlive.PendingLiveDecisionQuery,
-	selectedDecisionID string,
-) error {
-	if err := domainlive.ValidateLiveReadinessArtifact(artifact); err != nil {
-		return err
-	}
-	var problems []string
-	if !artifact.Ready {
-		problems = append(problems, "ready must be true")
-	}
-	if artifact.Summary.Failed != 0 {
-		problems = append(problems, fmt.Sprintf("failed checks must be zero, got %d", artifact.Summary.Failed))
-	}
-	if artifact.ConfigPath != strings.TrimSpace(configPath) {
-		problems = append(problems, fmt.Sprintf("config_path %q does not match CLI config %q", artifact.ConfigPath, strings.TrimSpace(configPath)))
-	}
-	if !artifact.Pending.Required {
-		problems = append(problems, "pending readiness must be required")
-	}
-	if artifact.Pending.Total == 0 {
-		problems = append(problems, "pending readiness must include at least one pending decision")
-	}
-	selectedDecisionID = strings.TrimSpace(selectedDecisionID)
-	if selectedDecisionID != "" && artifact.Pending.NextDecisionID != selectedDecisionID {
-		problems = append(problems, fmt.Sprintf("pending next_decision_id %q does not match selected decision %q", artifact.Pending.NextDecisionID, selectedDecisionID))
-	}
-	if selectPending && pendingQuery.Symbol != "" && artifact.Pending.Symbol != pendingQuery.Symbol {
-		problems = append(problems, fmt.Sprintf("pending symbol %q does not match selector symbol %q", artifact.Pending.Symbol, pendingQuery.Symbol))
-	}
-	if hasPlanArtifact {
-		if artifact.PlanFile == nil {
-			problems = append(problems, "plan_file is required when -plan-file is used")
-		} else {
-			problems = append(problems, liveLoopReadinessPlanFileProblems(*artifact.PlanFile, planPath, planArtifact, planFileSHA256)...)
-		}
-	} else if artifact.PlanFile != nil {
-		problems = append(problems, "readiness-file plan_file requires -plan-file")
-	}
-	if len(problems) > 0 {
-		return fmt.Errorf("live readiness artifact execution validation failed: %s", strings.Join(problems, "; "))
-	}
-	return nil
-}
-
-func liveLoopReadinessPlanFileProblems(
-	readinessPlan domainlive.LiveReadinessArtifactPlanFile,
-	planPath string,
-	planArtifact domainlive.LiveOrderPlanArtifact,
-	planFileSHA256 string,
-) []string {
-	var problems []string
-	if err := domainlive.ValidateLiveOrderPlanArtifact(planArtifact); err != nil {
-		return []string{err.Error()}
-	}
-	if !liveLoopSamePath(readinessPlan.Path, planPath) {
-		problems = append(problems, fmt.Sprintf("plan_file.path %q does not match -plan-file %q", readinessPlan.Path, strings.TrimSpace(planPath)))
-	}
-	if readinessPlan.SHA256 != strings.TrimSpace(planFileSHA256) {
-		problems = append(problems, fmt.Sprintf("plan_file.sha256 %q does not match -plan-file sha256 %q", readinessPlan.SHA256, strings.TrimSpace(planFileSHA256)))
-	}
-	compareText := map[string][2]string{
-		"plan_file.schema_version":  {readinessPlan.SchemaVersion, planArtifact.SchemaVersion},
-		"plan_file.source":          {readinessPlan.Source, planArtifact.Source},
-		"plan_file.pending_symbol":  {readinessPlan.PendingSymbol, planArtifact.PendingSymbol},
-		"plan_file.decision_id":     {readinessPlan.DecisionID, planArtifact.DecisionID},
-		"plan_file.submission_id":   {readinessPlan.SubmissionID, planArtifact.SubmissionID},
-		"plan_file.client_order_id": {readinessPlan.ClientOrderID, planArtifact.ClientOrderID},
-		"plan_file.symbol":          {readinessPlan.Symbol, planArtifact.Symbol},
-	}
-	for field, values := range compareText {
-		if values[0] != values[1] {
-			problems = append(problems, fmt.Sprintf("%s %q does not match plan artifact %q", field, values[0], values[1]))
-		}
-	}
-	return problems
-}
-
-func liveLoopSamePath(left string, right string) bool {
-	return filepath.Clean(strings.TrimSpace(left)) == filepath.Clean(strings.TrimSpace(right))
 }
 
 func liveLoopPendingDecisionQueryFromFlags(symbol string, enabled bool) (domainlive.PendingLiveDecisionQuery, error) {

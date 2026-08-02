@@ -1,0 +1,104 @@
+package live
+
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+)
+
+type LiveReadinessArtifactHandoffExecution struct {
+	ConfigPath         string
+	PlanPath           string
+	HasPlanArtifact    bool
+	PlanArtifact       LiveOrderPlanArtifact
+	PlanFileSHA256     string
+	SelectPending      bool
+	PendingQuery       PendingLiveDecisionQuery
+	SelectedDecisionID string
+}
+
+func ValidateLiveReadinessArtifactHandoff(
+	artifact LiveReadinessArtifact,
+	execution LiveReadinessArtifactHandoffExecution,
+) error {
+	if err := ValidateLiveReadinessArtifact(artifact); err != nil {
+		return err
+	}
+	var problems []string
+	if !artifact.Ready {
+		problems = append(problems, "ready must be true")
+	}
+	if artifact.Summary.Failed != 0 {
+		problems = append(problems, fmt.Sprintf("failed checks must be zero, got %d", artifact.Summary.Failed))
+	}
+	if artifact.ConfigPath != strings.TrimSpace(execution.ConfigPath) {
+		problems = append(problems, fmt.Sprintf("config_path %q does not match execution config %q", artifact.ConfigPath, strings.TrimSpace(execution.ConfigPath)))
+	}
+	if !artifact.Pending.Required {
+		problems = append(problems, "pending readiness must be required")
+	}
+	if artifact.Pending.Total == 0 {
+		problems = append(problems, "pending readiness must include at least one pending decision")
+	}
+	selectedDecisionID := strings.TrimSpace(execution.SelectedDecisionID)
+	if selectedDecisionID != "" && artifact.Pending.NextDecisionID != selectedDecisionID {
+		problems = append(problems, fmt.Sprintf("pending next_decision_id %q does not match selected decision %q", artifact.Pending.NextDecisionID, selectedDecisionID))
+	}
+	if execution.SelectPending {
+		if err := ValidatePendingLiveDecisionQuery(execution.PendingQuery); err != nil {
+			problems = append(problems, err.Error())
+		}
+		if execution.PendingQuery.Symbol != "" && artifact.Pending.Symbol != execution.PendingQuery.Symbol {
+			problems = append(problems, fmt.Sprintf("pending symbol %q does not match selector symbol %q", artifact.Pending.Symbol, execution.PendingQuery.Symbol))
+		}
+	}
+	if execution.HasPlanArtifact {
+		if artifact.PlanFile == nil {
+			problems = append(problems, "plan_file is required when -plan-file is used")
+		} else {
+			problems = append(problems, liveReadinessArtifactHandoffPlanFileProblems(*artifact.PlanFile, execution)...)
+		}
+	} else if artifact.PlanFile != nil {
+		problems = append(problems, "readiness-file plan_file requires -plan-file")
+	}
+	if len(problems) > 0 {
+		return errors.New("live readiness artifact handoff validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func liveReadinessArtifactHandoffPlanFileProblems(
+	readinessPlan LiveReadinessArtifactPlanFile,
+	execution LiveReadinessArtifactHandoffExecution,
+) []string {
+	var problems []string
+	if err := ValidateLiveOrderPlanArtifact(execution.PlanArtifact); err != nil {
+		return []string{err.Error()}
+	}
+	if !sameLiveReadinessHandoffPath(readinessPlan.Path, execution.PlanPath) {
+		problems = append(problems, fmt.Sprintf("plan_file.path %q does not match -plan-file %q", readinessPlan.Path, strings.TrimSpace(execution.PlanPath)))
+	}
+	if readinessPlan.SHA256 != strings.TrimSpace(execution.PlanFileSHA256) {
+		problems = append(problems, fmt.Sprintf("plan_file.sha256 %q does not match -plan-file sha256 %q", readinessPlan.SHA256, strings.TrimSpace(execution.PlanFileSHA256)))
+	}
+	compareText := map[string][2]string{
+		"plan_file.schema_version":  {readinessPlan.SchemaVersion, execution.PlanArtifact.SchemaVersion},
+		"plan_file.source":          {readinessPlan.Source, execution.PlanArtifact.Source},
+		"plan_file.pending_symbol":  {readinessPlan.PendingSymbol, execution.PlanArtifact.PendingSymbol},
+		"plan_file.decision_id":     {readinessPlan.DecisionID, execution.PlanArtifact.DecisionID},
+		"plan_file.submission_id":   {readinessPlan.SubmissionID, execution.PlanArtifact.SubmissionID},
+		"plan_file.client_order_id": {readinessPlan.ClientOrderID, execution.PlanArtifact.ClientOrderID},
+		"plan_file.symbol":          {readinessPlan.Symbol, execution.PlanArtifact.Symbol},
+	}
+	for field, values := range compareText {
+		if values[0] != values[1] {
+			problems = append(problems, fmt.Sprintf("%s %q does not match plan artifact %q", field, values[0], values[1]))
+		}
+	}
+	return problems
+}
+
+func sameLiveReadinessHandoffPath(left string, right string) bool {
+	return filepath.Clean(strings.TrimSpace(left)) == filepath.Clean(strings.TrimSpace(right))
+}
