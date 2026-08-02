@@ -95,8 +95,15 @@ LIVE_READINESS_REQUIRE_PENDING ?= 1
 LIVE_READINESS_ARTIFACT ?=
 LIVE_DEPLOY_ARTIFACT ?=
 LIVE_DEPLOY_MAX_AGE ?= 10m
+LIVE_FIRST_ORDER_ARTIFACT_DIR ?= artifacts/live-first-order
+LIVE_FIRST_ORDER_RUN_ID ?= live_loop_first_order_001
+LIVE_FIRST_ORDER_REQUIRE_PENDING ?= true
+LIVE_FIRST_ORDER_READINESS_PENDING_LIMIT ?= 1
+LIVE_FIRST_ORDER_READINESS_AUDIT_LIMIT ?= 10
+LIVE_FIRST_ORDER_AUDIT_LIMIT ?= 10
+LIVE_FIRST_ORDER_PRINT_ONLY ?=
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-loop-audit live-decision-scan live-readiness live-handoff-verify live-deploy-check live-order-plan live-submit docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-loop-audit live-decision-scan live-readiness live-handoff-verify live-deploy-check live-first-order-check live-order-plan live-submit docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -222,6 +229,9 @@ live-handoff-verify:
 
 live-deploy-check:
 	$(GO) run ./cmd/live-deploy-check -config $(CONFIG) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE),) $(if $(LIVE_READINESS_FILE),-readiness-file $(LIVE_READINESS_FILE),) $(if $(LIVE_AUDIT_ARTIFACT),-audit-file $(LIVE_AUDIT_ARTIFACT),) $(if $(LIVE_DEPLOY_ARTIFACT),-artifact-path $(LIVE_DEPLOY_ARTIFACT),) -max-plan-age $(LIVE_PLAN_MAX_AGE) -max-readiness-age $(LIVE_READINESS_MAX_AGE) -max-audit-age $(LIVE_AUDIT_MAX_AGE) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -micro-capital-limit-usdt $(LIVE_MICRO_CAPITAL_LIMIT) -max-iterations $(LIVE_LOOP_MAX_ITERATIONS) -max-runtime $(LIVE_LOOP_MAX_RUNTIME) -iteration-timeout $(LIVE_LOOP_ITERATION_TIMEOUT) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)
+
+live-first-order-check:
+	$(GO) run ./cmd/live-first-order-check -config $(CONFIG) -artifact-dir $(LIVE_FIRST_ORDER_ARTIFACT_DIR) -run-id $(LIVE_FIRST_ORDER_RUN_ID) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-symbol $(LIVE_PENDING_SYMBOL),) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -micro-capital-limit-usdt $(LIVE_MICRO_CAPITAL_LIMIT) -readiness-pending-limit $(LIVE_FIRST_ORDER_READINESS_PENDING_LIMIT) -readiness-audit-limit $(LIVE_FIRST_ORDER_READINESS_AUDIT_LIMIT) -audit-limit $(LIVE_FIRST_ORDER_AUDIT_LIMIT) -require-pending=$(LIVE_FIRST_ORDER_REQUIRE_PENDING) -max-plan-age $(LIVE_PLAN_MAX_AGE) -max-readiness-age $(LIVE_READINESS_MAX_AGE) -max-audit-age $(LIVE_AUDIT_MAX_AGE) -max-deploy-check-age $(LIVE_DEPLOY_MAX_AGE) -max-iterations $(LIVE_LOOP_MAX_ITERATIONS) -max-runtime $(LIVE_LOOP_MAX_RUNTIME) -iteration-timeout $(LIVE_LOOP_ITERATION_TIMEOUT) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,) $(if $(LIVE_FIRST_ORDER_PRINT_ONLY),-print-only,)
 
 live-order-plan:
 	$(GO) run ./cmd/live-order-plan -config $(CONFIG) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_LOOP_RUN_ID),-run-id $(LIVE_LOOP_RUN_ID),) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_PLAN_FILE),-artifact-path $(LIVE_PLAN_FILE),)

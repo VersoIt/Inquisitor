@@ -90,9 +90,10 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Read-only live readiness CLI that checks live config/env/operator confirmation, capital cap, pending selector DB-pool safety, inactive Kill Switch, pending LIVE decision availability, optional live order plan artifact freshness, and recent live-loop audit status without contacting Bybit or placing orders, with an optional durable JSON checklist artifact.
 - Read-only live order plan CLI that previews the exact `run_id`, deterministic `submission_id`/`client_order_id`, normalized order instructions, risk snapshot, notional, and safety side-effect flags for an explicit or FIFO-selected pending LIVE decision without reserving it, writing order rows, or contacting Bybit; `live-handoff-verify` can validate the saved plan/readiness/audit/deploy-check artifacts without DB or exchange access, and `live-loop -plan-file` revalidates the artifact chain against the current PostgreSQL risk snapshot before any startup preflight or exchange-capable work.
 - Read-only live deploy check CLI that validates the final first-order operator command envelope before execution: fresh plan/readiness/audit artifacts, CLEAR audit review, no readiness warnings, explicit execute/subaccount flags, one bounded iteration, source-mode consistency, live micro capital/notional cap, and leverage no higher than `1`.
+- Operator-facing live first-order check CLI that builds a reproducible plan/readiness/audit/deploy-check artifact bundle, runs the final offline handoff verification, and prints the exact armed `live-loop` command without running the order-capable step.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should add deployment runbooks, operational observability, and explicit live readiness checklists before any always-on worker is considered.
+The next Phase 7 slices should add operational observability and explicit post-first-order review gates before any always-on worker is considered.
 
 ## What This Is Not
 
@@ -591,6 +592,18 @@ go run ./cmd/live-deploy-check -config configs/live.local.yaml -plan-file artifa
 go run ./cmd/live-loop -config configs/live.local.yaml -plan-file artifacts/live-order-plan.json -readiness-file artifacts/live-readiness.json -audit-file artifacts/live-loop-audit.json -deploy-check-file artifacts/live-deploy-check.json -subaccount-confirmed -max-initial-live-capital-usdt 100 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
 ```
 
+To build and verify the same first-order handoff bundle with one operator command, use `live-first-order-check`. It runs `live-order-plan`, `live-readiness`, `live-loop-audit`, `live-deploy-check`, and `live-handoff-verify`, writes artifacts under `-artifact-dir`, then prints the exact armed `live-loop` command. It does not run `live-loop` and cannot place an order by itself:
+
+```powershell
+go run ./cmd/live-first-order-check -config configs/live.local.yaml -decision-id risk_decision_live_001 -symbol BTCUSDT -artifact-dir artifacts/live-first-order -subaccount-confirmed -execute
+```
+
+For FIFO selection, use the same explicit selector source:
+
+```powershell
+go run ./cmd/live-first-order-check -config configs/live.local.yaml -select-pending -symbol BTCUSDT -artifact-dir artifacts/live-first-order -subaccount-confirmed -execute
+```
+
 Manual `-expected-submission-id` and `-expected-client-order-id` flags are still available as a fallback when no artifact file is used.
 
 Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight including the same fresh account and flat-position guards, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
@@ -671,6 +684,7 @@ make live-order-plan CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decisi
 make live-order-plan CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_LOOP_RUN_ID=live_loop_001 LIVE_PLAN_FILE=artifacts/live-order-plan.json
 make live-handoff-verify CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_FILE=artifacts/live-readiness.json LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json LIVE_DEPLOY_ARTIFACT=artifacts/live-deploy-check.json LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-deploy-check CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_FILE=artifacts/live-readiness.json LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json LIVE_DEPLOY_ARTIFACT=artifacts/live-deploy-check.json LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
+make live-first-order-check CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
 make live-loop CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_FILE=artifacts/live-readiness.json LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json LIVE_DEPLOY_ARTIFACT=artifacts/live-deploy-check.json LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-loop CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
