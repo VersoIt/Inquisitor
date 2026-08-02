@@ -20,6 +20,50 @@ type LiveReadinessArtifactHandoffExecution struct {
 	SelectedDecisionID string
 }
 
+func ResolveLiveReadinessHandoffExecutionSelection(
+	plan LiveOrderPlanArtifact,
+	decisionID string,
+	selectPending bool,
+	pendingSymbol string,
+) (string, PendingLiveDecisionQuery, error) {
+	if err := ValidateLiveOrderPlanArtifactExecutionSource(plan, selectPending); err != nil {
+		return "", PendingLiveDecisionQuery{}, err
+	}
+	trimmedDecisionID := strings.TrimSpace(decisionID)
+	trimmedPendingSymbol := strings.TrimSpace(pendingSymbol)
+	if selectPending {
+		if trimmedDecisionID != "" {
+			return "", PendingLiveDecisionQuery{}, fmt.Errorf("decision-id must be empty when -select-pending is used")
+		}
+		if pendingSymbol != trimmedPendingSymbol {
+			return "", PendingLiveDecisionQuery{}, fmt.Errorf("pending-symbol must be trimmed")
+		}
+		effectivePendingSymbol := strings.ToUpper(trimmedPendingSymbol)
+		if effectivePendingSymbol == "" {
+			effectivePendingSymbol = plan.PendingSymbol
+		}
+		query := PendingLiveDecisionQuery{Symbol: effectivePendingSymbol, Limit: 1}
+		if err := ValidatePendingLiveDecisionQuery(query); err != nil {
+			return "", PendingLiveDecisionQuery{}, err
+		}
+		return plan.DecisionID, query, nil
+	}
+	if trimmedPendingSymbol != "" {
+		return "", PendingLiveDecisionQuery{}, fmt.Errorf("pending-symbol requires -select-pending")
+	}
+	selectedDecisionID := plan.DecisionID
+	if trimmedDecisionID != "" {
+		if decisionID != trimmedDecisionID {
+			return "", PendingLiveDecisionQuery{}, fmt.Errorf("decision-id must be trimmed")
+		}
+		selectedDecisionID = trimmedDecisionID
+	}
+	if selectedDecisionID != plan.DecisionID {
+		return "", PendingLiveDecisionQuery{}, fmt.Errorf("decision-id %q does not match plan-file decision_id %q", selectedDecisionID, plan.DecisionID)
+	}
+	return selectedDecisionID, PendingLiveDecisionQuery{}, nil
+}
+
 func ValidateLiveReadinessArtifactHandoff(
 	artifact LiveReadinessArtifact,
 	execution LiveReadinessArtifactHandoffExecution,

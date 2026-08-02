@@ -77,9 +77,6 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 	if err != nil {
 		return err
 	}
-	if err := domainlive.ValidateLiveOrderPlanArtifactExecutionSource(plan.Artifact, *selectPending); err != nil {
-		return err
-	}
 	now := deps.now().UTC()
 	if err := domainlive.ValidateLiveOrderPlanArtifactFreshness(plan.Artifact, now, *maxPlanAge); err != nil {
 		return err
@@ -92,7 +89,7 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 			return err
 		}
 	}
-	selectedDecisionID, pendingQuery, err := liveHandoffExecutionSelectionFromFlags(plan.Artifact, *decisionID, *selectPending, *pendingSymbol)
+	selectedDecisionID, pendingQuery, err := domainlive.ResolveLiveReadinessHandoffExecutionSelection(plan.Artifact, *decisionID, *selectPending, *pendingSymbol)
 	if err != nil {
 		return err
 	}
@@ -226,48 +223,4 @@ func liveHandoffAuditArtifactCreatedAtLogValue(artifact domainlive.LiveLoopAudit
 		return ""
 	}
 	return artifact.CreatedAt.Format(time.RFC3339Nano)
-}
-
-func liveHandoffExecutionSelectionFromFlags(
-	plan domainlive.LiveOrderPlanArtifact,
-	decisionID string,
-	selectPending bool,
-	pendingSymbol string,
-) (string, domainlive.PendingLiveDecisionQuery, error) {
-	if err := domainlive.ValidateLiveOrderPlanArtifact(plan); err != nil {
-		return "", domainlive.PendingLiveDecisionQuery{}, err
-	}
-	trimmedDecisionID := strings.TrimSpace(decisionID)
-	trimmedPendingSymbol := strings.TrimSpace(pendingSymbol)
-	if selectPending {
-		if trimmedDecisionID != "" {
-			return "", domainlive.PendingLiveDecisionQuery{}, fmt.Errorf("decision-id must be empty when -select-pending is used")
-		}
-		if pendingSymbol != trimmedPendingSymbol {
-			return "", domainlive.PendingLiveDecisionQuery{}, fmt.Errorf("pending-symbol must be trimmed")
-		}
-		effectivePendingSymbol := strings.ToUpper(trimmedPendingSymbol)
-		if effectivePendingSymbol == "" {
-			effectivePendingSymbol = plan.PendingSymbol
-		}
-		query := domainlive.PendingLiveDecisionQuery{Symbol: effectivePendingSymbol, Limit: 1}
-		if err := domainlive.ValidatePendingLiveDecisionQuery(query); err != nil {
-			return "", domainlive.PendingLiveDecisionQuery{}, err
-		}
-		return plan.DecisionID, query, nil
-	}
-	if trimmedPendingSymbol != "" {
-		return "", domainlive.PendingLiveDecisionQuery{}, fmt.Errorf("pending-symbol requires -select-pending")
-	}
-	selectedDecisionID := plan.DecisionID
-	if trimmedDecisionID != "" {
-		if decisionID != trimmedDecisionID {
-			return "", domainlive.PendingLiveDecisionQuery{}, fmt.Errorf("decision-id must be trimmed")
-		}
-		selectedDecisionID = trimmedDecisionID
-	}
-	if selectedDecisionID != plan.DecisionID {
-		return "", domainlive.PendingLiveDecisionQuery{}, fmt.Errorf("decision-id %q does not match plan-file decision_id %q", selectedDecisionID, plan.DecisionID)
-	}
-	return selectedDecisionID, domainlive.PendingLiveDecisionQuery{}, nil
 }
