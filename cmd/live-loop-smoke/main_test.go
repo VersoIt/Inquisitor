@@ -342,17 +342,85 @@ func TestBuildAndValidateLiveLoopSmokeHandoffChecksArtifactChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build smoke handoff: %v", err)
 	}
-	if handoff.PlanPath != defaultLiveLoopSmokePlanArtifactPath ||
-		handoff.AuditPath != defaultLiveLoopSmokeAuditArtifactPath ||
-		len(handoff.PlanFileSHA256) != 64 ||
-		handoff.PlanArtifact.DecisionID != identity.DecisionID ||
+	if handoff.PlanArtifact.DecisionID != identity.DecisionID ||
 		handoff.PlanArtifact.SubmissionID != identity.SubmissionID ||
 		handoff.ReadinessArtifact.Pending.NextDecisionID != identity.DecisionID ||
 		handoff.AuditArtifact.Summary.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
 		!handoff.DeploymentReport.Ready ||
-		handoff.ReadinessArtifact.PlanFile == nil ||
-		handoff.ReadinessArtifact.PlanFile.SHA256 != handoff.PlanFileSHA256 {
-		t.Fatalf("handoff mismatch: %#v", handoff)
+		!handoff.DeploymentArtifact.Ready ||
+		handoff.DeploymentArtifact.SchemaVersion != domainlive.LiveDeploymentCheckArtifactSchemaVersion {
+		t.Fatalf("handoff summary mismatch: %#v", handoff)
+	}
+	for _, tt := range []struct {
+		name     string
+		handoff  string
+		artifact string
+		sha256   string
+		wantPath string
+		wantSHA  string
+	}{
+		{
+			name:     "plan",
+			handoff:  handoff.PlanPath,
+			artifact: handoff.DeploymentArtifact.PlanFile.Path,
+			sha256:   handoff.PlanFileSHA256,
+			wantPath: defaultLiveLoopSmokePlanArtifactPath,
+			wantSHA:  handoff.DeploymentArtifact.PlanFile.SHA256,
+		},
+		{
+			name:     "readiness",
+			handoff:  handoff.ReadinessPath,
+			artifact: handoff.DeploymentArtifact.ReadinessFile.Path,
+			sha256:   handoff.ReadinessFileSHA256,
+			wantPath: defaultLiveLoopSmokeReadinessPath,
+			wantSHA:  handoff.DeploymentArtifact.ReadinessFile.SHA256,
+		},
+		{
+			name:     "audit",
+			handoff:  handoff.AuditPath,
+			artifact: handoff.DeploymentArtifact.AuditFile.Path,
+			sha256:   handoff.AuditFileSHA256,
+			wantPath: defaultLiveLoopSmokeAuditArtifactPath,
+			wantSHA:  handoff.DeploymentArtifact.AuditFile.SHA256,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.handoff != tt.wantPath || tt.artifact != tt.wantPath {
+				t.Fatalf("path mismatch: handoff=%q artifact=%q want=%q", tt.handoff, tt.artifact, tt.wantPath)
+			}
+			if len(tt.sha256) != 64 || tt.sha256 != tt.wantSHA {
+				t.Fatalf("sha256 mismatch: got=%q want=%q", tt.sha256, tt.wantSHA)
+			}
+		})
+	}
+	if handoff.ReadinessArtifact.PlanFile == nil ||
+		handoff.ReadinessArtifact.PlanFile.SHA256 != handoff.PlanFileSHA256 ||
+		handoff.DeploymentPath != defaultLiveLoopSmokeDeployCheckPath ||
+		handoff.DeploymentArtifact.Execution.SelectedDecisionID != identity.DecisionID ||
+		handoff.DeploymentArtifact.Execution.MaxInitialLiveCapitalUSDT != "100" {
+		t.Fatalf("artifact linkage mismatch: %#v", handoff)
+	}
+	if err := domainlive.ValidateLiveDeploymentCheckArtifactHandoff(handoff.DeploymentArtifact, domainlive.LiveDeploymentCheckArtifactHandoffExecution{
+		ConfigPath:                "configs/config.example.yaml",
+		PlanPath:                  handoff.PlanPath,
+		PlanFileSHA256:            handoff.PlanFileSHA256,
+		PlanArtifact:              handoff.PlanArtifact,
+		ReadinessPath:             handoff.ReadinessPath,
+		ReadinessFileSHA256:       handoff.ReadinessFileSHA256,
+		ReadinessArtifact:         handoff.ReadinessArtifact,
+		AuditPath:                 handoff.AuditPath,
+		AuditFileSHA256:           handoff.AuditFileSHA256,
+		AuditArtifact:             handoff.AuditArtifact,
+		Execute:                   true,
+		SubaccountConfirmed:       true,
+		DecisionID:                identity.DecisionID,
+		SelectedDecisionID:        identity.DecisionID,
+		MaxInitialLiveCapitalUSDT: decimal.RequireFromString("100"),
+		MaxIterations:             1,
+		MaxRuntime:                defaultLiveLoopSmokeMaxRuntime,
+		IterationTimeout:          defaultLiveLoopSmokeIterationTimeout,
+	}); err != nil {
+		t.Fatalf("deployment artifact handoff: %v", err)
 	}
 	if riskReader.calls != 2 || pendingReader.calls != 1 || auditReader.calls != 1 || killSwitch.calls != 1 {
 		t.Fatalf("reader calls mismatch: risk=%d pending=%d audit=%d kill=%d", riskReader.calls, pendingReader.calls, auditReader.calls, killSwitch.calls)
