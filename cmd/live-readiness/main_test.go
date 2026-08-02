@@ -352,7 +352,9 @@ func TestRunLiveReadinessLogsReadyReport(t *testing.T) {
 		artifact.Audit.Total != 1 ||
 		artifact.Audit.Completed != 1 ||
 		artifact.Audit.Running != 0 ||
-		artifact.Audit.Failed != 0 {
+		artifact.Audit.Failed != 0 ||
+		artifact.Audit.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
+		artifact.Audit.OperatorActionRequired {
 		t.Fatalf("readiness artifact audit mismatch: %#v", artifact.Audit)
 	}
 	if artifact.KillSwitch.Active || artifact.KillSwitch.UpdatedAt != nil || artifact.PlanFile != nil {

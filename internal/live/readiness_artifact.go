@@ -50,11 +50,15 @@ type LiveReadinessArtifactPending struct {
 }
 
 type LiveReadinessArtifactAudit struct {
-	Limit     int `json:"limit"`
-	Total     int `json:"total"`
-	Running   int `json:"running"`
-	Completed int `json:"completed"`
-	Failed    int `json:"failed"`
+	Limit                  int                       `json:"limit"`
+	Total                  int                       `json:"total"`
+	Running                int                       `json:"running"`
+	Completed              int                       `json:"completed"`
+	Failed                 int                       `json:"failed"`
+	ReviewStatus           LiveLoopAuditReviewStatus `json:"review_status,omitempty"`
+	ReviewRunID            string                    `json:"review_run_id,omitempty"`
+	ReviewReason           string                    `json:"review_reason,omitempty"`
+	OperatorActionRequired bool                      `json:"operator_action_required"`
 }
 
 type LiveReadinessArtifactKillSwitch struct {
@@ -136,6 +140,7 @@ func ValidateLiveReadinessArtifact(artifact LiveReadinessArtifact) error {
 	if artifact.Audit.Limit <= 0 {
 		problems = append(problems, "audit.limit must be positive")
 	}
+	problems = append(problems, validateLiveReadinessArtifactAuditProblems(artifact.Audit)...)
 	if artifact.KillSwitch.Active && artifact.KillSwitch.UpdatedAt == nil {
 		problems = append(problems, "active kill_switch requires updated_at")
 	}
@@ -149,6 +154,39 @@ func ValidateLiveReadinessArtifact(artifact LiveReadinessArtifact) error {
 		return errors.New("live readiness artifact validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func validateLiveReadinessArtifactAuditProblems(audit LiveReadinessArtifactAudit) []string {
+	var problems []string
+	if audit.ReviewStatus == "" {
+		if audit.ReviewRunID != "" || strings.TrimSpace(audit.ReviewReason) != "" || audit.OperatorActionRequired {
+			problems = append(problems, "audit.review_status is required when audit review metadata is set")
+		}
+		return problems
+	}
+	if !KnownLiveLoopAuditReviewStatus(audit.ReviewStatus) {
+		problems = append(problems, "audit.review_status must be CLEAR, REVIEW, or BLOCKED")
+	}
+	if audit.ReviewReason != strings.TrimSpace(audit.ReviewReason) {
+		problems = append(problems, "audit.review_reason must be trimmed")
+	}
+	if strings.TrimSpace(audit.ReviewReason) == "" {
+		problems = append(problems, "audit.review_reason is required when audit.review_status is set")
+	}
+	if audit.ReviewRunID != strings.TrimSpace(audit.ReviewRunID) {
+		problems = append(problems, "audit.review_run_id must be trimmed")
+	}
+	if audit.ReviewStatus == LiveLoopAuditReviewStatusClear && audit.ReviewRunID != "" {
+		problems = append(problems, "audit.review_run_id must be empty when audit.review_status is CLEAR")
+	}
+	if audit.ReviewStatus != LiveLoopAuditReviewStatusClear && strings.TrimSpace(audit.ReviewRunID) == "" {
+		problems = append(problems, "audit.review_run_id is required when audit.review_status requires review")
+	}
+	review := LiveLoopAuditReview{Status: audit.ReviewStatus}
+	if audit.OperatorActionRequired != review.OperatorActionRequired() {
+		problems = append(problems, "audit.operator_action_required must match audit.review_status")
+	}
+	return problems
 }
 
 func ValidateLiveReadinessArtifactFreshness(

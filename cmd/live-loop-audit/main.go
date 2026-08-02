@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	applive "github.com/VersoIt/Inquisitor/internal/app/live"
 	"github.com/VersoIt/Inquisitor/internal/config"
@@ -21,6 +22,7 @@ type liveLoopAuditDependencies struct {
 	loadConfig     func(string) (*config.Config, error)
 	openDB         func(context.Context, config.DatabaseConfig) (*sql.DB, error)
 	newAuditReader func(*sql.DB) domainlive.LiveLoopAuditReader
+	now            func() time.Time
 	output         io.Writer
 }
 
@@ -41,6 +43,7 @@ func runLiveLoopAudit(ctx context.Context, args []string, deps liveLoopAuditDepe
 	statusValue := flags.String("status", "", "optional run status filter: RUNNING, COMPLETED, or FAILED")
 	limit := flags.Int("limit", 10, "maximum runs to list, from 1 to 100")
 	includeIterations := flags.Bool("include-iterations", true, "include iteration audit rows for each listed run")
+	artifactPath := flags.String("artifact-path", "", "optional path to write a machine-readable JSON live-loop audit artifact")
 	logLevel := flags.String("log-level", "", "optional log level override: debug, info, warn, error")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -62,6 +65,10 @@ func runLiveLoopAudit(ctx context.Context, args []string, deps liveLoopAuditDepe
 	query.RunID = strings.TrimSpace(query.RunID)
 	if query.Limit == 0 {
 		query.Limit = 10
+	}
+	auditArtifactPath, err := liveLoopAuditArtifactPathFromFlag(*artifactPath)
+	if err != nil {
+		return err
 	}
 
 	cfg, err := deps.loadConfig(*configPath)
@@ -91,6 +98,26 @@ func runLiveLoopAudit(ctx context.Context, args []string, deps liveLoopAuditDepe
 		return err
 	}
 	logLiveLoopAuditReport(log, report)
+	if auditArtifactPath != "" {
+		artifact, err := applive.BuildLiveLoopAuditArtifact(applive.BuildLiveLoopAuditArtifactRequest{
+			Report:     report,
+			CreatedAt:  deps.now().UTC(),
+			ConfigPath: strings.TrimSpace(*configPath),
+		})
+		if err != nil {
+			return err
+		}
+		if err := writeLiveLoopAuditArtifact(auditArtifactPath, artifact); err != nil {
+			return err
+		}
+		log.Info(
+			"live-loop audit artifact written",
+			"path", auditArtifactPath,
+			"schema_version", artifact.SchemaVersion,
+			"review_status", artifact.Summary.ReviewStatus,
+			"operator_action_required", artifact.Summary.OperatorActionRequired,
+		)
+	}
 	return nil
 }
 
@@ -104,6 +131,11 @@ func (deps liveLoopAuditDependencies) withDefaults() liveLoopAuditDependencies {
 	if deps.newAuditReader == nil {
 		deps.newAuditReader = func(db *sql.DB) domainlive.LiveLoopAuditReader {
 			return postgres.NewLiveLoopJournalRepository(db)
+		}
+	}
+	if deps.now == nil {
+		deps.now = func() time.Time {
+			return time.Now().UTC()
 		}
 	}
 	if deps.output == nil {

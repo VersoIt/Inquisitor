@@ -51,6 +51,25 @@ func TestValidateLiveReadinessArtifactTableDriven(t *testing.T) {
 		{name: "bad plan max age", mutate: func(a *domainlive.LiveReadinessArtifact) {
 			a.PlanFile.MaxAge = "soon"
 		}, wantErrSub: "plan_file.max_age"},
+		{name: "invalid audit review status", mutate: func(a *domainlive.LiveReadinessArtifact) {
+			a.Audit.ReviewStatus = "BROKEN"
+		}, wantErrSub: "audit.review_status"},
+		{name: "audit review metadata requires status", mutate: func(a *domainlive.LiveReadinessArtifact) {
+			a.Audit.ReviewStatus = ""
+			a.Audit.OperatorActionRequired = true
+		}, wantErrSub: "audit.review_status"},
+		{name: "audit review requires reason", mutate: func(a *domainlive.LiveReadinessArtifact) {
+			a.Audit.ReviewReason = ""
+		}, wantErrSub: "audit.review_reason"},
+		{name: "audit blocked requires run id", mutate: func(a *domainlive.LiveReadinessArtifact) {
+			a.Audit.ReviewStatus = domainlive.LiveLoopAuditReviewStatusBlocked
+			a.Audit.ReviewRunID = ""
+			a.Audit.OperatorActionRequired = true
+			a.Audit.ReviewReason = "live-loop run is still RUNNING"
+		}, wantErrSub: "audit.review_run_id"},
+		{name: "audit action must match status", mutate: func(a *domainlive.LiveReadinessArtifact) {
+			a.Audit.OperatorActionRequired = true
+		}, wantErrSub: "audit.operator_action_required"},
 		{name: "decision plan rejects pending symbol", mutate: func(a *domainlive.LiveReadinessArtifact) {
 			a.PlanFile.PendingSymbol = "BTCUSDT"
 		}, wantErrSub: "plan_file.pending_symbol"},
@@ -156,9 +175,12 @@ func validLiveReadinessArtifact(createdAt time.Time) domainlive.LiveReadinessArt
 			NewestAt:       &newestAt,
 		},
 		Audit: domainlive.LiveReadinessArtifactAudit{
-			Limit:     10,
-			Total:     1,
-			Completed: 1,
+			Limit:                  10,
+			Total:                  1,
+			Completed:              1,
+			ReviewStatus:           domainlive.LiveLoopAuditReviewStatusClear,
+			ReviewReason:           "recent live-loop audit has no running or failed runs",
+			OperatorActionRequired: false,
 		},
 		KillSwitch: domainlive.LiveReadinessArtifactKillSwitch{},
 		PlanFile: &domainlive.LiveReadinessArtifactPlanFile{

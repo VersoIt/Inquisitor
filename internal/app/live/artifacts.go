@@ -16,6 +16,12 @@ type BuildLiveReadinessArtifactRequest struct {
 	PlanFileSHA256 string
 }
 
+type BuildLiveLoopAuditArtifactRequest struct {
+	Report     LiveLoopAuditReport
+	CreatedAt  time.Time
+	ConfigPath string
+}
+
 func BuildLiveOrderPlanArtifact(
 	source string,
 	pendingSymbol string,
@@ -95,11 +101,15 @@ func BuildLiveReadinessArtifact(req BuildLiveReadinessArtifactRequest) (domainli
 			NewestAt:       liveArtifactTimePointer(req.Report.Pending.Summary.NewestAt),
 		},
 		Audit: domainlive.LiveReadinessArtifactAudit{
-			Limit:     auditLimit,
-			Total:     req.Report.Audit.Summary.Total,
-			Running:   req.Report.Audit.Summary.Running,
-			Completed: req.Report.Audit.Summary.Completed,
-			Failed:    req.Report.Audit.Summary.Failed,
+			Limit:                  auditLimit,
+			Total:                  req.Report.Audit.Summary.Total,
+			Running:                req.Report.Audit.Summary.Running,
+			Completed:              req.Report.Audit.Summary.Completed,
+			Failed:                 req.Report.Audit.Summary.Failed,
+			ReviewStatus:           req.Report.Audit.Summary.ReviewStatus,
+			ReviewRunID:            req.Report.Audit.Summary.ReviewRunID,
+			ReviewReason:           req.Report.Audit.Summary.ReviewReason,
+			OperatorActionRequired: req.Report.Audit.Summary.OperatorActionRequired,
 		},
 		KillSwitch: domainlive.LiveReadinessArtifactKillSwitch{
 			Active:    req.Report.KillSwitch.Active,
@@ -136,6 +146,82 @@ func BuildLiveReadinessArtifact(req BuildLiveReadinessArtifactRequest) (domainli
 		return domainlive.LiveReadinessArtifact{}, err
 	}
 	return artifact, nil
+}
+
+func BuildLiveLoopAuditArtifact(req BuildLiveLoopAuditArtifactRequest) (domainlive.LiveLoopAuditArtifact, error) {
+	queryLimit := req.Report.Query.Limit
+	if queryLimit == 0 {
+		queryLimit = 10
+	}
+	artifact := domainlive.LiveLoopAuditArtifact{
+		SchemaVersion: domainlive.LiveLoopAuditArtifactSchemaVersion,
+		CreatedAt:     req.CreatedAt.UTC(),
+		ConfigPath:    strings.TrimSpace(req.ConfigPath),
+		Query: domainlive.LiveLoopAuditArtifactQuery{
+			RunID:             req.Report.Query.RunID,
+			Status:            req.Report.Query.Status,
+			Limit:             queryLimit,
+			IncludeIterations: req.Report.Query.IncludeIterations,
+		},
+		Summary: domainlive.LiveLoopAuditArtifactSummary{
+			Total:                  req.Report.Summary.Total,
+			Running:                req.Report.Summary.Running,
+			Completed:              req.Report.Summary.Completed,
+			Failed:                 req.Report.Summary.Failed,
+			ReviewStatus:           req.Report.Summary.ReviewStatus,
+			ReviewRunID:            req.Report.Summary.ReviewRunID,
+			ReviewReason:           req.Report.Summary.ReviewReason,
+			OperatorActionRequired: req.Report.Summary.OperatorActionRequired,
+		},
+	}
+	for _, run := range req.Report.Runs {
+		artifact.Runs = append(artifact.Runs, buildLiveLoopAuditArtifactRun(run, req.Report.Query.IncludeIterations))
+	}
+	if err := domainlive.ValidateLiveLoopAuditArtifact(artifact); err != nil {
+		return domainlive.LiveLoopAuditArtifact{}, err
+	}
+	return artifact, nil
+}
+
+func buildLiveLoopAuditArtifactRun(
+	run domainlive.LiveLoopRunAudit,
+	includeIterations bool,
+) domainlive.LiveLoopAuditArtifactRun {
+	artifactRun := domainlive.LiveLoopAuditArtifactRun{
+		RunID:                 run.RunID,
+		StartedAt:             run.StartedAt,
+		FinishedAt:            liveArtifactTimePointer(run.FinishedAt),
+		Status:                run.Status,
+		MaxIterations:         run.MaxIterations,
+		MaxRuntime:            run.MaxRuntime.String(),
+		IterationTimeout:      run.IterationTimeout.String(),
+		PreflightChecked:      run.PreflightChecked,
+		PreflightReady:        run.PreflightReady,
+		IterationsAttempted:   run.IterationsAttempted,
+		IterationsSucceeded:   run.IterationsSucceeded,
+		StopReason:            run.StopReason,
+		StopDetails:           run.StopDetails,
+		Error:                 run.Error,
+		CompletedWithinBounds: run.CompletedWithinBounds,
+	}
+	if includeIterations {
+		for _, iteration := range run.Iterations {
+			artifactRun.Iterations = append(artifactRun.Iterations, domainlive.LiveLoopAuditArtifactIteration{
+				Iteration:         iteration.Iteration,
+				Action:            iteration.Action,
+				RequestStop:       iteration.RequestStop,
+				Reason:            iteration.Reason,
+				DecisionID:        iteration.DecisionID,
+				SubmissionID:      iteration.SubmissionID,
+				ClientOrderID:     iteration.ClientOrderID,
+				ExchangeSubmitted: iteration.ExchangeSubmitted,
+				AlreadySubmitted:  iteration.AlreadySubmitted,
+				StartedAt:         iteration.StartedAt,
+				FinishedAt:        iteration.FinishedAt,
+			})
+		}
+	}
+	return artifactRun
 }
 
 func liveArtifactTimePointer(value time.Time) *time.Time {

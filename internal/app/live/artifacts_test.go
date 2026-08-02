@@ -100,6 +100,8 @@ func TestBuildLiveReadinessArtifactMapsAndValidatesReport(t *testing.T) {
 		!artifact.Ready ||
 		artifact.Pending.Limit != 1 ||
 		artifact.Audit.Limit != 10 ||
+		artifact.Audit.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
+		artifact.Audit.OperatorActionRequired ||
 		artifact.Pending.NextDecisionID != plan.DecisionID ||
 		artifact.Pending.OldestAt == nil ||
 		artifact.Pending.NewestAt == nil ||
@@ -108,6 +110,68 @@ func TestBuildLiveReadinessArtifactMapsAndValidatesReport(t *testing.T) {
 		artifact.PlanFile.MaxAge != domainlive.DefaultLiveOrderPlanArtifactMaxAge.String() ||
 		artifact.PlanFile.DecisionID != plan.DecisionID {
 		t.Fatalf("readiness artifact mismatch: %#v", artifact)
+	}
+}
+
+func TestBuildLiveLoopAuditArtifactMapsAndValidatesReport(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	run := liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted)
+	report := validLiveLoopAuditArtifactReport(t, []domainlive.LiveLoopRunAudit{run}, domainlive.LiveLoopAuditQuery{
+		RunID:             run.RunID,
+		Status:            domainlive.LiveLoopRunStatusCompleted,
+		Limit:             5,
+		IncludeIterations: true,
+	})
+
+	artifact, err := applive.BuildLiveLoopAuditArtifact(applive.BuildLiveLoopAuditArtifactRequest{
+		Report:     report,
+		CreatedAt:  now,
+		ConfigPath: " configs/live.local.yaml ",
+	})
+	if err != nil {
+		t.Fatalf("build audit artifact: %v", err)
+	}
+	if artifact.SchemaVersion != domainlive.LiveLoopAuditArtifactSchemaVersion ||
+		!artifact.CreatedAt.Equal(now) ||
+		artifact.ConfigPath != "configs/live.local.yaml" ||
+		artifact.Query.RunID != run.RunID ||
+		artifact.Query.Status != domainlive.LiveLoopRunStatusCompleted ||
+		artifact.Query.Limit != 5 ||
+		!artifact.Query.IncludeIterations {
+		t.Fatalf("audit artifact metadata mismatch: %#v", artifact)
+	}
+	if artifact.Summary.Total != 1 ||
+		artifact.Summary.Completed != 1 ||
+		artifact.Summary.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
+		artifact.Summary.OperatorActionRequired {
+		t.Fatalf("audit artifact summary mismatch: %#v", artifact.Summary)
+	}
+	if len(artifact.Runs) != 1 ||
+		artifact.Runs[0].RunID != run.RunID ||
+		artifact.Runs[0].MaxRuntime != run.MaxRuntime.String() ||
+		artifact.Runs[0].FinishedAt == nil ||
+		len(artifact.Runs[0].Iterations) != 1 ||
+		artifact.Runs[0].Iterations[0].DecisionID == "" {
+		t.Fatalf("audit artifact runs mismatch: %#v", artifact.Runs)
+	}
+}
+
+func TestBuildLiveLoopAuditArtifactRejectsInconsistentReport(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	run := liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted)
+	report := validLiveLoopAuditArtifactReport(t, []domainlive.LiveLoopRunAudit{run}, domainlive.LiveLoopAuditQuery{
+		Limit:             5,
+		IncludeIterations: true,
+	})
+	report.Summary.Total = 2
+
+	_, err := applive.BuildLiveLoopAuditArtifact(applive.BuildLiveLoopAuditArtifactRequest{
+		Report:     report,
+		CreatedAt:  now,
+		ConfigPath: "configs/live.local.yaml",
+	})
+	if err == nil || !strings.Contains(err.Error(), "summary.total") {
+		t.Fatalf("expected summary validation error, got %v", err)
 	}
 }
 
@@ -173,12 +237,50 @@ func validLiveReadinessArtifactReport(now time.Time, plan domainlive.LiveOrderPl
 		},
 		Audit: applive.LiveLoopAuditReport{
 			Summary: applive.LiveLoopAuditReportSummary{
-				Total:     1,
-				Completed: 1,
+				Total:                  1,
+				Completed:              1,
+				ReviewStatus:           domainlive.LiveLoopAuditReviewStatusClear,
+				ReviewReason:           "recent live-loop audit has no running or failed runs",
+				OperatorActionRequired: false,
 			},
 		},
 		KillSwitch:     domainrisk.KillSwitchState{},
 		NextDecisionID: plan.DecisionID,
 		NextSymbol:     plan.Symbol,
 	}
+}
+
+func validLiveLoopAuditArtifactReport(
+	t *testing.T,
+	runs []domainlive.LiveLoopRunAudit,
+	query domainlive.LiveLoopAuditQuery,
+) applive.LiveLoopAuditReport {
+	t.Helper()
+
+	review, err := domainlive.SummarizeLiveLoopAuditReview(runs)
+	if err != nil {
+		t.Fatalf("review: %v", err)
+	}
+	report := applive.LiveLoopAuditReport{
+		Query: query,
+		Runs:  append([]domainlive.LiveLoopRunAudit(nil), runs...),
+		Summary: applive.LiveLoopAuditReportSummary{
+			Total:                  len(runs),
+			ReviewStatus:           review.Status,
+			ReviewRunID:            review.RunID,
+			ReviewReason:           review.Reason,
+			OperatorActionRequired: review.OperatorActionRequired(),
+		},
+	}
+	for _, run := range runs {
+		switch run.Status {
+		case domainlive.LiveLoopRunStatusRunning:
+			report.Summary.Running++
+		case domainlive.LiveLoopRunStatusCompleted:
+			report.Summary.Completed++
+		case domainlive.LiveLoopRunStatusFailed:
+			report.Summary.Failed++
+		}
+	}
+	return report
 }

@@ -83,6 +83,7 @@ LIVE_AUDIT_RUN_ID ?=
 LIVE_AUDIT_STATUS ?=
 LIVE_AUDIT_LIMIT ?= 10
 LIVE_AUDIT_INCLUDE_ITERATIONS ?= 1
+LIVE_AUDIT_ARTIFACT ?=
 LIVE_SCAN_SYMBOL ?=
 LIVE_SCAN_LIMIT ?= 10
 LIVE_READINESS_SYMBOL ?=
@@ -204,7 +205,7 @@ live-loop-smoke:
 	$(GO) run ./cmd/live-loop-smoke -config $(CONFIG) -migrations $(MIGRATIONS) -run-id $(LIVE_SMOKE_RUN_ID) -decision-id $(LIVE_SMOKE_DECISION_ID) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -cleanup=$(if $(LIVE_SMOKE_CLEANUP),true,false) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,) $(if $(LIVE_SMOKE_REQUIRE_LIVE_CONFIG),-require-live-config,)
 
 live-loop-audit:
-	$(GO) run ./cmd/live-loop-audit -config $(CONFIG) -limit $(LIVE_AUDIT_LIMIT) -include-iterations=$(if $(LIVE_AUDIT_INCLUDE_ITERATIONS),true,false) $(if $(LIVE_AUDIT_RUN_ID),-run-id $(LIVE_AUDIT_RUN_ID),) $(if $(LIVE_AUDIT_STATUS),-status $(LIVE_AUDIT_STATUS),)
+	$(GO) run ./cmd/live-loop-audit -config $(CONFIG) -limit $(LIVE_AUDIT_LIMIT) -include-iterations=$(if $(LIVE_AUDIT_INCLUDE_ITERATIONS),true,false) $(if $(LIVE_AUDIT_RUN_ID),-run-id $(LIVE_AUDIT_RUN_ID),) $(if $(LIVE_AUDIT_STATUS),-status $(LIVE_AUDIT_STATUS),) $(if $(LIVE_AUDIT_ARTIFACT),-artifact-path $(LIVE_AUDIT_ARTIFACT),)
 
 live-decision-scan:
 	$(GO) run ./cmd/live-decision-scan -config $(CONFIG) -limit $(LIVE_SCAN_LIMIT) $(if $(LIVE_SCAN_SYMBOL),-symbol $(LIVE_SCAN_SYMBOL),)

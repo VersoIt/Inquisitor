@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +59,7 @@ func TestRunLiveLoopAuditRejectsUnsafeFlagsBeforeSideEffects(t *testing.T) {
 		{name: "bad status", args: []string{"-status", "BROKEN"}, wantErrSub: "status"},
 		{name: "limit above max", args: []string{"-limit", "101"}, wantErrSub: "limit"},
 		{name: "untrimmed run id", args: []string{"-run-id", " live_loop_audit_cli_0001 "}, wantErrSub: "run_id"},
+		{name: "untrimmed artifact path", args: []string{"-artifact-path", " artifacts/live-loop-audit.json "}, wantErrSub: "artifact-path"},
 	}
 
 	for _, tt := range tests {
@@ -93,10 +97,12 @@ func TestRunLiveLoopAuditLogsReport(t *testing.T) {
 	reader := &fakeLiveLoopAuditCommandReader{
 		runs: []domainlive.LiveLoopRunAudit{validLiveLoopAuditCommandRun()},
 	}
+	artifactPath := filepath.Join(t.TempDir(), "artifacts", "live-loop-audit.json")
 	var output bytes.Buffer
 	err = runLiveLoopAudit(context.Background(), []string{
 		"-status", "completed",
 		"-limit", "5",
+		"-artifact-path", artifactPath,
 	}, liveLoopAuditDependencies{
 		loadConfig: func(string) (*config.Config, error) {
 			return &config.Config{App: config.AppConfig{LogLevel: "info"}}, nil
@@ -106,6 +112,9 @@ func TestRunLiveLoopAuditLogsReport(t *testing.T) {
 		},
 		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
 			return reader
+		},
+		now: func() time.Time {
+			return time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 		},
 		output: &output,
 	})
@@ -132,10 +141,25 @@ func TestRunLiveLoopAuditLogsReport(t *testing.T) {
 		`"msg":"live-loop audit iteration"`,
 		`"decision_id":"risk_decision_live_audit_cli_0001"`,
 		`"exchange_submitted":true`,
+		`"msg":"live-loop audit artifact written"`,
+		`"review_status":"CLEAR"`,
 	} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
 		}
+	}
+
+	artifact := readLiveLoopAuditArtifact(t, artifactPath)
+	if artifact.SchemaVersion != domainlive.LiveLoopAuditArtifactSchemaVersion ||
+		artifact.ConfigPath != "configs/config.example.yaml" ||
+		artifact.Query.Status != domainlive.LiveLoopRunStatusCompleted ||
+		artifact.Query.Limit != 5 ||
+		!artifact.Query.IncludeIterations ||
+		artifact.Summary.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
+		artifact.Summary.OperatorActionRequired ||
+		len(artifact.Runs) != 1 ||
+		len(artifact.Runs[0].Iterations) != 1 {
+		t.Fatalf("audit artifact mismatch: %#v", artifact)
 	}
 }
 
@@ -183,4 +207,21 @@ func validLiveLoopAuditCommandRun() domainlive.LiveLoopRunAudit {
 			FinishedAt:        startedAt.Add(2 * time.Second),
 		}},
 	}
+}
+
+func readLiveLoopAuditArtifact(t *testing.T, path string) domainlive.LiveLoopAuditArtifact {
+	t.Helper()
+
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read audit artifact: %v", err)
+	}
+	var artifact domainlive.LiveLoopAuditArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		t.Fatalf("decode audit artifact: %v", err)
+	}
+	if err := domainlive.ValidateLiveLoopAuditArtifact(artifact); err != nil {
+		t.Fatalf("validate audit artifact: %v", err)
+	}
+	return artifact
 }

@@ -532,10 +532,10 @@ Pass `-require-live-config` when you want the smoke to require `trading.enabled=
 Inspect recent live-loop audit rows after smoke, health, or an armed live-loop attempt. This command is read-only and does not contact exchange APIs:
 
 ```powershell
-go run ./cmd/live-loop-audit -config configs/live.local.yaml -limit 10
+go run ./cmd/live-loop-audit -config configs/live.local.yaml -limit 10 -artifact-path artifacts/live-loop-audit.json
 ```
 
-The summary log includes `review_status` (`CLEAR`, `REVIEW`, or `BLOCKED`) plus `operator_action_required`; `BLOCKED` means a recent run is still `RUNNING`, while `REVIEW` means a recent `FAILED` run should be inspected before proceeding.
+The summary log and optional JSON artifact include `review_status` (`CLEAR`, `REVIEW`, or `BLOCKED`) plus `operator_action_required`; `BLOCKED` means a recent run is still `RUNNING`, while `REVIEW` means a recent `FAILED` run should be inspected before proceeding. `live-readiness` copies the same audit verdict into its readiness artifact.
 
 Useful filters:
 
@@ -659,7 +659,7 @@ make paper-auto-cycle VALIDATION_ID=paper_validation_001 PAPER_SYMBOL=BTCUSDT PA
 make paper-cycle-smoke
 make paper-cycle-smoke-sh
 make live-loop-smoke CONFIG=configs/config.example.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
-make live-loop-audit CONFIG=configs/live.local.yaml LIVE_AUDIT_LIMIT=10
+make live-loop-audit CONFIG=configs/live.local.yaml LIVE_AUDIT_LIMIT=10 LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json
 make live-decision-scan CONFIG=configs/live.local.yaml LIVE_SCAN_SYMBOL=BTCUSDT LIVE_SCAN_LIMIT=10
 make live-readiness CONFIG=configs/live.local.yaml LIVE_READINESS_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_ARTIFACT=artifacts/live-readiness.json
 make live-order-plan CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_LOOP_RUN_ID=live_loop_001 LIVE_PLAN_FILE=artifacts/live-order-plan.json
