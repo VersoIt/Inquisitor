@@ -299,6 +299,10 @@ func TestLiveLoopSmokeDecisionIsValidAndMatchesOrderRiskMath(t *testing.T) {
 	if record.Mode != domainrisk.ModeLive || !record.Decision.Approved || record.Symbol != "BTCUSDT" {
 		t.Fatalf("smoke decision identity mismatch: %#v", record)
 	}
+	if !record.Decision.FinalQuantity.Equal(decimal.RequireFromString("0.001")) ||
+		!record.EntryPrice.Mul(record.Decision.FinalQuantity).Equal(decimal.RequireFromString("100")) {
+		t.Fatalf("smoke decision must stay within first live micro notional: quantity=%s notional=%s", record.Decision.FinalQuantity, record.EntryPrice.Mul(record.Decision.FinalQuantity))
+	}
 	wantMaxLoss := record.Decision.FinalQuantity.Mul(record.EntryPrice.Sub(record.Decision.StopLoss).Abs())
 	if !record.Decision.MaxLoss.Equal(wantMaxLoss) {
 		t.Fatalf("max loss mismatch: got %s want %s", record.Decision.MaxLoss, wantMaxLoss)
@@ -339,16 +343,52 @@ func TestBuildAndValidateLiveLoopSmokeHandoffChecksArtifactChain(t *testing.T) {
 		t.Fatalf("build smoke handoff: %v", err)
 	}
 	if handoff.PlanPath != defaultLiveLoopSmokePlanArtifactPath ||
+		handoff.AuditPath != defaultLiveLoopSmokeAuditArtifactPath ||
 		len(handoff.PlanFileSHA256) != 64 ||
 		handoff.PlanArtifact.DecisionID != identity.DecisionID ||
 		handoff.PlanArtifact.SubmissionID != identity.SubmissionID ||
 		handoff.ReadinessArtifact.Pending.NextDecisionID != identity.DecisionID ||
+		handoff.AuditArtifact.Summary.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
+		!handoff.DeploymentReport.Ready ||
 		handoff.ReadinessArtifact.PlanFile == nil ||
 		handoff.ReadinessArtifact.PlanFile.SHA256 != handoff.PlanFileSHA256 {
 		t.Fatalf("handoff mismatch: %#v", handoff)
 	}
 	if riskReader.calls != 2 || pendingReader.calls != 1 || auditReader.calls != 1 || killSwitch.calls != 1 {
 		t.Fatalf("reader calls mismatch: risk=%d pending=%d audit=%d kill=%d", riskReader.calls, pendingReader.calls, auditReader.calls, killSwitch.calls)
+	}
+}
+
+func TestBuildAndValidateLiveLoopSmokeHandoffRunsDeployGate(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	cfg := liveLoopSmokeTestConfig()
+	identity, err := deterministicLiveLoopSmokeIdentity("risk_decision_live_smoke_001", "live_loop_smoke_001")
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	decision := liveLoopSmokeDecision(identity.DecisionID, &cfg, now)
+	decision.Decision.FinalQuantity = decimal.RequireFromString("0.002")
+	decision.Decision.MaxLoss = decimal.RequireFromString("2")
+	service := applive.NewService(
+		applive.WithRiskDecisionReader(&fakeLiveLoopSmokeRiskDecisionReader{records: []domainrisk.DecisionAuditRecord{decision}}),
+		applive.WithPendingLiveDecisionReader(&fakeLiveLoopSmokePendingReader{candidates: []domainlive.PendingLiveDecision{{Decision: decision}}}),
+		applive.WithLiveLoopAuditReader(&fakeLiveLoopSmokeAuditReader{}),
+		applive.WithKillSwitchRepository(&fakeLiveLoopSmokeKillSwitch{}),
+		applive.WithClock(clock.FixedClock{Time: now.Add(time.Second)}),
+	)
+
+	_, err = buildAndValidateLiveLoopSmokeHandoff(
+		context.Background(),
+		service,
+		&cfg,
+		"configs/config.example.yaml",
+		identity,
+		decimal.RequireFromString("100"),
+		true,
+		false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "live_micro_capital") {
+		t.Fatalf("expected deploy gate live_micro_capital error, got %v", err)
 	}
 }
 

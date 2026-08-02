@@ -35,6 +35,7 @@ const (
 	defaultLiveLoopSmokeAccountSnapshotAge = 5 * time.Second
 	defaultLiveLoopSmokePositionAge        = 5 * time.Second
 	defaultLiveLoopSmokePlanArtifactPath   = "artifacts/live-loop-smoke-plan.json"
+	defaultLiveLoopSmokeAuditArtifactPath  = "artifacts/live-loop-smoke-audit.json"
 	defaultLiveLoopSmokeAuditLimit         = 10
 )
 
@@ -64,9 +65,12 @@ type liveLoopSmokeVerification struct {
 
 type liveLoopSmokeHandoff struct {
 	PlanPath          string
+	AuditPath         string
 	PlanFileSHA256    string
 	PlanArtifact      domainlive.LiveOrderPlanArtifact
 	ReadinessArtifact domainlive.LiveReadinessArtifact
+	AuditArtifact     domainlive.LiveLoopAuditArtifact
+	DeploymentReport  domainlive.LiveDeploymentCheckReport
 }
 
 func main() {
@@ -192,6 +196,10 @@ func runLiveLoopSmoke(ctx context.Context, args []string, deps liveLoopSmokeDepe
 		"submission_id", handoff.PlanArtifact.SubmissionID,
 		"client_order_id", handoff.PlanArtifact.ClientOrderID,
 		"next_decision_id", handoff.ReadinessArtifact.Pending.NextDecisionID,
+		"audit_path", handoff.AuditPath,
+		"audit_review_status", handoff.AuditArtifact.Summary.ReviewStatus,
+		"deploy_check_ready", handoff.DeploymentReport.Ready,
+		"deploy_check_failed", handoff.DeploymentReport.Summary.Failed,
 	)
 	applive.WithLiveLoopIterationRunner(applive.NewPersistedDecisionLiveLoopIterationRunner(service, applive.PersistedDecisionLiveLoopOrder{
 		DecisionID:    identity.DecisionID,
@@ -241,6 +249,9 @@ func runLiveLoopSmoke(ctx context.Context, args []string, deps liveLoopSmokeDepe
 		"handoff_checked", true,
 		"handoff_ready", handoff.ReadinessArtifact.Ready,
 		"handoff_plan_sha256", handoff.PlanFileSHA256,
+		"handoff_audit_review_status", handoff.AuditArtifact.Summary.ReviewStatus,
+		"deploy_check_ready", handoff.DeploymentReport.Ready,
+		"deploy_check_failed", handoff.DeploymentReport.Summary.Failed,
 		"uses_fake_exchange", true,
 		"require_live_config", *requireLiveConfig,
 	)
@@ -414,8 +425,8 @@ func liveLoopSmokeDecision(decisionID string, cfg *config.Config, now time.Time)
 		Decision: domainrisk.Decision{
 			IntentID:      "risk_intent_" + strings.TrimPrefix(strings.TrimSpace(decisionID), "risk_decision_"),
 			Approved:      true,
-			FinalQuantity: decimal.RequireFromString("0.005"),
-			MaxLoss:       decimal.RequireFromString("5"),
+			FinalQuantity: decimal.RequireFromString("0.001"),
+			MaxLoss:       decimal.RequireFromString("1"),
 			StopLoss:      decimal.RequireFromString("99000"),
 			TakeProfit:    decimal.RequireFromString("102000"),
 			Reason:        "risk_checks_passed",
@@ -466,6 +477,7 @@ func buildAndValidateLiveLoopSmokeHandoff(
 	if err != nil {
 		return liveLoopSmokeHandoff{}, err
 	}
+	handoffCreatedAt := planArtifact.SubmissionCreatedAt.Add(time.Second)
 	planFileSHA256, err := liveLoopSmokePlanArtifactSHA256(planArtifact)
 	if err != nil {
 		return liveLoopSmokeHandoff{}, err
@@ -487,7 +499,7 @@ func buildAndValidateLiveLoopSmokeHandoff(
 	readinessArtifact, err := applive.BuildLiveReadinessArtifact(applive.BuildLiveReadinessArtifactRequest{
 		Report:         readinessReport,
 		Readiness:      readinessReq,
-		CreatedAt:      time.Now().UTC(),
+		CreatedAt:      handoffCreatedAt,
 		ConfigPath:     strings.TrimSpace(configPath),
 		PlanFilePath:   defaultLiveLoopSmokePlanArtifactPath,
 		PlanFileSHA256: planFileSHA256,
@@ -497,9 +509,17 @@ func buildAndValidateLiveLoopSmokeHandoff(
 	}
 	if err := domainlive.ValidateLiveReadinessArtifactFreshness(
 		readinessArtifact,
-		time.Now().UTC(),
+		handoffCreatedAt,
 		domainlive.DefaultLiveReadinessArtifactMaxAge,
 	); err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	auditArtifact, err := applive.BuildLiveLoopAuditArtifact(applive.BuildLiveLoopAuditArtifactRequest{
+		Report:     readinessReport.Audit,
+		CreatedAt:  handoffCreatedAt,
+		ConfigPath: strings.TrimSpace(configPath),
+	})
+	if err != nil {
 		return liveLoopSmokeHandoff{}, err
 	}
 	if err := domainlive.ValidateLiveReadinessArtifactHandoff(readinessArtifact, domainlive.LiveReadinessArtifactHandoffExecution{
@@ -508,18 +528,49 @@ func buildAndValidateLiveLoopSmokeHandoff(
 		HasPlanArtifact:    true,
 		PlanArtifact:       planArtifact,
 		PlanFileSHA256:     planFileSHA256,
+		HasAuditArtifact:   true,
+		AuditArtifact:      auditArtifact,
 		SelectedDecisionID: identity.DecisionID,
 	}); err != nil {
 		return liveLoopSmokeHandoff{}, err
+	}
+	deployReport, err := domainlive.BuildLiveDeploymentCheckReport(domainlive.LiveDeploymentCheckRequest{
+		ConfigPath:                strings.TrimSpace(configPath),
+		PlanFilePath:              defaultLiveLoopSmokePlanArtifactPath,
+		PlanFileSHA256:            planFileSHA256,
+		PlanArtifact:              planArtifact,
+		ReadinessArtifact:         readinessArtifact,
+		AuditArtifact:             auditArtifact,
+		Now:                       handoffCreatedAt,
+		MaxPlanArtifactAge:        domainlive.DefaultLiveOrderPlanArtifactMaxAge,
+		MaxReadinessArtifactAge:   domainlive.DefaultLiveReadinessArtifactMaxAge,
+		MaxAuditArtifactAge:       domainlive.DefaultLiveLoopAuditArtifactMaxAge,
+		Execute:                   true,
+		SubaccountConfirmed:       subaccountConfirmed,
+		DecisionID:                identity.DecisionID,
+		MaxInitialLiveCapitalUSDT: maxInitialCapital,
+		MicroCapitalLimitUSDT:     domainlive.DefaultLiveDeploymentMicroCapitalLimitUSDT(),
+		MaxIterations:             1,
+		MaxRuntime:                defaultLiveLoopSmokeMaxRuntime,
+		IterationTimeout:          defaultLiveLoopSmokeIterationTimeout,
+	})
+	if err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	if !deployReport.Ready {
+		return liveLoopSmokeHandoff{}, fmt.Errorf("live-loop smoke deploy check failed: %s", strings.Join(domainlive.LiveDeploymentCheckFailedNames(deployReport.Checks), ", "))
 	}
 	if !readinessReport.Ready {
 		return liveLoopSmokeHandoff{}, fmt.Errorf("live-loop smoke readiness handoff is not ready")
 	}
 	return liveLoopSmokeHandoff{
 		PlanPath:          defaultLiveLoopSmokePlanArtifactPath,
+		AuditPath:         defaultLiveLoopSmokeAuditArtifactPath,
 		PlanFileSHA256:    planFileSHA256,
 		PlanArtifact:      planArtifact,
 		ReadinessArtifact: readinessArtifact,
+		AuditArtifact:     auditArtifact,
+		DeploymentReport:  deployReport,
 	}, nil
 }
 
