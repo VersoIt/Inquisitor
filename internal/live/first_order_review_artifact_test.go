@@ -69,6 +69,42 @@ func TestBuildLiveFirstOrderReviewArtifactTableDriven(t *testing.T) {
 	}
 }
 
+func TestValidateLiveFirstOrderReviewArtifactFreshnessTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	valid := validLiveFirstOrderReviewArtifact(t, now.Add(-time.Minute))
+
+	tests := []struct {
+		name       string
+		artifact   domainlive.LiveFirstOrderReviewArtifact
+		now        time.Time
+		maxAge     time.Duration
+		wantErrSub string
+	}{
+		{name: "fresh", artifact: valid, now: now, maxAge: 10 * time.Minute},
+		{name: "stale", artifact: valid, now: now.Add(time.Hour), maxAge: 10 * time.Minute, wantErrSub: "stale"},
+		{name: "future", artifact: validLiveFirstOrderReviewArtifact(t, now.Add(time.Minute)), now: now, maxAge: 10 * time.Minute, wantErrSub: "future"},
+		{name: "bad max age", artifact: valid, now: now, maxAge: 0, wantErrSub: "max_age"},
+		{name: "invalid artifact first", artifact: mutateLiveFirstOrderReviewArtifact(valid, func(a *domainlive.LiveFirstOrderReviewArtifact) {
+			a.SchemaVersion = "old"
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "schema_version"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := domainlive.ValidateLiveFirstOrderReviewArtifactFreshness(tt.artifact, tt.now, tt.maxAge)
+			if tt.wantErrSub == "" {
+				if err != nil {
+					t.Fatalf("validate freshness: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
+	}
+}
+
 func validLiveFirstOrderReviewArtifact(t *testing.T, now time.Time) domainlive.LiveFirstOrderReviewArtifact {
 	t.Helper()
 	evidence := validLiveFirstOrderReviewEvidence(t, now)
@@ -91,6 +127,16 @@ func validLiveFirstOrderReviewArtifact(t *testing.T, now time.Time) domainlive.L
 	if err != nil {
 		t.Fatalf("build artifact: %v", err)
 	}
+	return artifact
+}
+
+func mutateLiveFirstOrderReviewArtifact(
+	artifact domainlive.LiveFirstOrderReviewArtifact,
+	mutate func(*domainlive.LiveFirstOrderReviewArtifact),
+) domainlive.LiveFirstOrderReviewArtifact {
+	artifact.Checks = append([]domainlive.LiveFirstOrderReviewArtifactCheck(nil), artifact.Checks...)
+	artifact.FailedChecks = append([]string(nil), artifact.FailedChecks...)
+	mutate(&artifact)
 	return artifact
 }
 

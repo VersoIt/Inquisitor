@@ -22,6 +22,14 @@ type BuildLiveLoopAuditArtifactRequest struct {
 	ConfigPath string
 }
 
+type BuildLiveOpsReportArtifactRequest struct {
+	Report                     LiveOpsReport
+	CreatedAt                  time.Time
+	ConfigPath                 string
+	FirstOrderReviewFilePath   string
+	FirstOrderReviewFileSHA256 string
+}
+
 func BuildLiveOrderPlanArtifact(
 	source string,
 	pendingSymbol string,
@@ -179,6 +187,90 @@ func BuildLiveLoopAuditArtifact(req BuildLiveLoopAuditArtifactRequest) (domainli
 	}
 	if err := domainlive.ValidateLiveLoopAuditArtifact(artifact); err != nil {
 		return domainlive.LiveLoopAuditArtifact{}, err
+	}
+	return artifact, nil
+}
+
+func BuildLiveOpsReportArtifact(req BuildLiveOpsReportArtifactRequest) (domainlive.LiveOpsReportArtifact, error) {
+	pendingLimit := req.Report.Pending.Query.Limit
+	if pendingLimit == 0 {
+		pendingLimit = 10
+	}
+	auditLimit := req.Report.Audit.Query.Limit
+	if auditLimit == 0 {
+		auditLimit = 10
+	}
+
+	artifact := domainlive.LiveOpsReportArtifact{
+		SchemaVersion: domainlive.LiveOpsReportArtifactSchemaVersion,
+		CreatedAt:     req.CreatedAt.UTC(),
+		ConfigPath:    strings.TrimSpace(req.ConfigPath),
+		Status:        req.Report.Status,
+		Summary: domainlive.LiveOpsReportArtifactSummary{
+			Total:  req.Report.Summary.Total,
+			Passed: req.Report.Summary.Passed,
+			Warned: req.Report.Summary.Warned,
+			Failed: req.Report.Summary.Failed,
+		},
+		Pending: domainlive.LiveOpsReportArtifactPending{
+			Symbol:         req.Report.Pending.Query.Symbol,
+			Limit:          pendingLimit,
+			Total:          req.Report.Pending.Summary.Total,
+			NextDecisionID: req.Report.Pending.Summary.NextID,
+			NextSymbol:     req.Report.Pending.Summary.NextSymbol,
+			OldestAt:       liveArtifactTimePointer(req.Report.Pending.Summary.OldestAt),
+			NewestAt:       liveArtifactTimePointer(req.Report.Pending.Summary.NewestAt),
+		},
+		Audit: domainlive.LiveOpsReportArtifactAudit{
+			Limit:                  auditLimit,
+			Total:                  req.Report.Audit.Summary.Total,
+			Running:                req.Report.Audit.Summary.Running,
+			Completed:              req.Report.Audit.Summary.Completed,
+			Failed:                 req.Report.Audit.Summary.Failed,
+			ReviewStatus:           req.Report.Audit.Summary.ReviewStatus,
+			ReviewRunID:            req.Report.Audit.Summary.ReviewRunID,
+			ReviewReason:           req.Report.Audit.Summary.ReviewReason,
+			OperatorActionRequired: req.Report.Audit.Summary.OperatorActionRequired,
+		},
+		KillSwitch: domainlive.LiveOpsReportArtifactKillSwitch{
+			Active:    req.Report.KillSwitch.Active,
+			Reason:    req.Report.KillSwitch.Reason,
+			Source:    req.Report.KillSwitch.Source,
+			UpdatedAt: liveArtifactTimePointer(req.Report.KillSwitch.UpdatedAt),
+		},
+	}
+	for _, check := range req.Report.Checks {
+		artifact.Checks = append(artifact.Checks, domainlive.LiveOpsReportArtifactCheck{
+			Name:    check.Name,
+			Status:  check.Status,
+			Details: check.Details,
+		})
+		if check.Status == domainlive.ReadinessCheckStatusFail {
+			artifact.FailedChecks = append(artifact.FailedChecks, check.Name)
+		}
+	}
+	if req.Report.HasFirstOrderReview {
+		review := req.Report.FirstOrderReview
+		artifact.FirstOrderReview = &domainlive.LiveOpsReportArtifactFirstOrderReview{
+			Path:               strings.TrimSpace(req.FirstOrderReviewFilePath),
+			SHA256:             strings.TrimSpace(req.FirstOrderReviewFileSHA256),
+			SchemaVersion:      review.SchemaVersion,
+			CreatedAt:          review.CreatedAt,
+			Ready:              review.Ready,
+			Summary:            review.Summary,
+			FailedChecks:       append([]string(nil), review.FailedChecks...),
+			RunID:              review.Evidence.RunID,
+			DecisionID:         review.Evidence.DecisionID,
+			SubmissionID:       review.Evidence.SubmissionID,
+			ClientOrderID:      review.Evidence.ClientOrderID,
+			ExchangeOrderID:    review.Evidence.ExchangeOrderID,
+			LatestOrderStatus:  review.Evidence.LatestOrderStatus,
+			LatestPositionOpen: review.Evidence.LatestPositionOpen,
+			LatestPositionSize: review.Evidence.LatestPositionSize,
+		}
+	}
+	if err := domainlive.ValidateLiveOpsReportArtifact(artifact); err != nil {
+		return domainlive.LiveOpsReportArtifact{}, err
 	}
 	return artifact, nil
 }

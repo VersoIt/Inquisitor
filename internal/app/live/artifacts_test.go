@@ -175,6 +175,122 @@ func TestBuildLiveLoopAuditArtifactRejectsInconsistentReport(t *testing.T) {
 	}
 }
 
+func TestBuildLiveOpsReportArtifactMapsAndValidatesReport(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	firstOrderReview := validAppLiveOpsFirstOrderReviewArtifact(t, now.Add(-time.Minute))
+	service := applive.NewService(
+		applive.WithClock(clock.FixedClock{Time: now}),
+		applive.WithKillSwitchRepository(&fakeLiveKillSwitchRepository{}),
+		applive.WithPendingLiveDecisionReader(&fakePendingLiveDecisionReader{candidates: []domainlive.PendingLiveDecision{
+			pendingLiveDecision("risk_decision_live_ops_0001", "BTCUSDT", now.Add(-2*time.Minute)),
+		}}),
+		applive.WithLiveLoopAuditReader(&fakeLiveLoopAuditReader{runs: []domainlive.LiveLoopRunAudit{
+			liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
+		}}),
+	)
+	report, err := service.BuildLiveOpsReport(context.Background(), applive.LiveOpsReportRequest{
+		PendingSymbol:               "BTCUSDT",
+		HasFirstOrderReviewArtifact: true,
+		FirstOrderReviewArtifact:    firstOrderReview,
+	})
+	if err != nil {
+		t.Fatalf("build ops report: %v", err)
+	}
+
+	artifact, err := applive.BuildLiveOpsReportArtifact(applive.BuildLiveOpsReportArtifactRequest{
+		Report:                     report,
+		CreatedAt:                  now,
+		ConfigPath:                 " configs/live.local.yaml ",
+		FirstOrderReviewFilePath:   " artifacts/live-first-order/live-first-order-review.json ",
+		FirstOrderReviewFileSHA256: strings.Repeat("c", 64),
+	})
+	if err != nil {
+		t.Fatalf("build ops artifact: %v", err)
+	}
+	if artifact.SchemaVersion != domainlive.LiveOpsReportArtifactSchemaVersion ||
+		!artifact.CreatedAt.Equal(now) ||
+		artifact.ConfigPath != "configs/live.local.yaml" ||
+		artifact.Status != domainlive.LiveOpsStatusClear ||
+		artifact.Summary.Failed != 0 ||
+		artifact.Pending.Symbol != "BTCUSDT" ||
+		artifact.Pending.Limit != 10 ||
+		artifact.Pending.Total != 1 ||
+		artifact.Audit.Limit != 10 ||
+		artifact.Audit.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
+		artifact.KillSwitch.Active {
+		t.Fatalf("ops artifact summary mismatch: %#v", artifact)
+	}
+	if artifact.FirstOrderReview == nil ||
+		artifact.FirstOrderReview.Path != "artifacts/live-first-order/live-first-order-review.json" ||
+		artifact.FirstOrderReview.SHA256 != strings.Repeat("c", 64) ||
+		!artifact.FirstOrderReview.Ready ||
+		artifact.FirstOrderReview.LatestOrderStatus != domainlive.ExchangeOrderStatusFilled {
+		t.Fatalf("first-order metadata mismatch: %#v", artifact.FirstOrderReview)
+	}
+}
+
+func TestBuildLiveOpsReportArtifactRejectsInconsistentReport(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	report := applive.LiveOpsReport{
+		Status: domainlive.LiveOpsStatusClear,
+		Summary: domainlive.ReadinessCheckSummary{
+			Total:  1,
+			Passed: 1,
+		},
+		Checks: []domainlive.ReadinessCheck{
+			domainlive.NewReadinessCheck("kill_switch", domainlive.ReadinessCheckStatusPass, "kill switch is inactive"),
+		},
+		Pending: applive.PendingLiveDecisionReport{
+			Query: domainlive.PendingLiveDecisionQuery{Limit: 10},
+		},
+		Audit: applive.LiveLoopAuditReport{
+			Query: domainlive.LiveLoopAuditQuery{Limit: 10},
+			Summary: applive.LiveLoopAuditReportSummary{
+				ReviewStatus:           domainlive.LiveLoopAuditReviewStatusClear,
+				ReviewReason:           "no recent live-loop audit runs found",
+				OperatorActionRequired: false,
+			},
+		},
+	}
+
+	tests := []struct {
+		name       string
+		mutate     func(*applive.LiveOpsReport)
+		wantErrSub string
+	}{
+		{name: "summary mismatch", mutate: func(r *applive.LiveOpsReport) {
+			r.Summary.Failed = 1
+		}, wantErrSub: "summary"},
+		{name: "status mismatch", mutate: func(r *applive.LiveOpsReport) {
+			r.Status = domainlive.LiveOpsStatusBlocked
+		}, wantErrSub: "status"},
+		{name: "first-order metadata requires path", mutate: func(r *applive.LiveOpsReport) {
+			r.HasFirstOrderReview = true
+			r.FirstOrderReview = validAppLiveOpsFirstOrderReviewArtifact(t, now)
+			r.Checks = append(r.Checks, domainlive.NewReadinessCheck("first_order_review", domainlive.ReadinessCheckStatusPass, "first-order review passed"))
+			r.Summary = domainlive.SummarizeReadinessChecks(r.Checks)
+		}, wantErrSub: "first_order_review.path"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := report
+			candidate.Checks = append([]domainlive.ReadinessCheck(nil), report.Checks...)
+			if tt.mutate != nil {
+				tt.mutate(&candidate)
+			}
+			_, err := applive.BuildLiveOpsReportArtifact(applive.BuildLiveOpsReportArtifactRequest{
+				Report:     candidate,
+				CreatedAt:  now,
+				ConfigPath: "configs/live.local.yaml",
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+		})
+	}
+}
+
 func validBuildLiveOrderPlanResult(t *testing.T, now time.Time) applive.BuildLiveOrderPlanResult {
 	t.Helper()
 

@@ -93,6 +93,14 @@ LIVE_READINESS_PENDING_LIMIT ?= 1
 LIVE_READINESS_AUDIT_LIMIT ?= 10
 LIVE_READINESS_REQUIRE_PENDING ?= 1
 LIVE_READINESS_ARTIFACT ?=
+LIVE_OPS_SYMBOL ?=
+LIVE_OPS_PENDING_LIMIT ?= 10
+LIVE_OPS_AUDIT_LIMIT ?= 10
+LIVE_OPS_ARTIFACT ?=
+LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT ?=
+LIVE_OPS_FIRST_ORDER_REVIEW_MAX_AGE ?= 24h
+LIVE_OPS_REQUIRE_FIRST_ORDER_REVIEW ?=
+LIVE_OPS_FAIL_ON_BLOCKED ?=
 LIVE_DEPLOY_ARTIFACT ?=
 LIVE_DEPLOY_MAX_AGE ?= 10m
 LIVE_FIRST_ORDER_ARTIFACT_DIR ?= artifacts/live-first-order
@@ -106,7 +114,7 @@ LIVE_FIRST_ORDER_READINESS_AUDIT_LIMIT ?= 10
 LIVE_FIRST_ORDER_AUDIT_LIMIT ?= 10
 LIVE_FIRST_ORDER_PRINT_ONLY ?=
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-loop-audit live-decision-scan live-readiness live-handoff-verify live-deploy-check live-first-order-check live-first-order-review live-order-plan live-submit docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-loop-audit live-decision-scan live-readiness live-ops-report live-handoff-verify live-deploy-check live-first-order-check live-first-order-review live-order-plan live-submit docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -226,6 +234,9 @@ live-decision-scan:
 
 live-readiness:
 	$(GO) run ./cmd/live-readiness -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -pending-limit $(LIVE_READINESS_PENDING_LIMIT) -audit-limit $(LIVE_READINESS_AUDIT_LIMIT) -require-pending=$(if $(LIVE_READINESS_REQUIRE_PENDING),true,false) $(if $(LIVE_READINESS_SYMBOL),-symbol $(LIVE_READINESS_SYMBOL),) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE) -max-plan-age $(LIVE_PLAN_MAX_AGE),) $(if $(LIVE_READINESS_ARTIFACT),-artifact-path $(LIVE_READINESS_ARTIFACT),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
+
+live-ops-report:
+	$(GO) run ./cmd/live-ops-report -config $(CONFIG) -pending-limit $(LIVE_OPS_PENDING_LIMIT) -audit-limit $(LIVE_OPS_AUDIT_LIMIT) $(if $(LIVE_OPS_SYMBOL),-symbol $(LIVE_OPS_SYMBOL),) $(if $(LIVE_OPS_ARTIFACT),-artifact-path $(LIVE_OPS_ARTIFACT),) $(if $(LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT),-first-order-review-file $(LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT) -max-first-order-review-age $(LIVE_OPS_FIRST_ORDER_REVIEW_MAX_AGE),) $(if $(LIVE_OPS_REQUIRE_FIRST_ORDER_REVIEW),-require-first-order-review,) $(if $(LIVE_OPS_FAIL_ON_BLOCKED),-fail-on-blocked,)
 
 live-handoff-verify:
 	$(GO) run ./cmd/live-handoff-verify -config $(CONFIG) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE),) $(if $(LIVE_READINESS_FILE),-readiness-file $(LIVE_READINESS_FILE),) $(if $(LIVE_AUDIT_ARTIFACT),-audit-file $(LIVE_AUDIT_ARTIFACT),) $(if $(LIVE_DEPLOY_ARTIFACT),-deploy-check-file $(LIVE_DEPLOY_ARTIFACT) -max-deploy-check-age $(LIVE_DEPLOY_MAX_AGE) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -max-iterations $(LIVE_LOOP_MAX_ITERATIONS) -max-runtime $(LIVE_LOOP_MAX_RUNTIME) -iteration-timeout $(LIVE_LOOP_ITERATION_TIMEOUT),) -max-plan-age $(LIVE_PLAN_MAX_AGE) -max-readiness-age $(LIVE_READINESS_MAX_AGE) -max-audit-age $(LIVE_AUDIT_MAX_AGE) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,) $(if $(LIVE_EXECUTE),-execute,)

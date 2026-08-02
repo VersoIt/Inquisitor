@@ -613,6 +613,12 @@ go run ./cmd/live-first-order-review -config configs/live.local.yaml -plan-file 
 
 Manual `-expected-submission-id` and `-expected-client-order-id` flags are still available as a fallback when no artifact file is used.
 
+Use `live-ops-report` for a read-only operational snapshot before the next armed action. It checks the current Kill Switch, pending LIVE decisions, recent live-loop audit verdict, and optionally the fresh first-order review artifact. The command writes `CLEAR`, `ATTENTION`, or `BLOCKED` into a durable JSON artifact; by default it exits successfully even for non-clear statuses so the report is still captured, and `-fail-on-blocked` turns it into a hard gate:
+
+```powershell
+go run ./cmd/live-ops-report -config configs/live.local.yaml -symbol BTCUSDT -first-order-review-file artifacts/live-first-order/live-first-order-review.json -artifact-path artifacts/live-ops-report.json
+```
+
 Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight including the same fresh account and flat-position guards, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
 
 ```powershell
@@ -693,6 +699,7 @@ make live-handoff-verify CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts
 make live-deploy-check CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_FILE=artifacts/live-readiness.json LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json LIVE_DEPLOY_ARTIFACT=artifacts/live-deploy-check.json LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-first-order-check CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-first-order-review CONFIG=configs/live.local.yaml LIVE_FIRST_ORDER_ARTIFACT_DIR=artifacts/live-first-order
+make live-ops-report CONFIG=configs/live.local.yaml LIVE_OPS_SYMBOL=BTCUSDT LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT=artifacts/live-first-order/live-first-order-review.json LIVE_OPS_ARTIFACT=artifacts/live-ops-report.json
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
 make live-loop CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_FILE=artifacts/live-readiness.json LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json LIVE_DEPLOY_ARTIFACT=artifacts/live-deploy-check.json LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-loop CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001
