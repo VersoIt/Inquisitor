@@ -75,6 +75,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum accepted age for -audit-file based on created_at")
 	deployCheckFile := flags.String("deploy-check-file", "", "optional JSON artifact written by live-deploy-check; requires a fresh PASS deployment gate before execution")
 	maxDeployCheckAge := flags.Duration("max-deploy-check-age", domainlive.DefaultLiveDeploymentCheckArtifactMaxAge, "maximum accepted age for -deploy-check-file based on created_at")
+	opsReportFile := flags.String("ops-report-file", "", "optional JSON artifact written by live-ops-report; requires a fresh CLEAR operational report before execution")
+	maxOpsReportAge := flags.Duration("max-ops-report-age", domainlive.DefaultLiveOpsReportArtifactMaxAge, "maximum accepted age for -ops-report-file based on created_at")
 	decisionID := flags.String("decision-id", "", "persisted LIVE risk decision id to process")
 	selectPending := flags.Bool("select-pending", false, "select the oldest approved pending LIVE risk decision with no live order submission")
 	pendingSymbol := flags.String("pending-symbol", "", "optional symbol filter used with -select-pending")
@@ -110,6 +112,9 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	if *maxDeployCheckAge <= 0 {
 		return fmt.Errorf("max-deploy-check-age must be positive")
 	}
+	if *maxOpsReportAge <= 0 {
+		return fmt.Errorf("max-ops-report-age must be positive")
+	}
 
 	planArtifact, hasPlanArtifact, planArtifactSHA256, err := loadLiveLoopPlanArtifact(*planFile)
 	if err != nil {
@@ -124,6 +129,10 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		return err
 	}
 	deployCheckArtifact, hasDeployCheckArtifact, err := loadLiveLoopDeploymentCheckArtifact(*deployCheckFile)
+	if err != nil {
+		return err
+	}
+	opsReportArtifact, hasOpsReportArtifact, err := loadLiveLoopOpsReportArtifact(*opsReportFile)
 	if err != nil {
 		return err
 	}
@@ -174,6 +183,16 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	}
 	if hasDeployCheckArtifact {
 		if err := domainlive.ValidateLiveDeploymentCheckArtifactFreshness(deployCheckArtifact, artifactNow, *maxDeployCheckAge); err != nil {
+			return err
+		}
+	}
+	if hasOpsReportArtifact {
+		if err := validateLiveLoopOpsReportArtifactForExecution(
+			opsReportArtifact,
+			artifactNow,
+			*maxOpsReportAge,
+			strings.TrimSpace(*configPath),
+		); err != nil {
 			return err
 		}
 	}
@@ -607,6 +626,51 @@ func loadLiveLoopDeploymentCheckArtifact(path string) (domainlive.LiveDeployment
 		return domainlive.LiveDeploymentCheckArtifact{}, false, err
 	}
 	return artifact, true, nil
+}
+
+func loadLiveLoopOpsReportArtifact(path string) (domainlive.LiveOpsReportArtifact, bool, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return domainlive.LiveOpsReportArtifact{}, false, nil
+	}
+	if path != trimmedPath {
+		return domainlive.LiveOpsReportArtifact{}, false, fmt.Errorf("ops-report-file must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return domainlive.LiveOpsReportArtifact{}, false, fmt.Errorf("read live ops report artifact %q: %w", trimmedPath, err)
+	}
+	var artifact domainlive.LiveOpsReportArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		return domainlive.LiveOpsReportArtifact{}, false, fmt.Errorf("decode live ops report artifact %q: %w", trimmedPath, err)
+	}
+	if err := domainlive.ValidateLiveOpsReportArtifact(artifact); err != nil {
+		return domainlive.LiveOpsReportArtifact{}, false, err
+	}
+	return artifact, true, nil
+}
+
+func validateLiveLoopOpsReportArtifactForExecution(
+	artifact domainlive.LiveOpsReportArtifact,
+	now time.Time,
+	maxAge time.Duration,
+	configPath string,
+) error {
+	if err := domainlive.ValidateLiveOpsReportArtifactFreshness(artifact, now, maxAge); err != nil {
+		return err
+	}
+	trimmedConfigPath := strings.TrimSpace(configPath)
+	if artifact.ConfigPath != trimmedConfigPath {
+		return fmt.Errorf("ops-report-file config_path %q does not match -config %q", artifact.ConfigPath, trimmedConfigPath)
+	}
+	if artifact.Status != domainlive.LiveOpsStatusClear {
+		return fmt.Errorf(
+			"ops-report-file must be CLEAR before live loop execution: status=%s failed_checks=%s",
+			artifact.Status,
+			strings.Join(artifact.FailedChecks, ","),
+		)
+	}
+	return nil
 }
 
 func applyLiveLoopPlanArtifact(

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -545,6 +546,93 @@ func TestRunLiveLoopAuditFileStopsBeforeSideEffects(t *testing.T) {
 			}
 			if opened {
 				t.Fatal("database must not be opened when audit artifact fails before execution")
+			}
+		})
+	}
+}
+
+func TestRunLiveLoopOpsReportFileGate(t *testing.T) {
+	configPath := writeLiveLoopConfig(t)
+	now := time.Now().UTC()
+	clearArtifact := liveLoopOpsReportArtifact(now.Add(-time.Second), configPath, domainlive.LiveOpsStatusClear)
+	staleArtifact := liveLoopOpsReportArtifact(now.Add(-time.Hour), configPath, domainlive.LiveOpsStatusClear)
+	attentionArtifact := liveLoopOpsReportArtifact(now.Add(-time.Second), configPath, domainlive.LiveOpsStatusAttention)
+	configMismatch := liveLoopOpsReportArtifact(now.Add(-time.Second), "configs/other-live.yaml", domainlive.LiveOpsStatusClear)
+
+	tests := []struct {
+		name       string
+		args       func(string) []string
+		artifact   domainlive.LiveOpsReportArtifact
+		wantErrSub string
+		wantOpened bool
+	}{
+		{
+			name: "clear ops report passes artifact gate",
+			args: func(opsFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-ops-report-file", opsFile, "-execute"}
+			},
+			artifact:   clearArtifact,
+			wantErrSub: "stop after ops artifact validation",
+			wantOpened: true,
+		},
+		{
+			name: "stale ops report stops before db",
+			args: func(opsFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-ops-report-file", opsFile, "-max-ops-report-age", "10m", "-execute"}
+			},
+			artifact:   staleArtifact,
+			wantErrSub: "stale",
+		},
+		{
+			name: "attention ops report stops before db",
+			args: func(opsFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-ops-report-file", opsFile, "-execute"}
+			},
+			artifact:   attentionArtifact,
+			wantErrSub: "CLEAR",
+		},
+		{
+			name: "ops report config mismatch stops before db",
+			args: func(opsFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-ops-report-file", opsFile, "-execute"}
+			},
+			artifact:   configMismatch,
+			wantErrSub: "config_path",
+		},
+		{
+			name: "nonpositive max ops report age stops before db",
+			args: func(opsFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-ops-report-file", opsFile, "-max-ops-report-age", "0s", "-execute"}
+			},
+			artifact:   clearArtifact,
+			wantErrSub: "max-ops-report-age",
+		},
+		{
+			name: "untrimmed ops report path stops before db",
+			args: func(opsFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-ops-report-file", " " + opsFile + " ", "-execute"}
+			},
+			artifact:   clearArtifact,
+			wantErrSub: "ops-report-file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opened bool
+			opsFile := writeLiveLoopOpsReportArtifact(t, tt.artifact)
+			err := runLiveLoop(context.Background(), tt.args(opsFile), liveLoopDependencies{
+				openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+					opened = true
+					return nil, errors.New("stop after ops artifact validation")
+				},
+				output: &bytes.Buffer{},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected ops-report error containing %q, got %v", tt.wantErrSub, err)
+			}
+			if opened != tt.wantOpened {
+				t.Fatalf("database side effect mismatch: opened=%t want=%t", opened, tt.wantOpened)
 			}
 		})
 	}
@@ -1823,6 +1911,78 @@ func writeLiveLoopDeploymentCheckArtifact(t *testing.T, artifact domainlive.Live
 		t.Fatalf("write deployment check artifact: %v", err)
 	}
 	return path
+}
+
+func writeLiveLoopOpsReportArtifact(t *testing.T, artifact domainlive.LiveOpsReportArtifact) string {
+	t.Helper()
+
+	if err := domainlive.ValidateLiveOpsReportArtifact(artifact); err != nil {
+		t.Fatalf("validate ops report artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal ops report artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "live-ops-report.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write ops report artifact: %v", err)
+	}
+	return path
+}
+
+func liveLoopOpsReportArtifact(
+	createdAt time.Time,
+	configPath string,
+	status domainlive.LiveOpsStatus,
+) domainlive.LiveOpsReportArtifact {
+	checkName := "kill_switch"
+	checkStatus := domainlive.ReadinessCheckStatusPass
+	checkDetails := "kill switch is inactive"
+	summary := domainlive.LiveOpsReportArtifactSummary{Total: 1, Passed: 1}
+	if status == domainlive.LiveOpsStatusAttention {
+		checkName = "pending_live_decision"
+		checkStatus = domainlive.ReadinessCheckStatusWarn
+		checkDetails = "no pending approved LIVE decisions without submissions"
+		summary = domainlive.LiveOpsReportArtifactSummary{Total: 1, Warned: 1}
+	}
+	if status == domainlive.LiveOpsStatusBlocked {
+		checkStatus = domainlive.ReadinessCheckStatusFail
+		checkDetails = "kill switch is active"
+		summary = domainlive.LiveOpsReportArtifactSummary{Total: 1, Failed: 1}
+	}
+	artifact := domainlive.LiveOpsReportArtifact{
+		SchemaVersion: domainlive.LiveOpsReportArtifactSchemaVersion,
+		CreatedAt:     createdAt.UTC(),
+		ConfigPath:    strings.TrimSpace(configPath),
+		Status:        status,
+		Summary:       summary,
+		Checks: []domainlive.LiveOpsReportArtifactCheck{{
+			Name:    checkName,
+			Status:  checkStatus,
+			Details: checkDetails,
+		}},
+		Pending: domainlive.LiveOpsReportArtifactPending{
+			Limit: 10,
+		},
+		Audit: domainlive.LiveOpsReportArtifactAudit{
+			Limit:                  10,
+			ReviewStatus:           domainlive.LiveLoopAuditReviewStatusClear,
+			ReviewReason:           "no recent live-loop audit runs found",
+			OperatorActionRequired: false,
+		},
+		KillSwitch: domainlive.LiveOpsReportArtifactKillSwitch{},
+	}
+	if status == domainlive.LiveOpsStatusBlocked {
+		artifact.FailedChecks = []string{"kill_switch"}
+		updatedAt := createdAt.Add(-time.Second).UTC()
+		artifact.KillSwitch = domainlive.LiveOpsReportArtifactKillSwitch{
+			Active:    true,
+			Reason:    "operator stop",
+			Source:    "operator",
+			UpdatedAt: &updatedAt,
+		}
+	}
+	return artifact
 }
 
 func liveLoopDeploymentCheckArtifact(
