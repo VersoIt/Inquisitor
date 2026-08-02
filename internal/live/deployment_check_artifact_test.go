@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 )
 
@@ -196,6 +198,90 @@ func TestValidateLiveDeploymentCheckArtifactFreshnessTableDriven(t *testing.T) {
 	}
 }
 
+func TestValidateLiveDeploymentCheckArtifactHandoffTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	req := validLiveDeploymentCheckArtifactRequest(t, now)
+	valid := validLiveDeploymentCheckArtifact(t, now)
+	validExecution := validLiveDeploymentCheckArtifactHandoffExecution(req)
+
+	tests := []struct {
+		name            string
+		mutateArtifact  func(*domainlive.LiveDeploymentCheckArtifact)
+		mutateExecution func(*domainlive.LiveDeploymentCheckArtifactHandoffExecution)
+		wantErrSub      string
+	}{
+		{name: "valid explicit deployment handoff"},
+		{name: "not ready deployment artifact", mutateArtifact: func(a *domainlive.LiveDeploymentCheckArtifact) {
+			a.Checks[0].Status = domainlive.ReadinessCheckStatusFail
+			a.Summary.Passed--
+			a.Summary.Failed++
+			a.FailedChecks = []string{a.Checks[0].Name}
+			a.Ready = false
+			a.Execution.Execute = false
+		}, wantErrSub: "ready"},
+		{name: "warnings are rejected for final deployment handoff", mutateArtifact: func(a *domainlive.LiveDeploymentCheckArtifact) {
+			a.Checks[0].Status = domainlive.ReadinessCheckStatusWarn
+			a.Summary.Passed--
+			a.Summary.Warned++
+		}, wantErrSub: "warnings"},
+		{name: "config mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.ConfigPath = "configs/other-live.yaml"
+		}, wantErrSub: "config_path"},
+		{name: "plan path mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.PlanPath = "artifacts/other-plan.json"
+		}, wantErrSub: "plan_file.path"},
+		{name: "plan sha mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.PlanFileSHA256 = strings.Repeat("d", 64)
+		}, wantErrSub: "plan_file.sha256"},
+		{name: "plan metadata mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.PlanArtifact.DecisionID = "risk_decision_live_other_0001"
+		}, wantErrSub: "plan_file.decision_id"},
+		{name: "readiness sha mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.ReadinessFileSHA256 = strings.Repeat("e", 64)
+		}, wantErrSub: "readiness_file.sha256"},
+		{name: "audit review mismatch", mutateArtifact: func(a *domainlive.LiveDeploymentCheckArtifact) {
+			a.AuditFile.ReviewStatus = domainlive.LiveLoopAuditReviewStatusReview
+		}, wantErrSub: "audit_file.review_status"},
+		{name: "source mode mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.SelectPending = true
+			e.PendingQuery = domainlive.PendingLiveDecisionQuery{Symbol: "BTCUSDT", Limit: 1}
+		}, wantErrSub: "execution.select_pending"},
+		{name: "selected decision mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.SelectedDecisionID = "risk_decision_live_other_0001"
+		}, wantErrSub: "execution.selected_decision_id"},
+		{name: "capital mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.MaxInitialLiveCapitalUSDT = decimal.NewFromInt(90)
+		}, wantErrSub: "max_initial_live_capital_usdt"},
+		{name: "max iterations mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.MaxIterations = 2
+		}, wantErrSub: "execution.max_iterations"},
+		{name: "runtime mismatch", mutateExecution: func(e *domainlive.LiveDeploymentCheckArtifactHandoffExecution) {
+			e.MaxRuntime = 20 * time.Second
+		}, wantErrSub: "execution.max_runtime"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			artifact := mutateLiveDeploymentCheckArtifact(valid, tt.mutateArtifact)
+			execution := validExecution
+			if tt.mutateExecution != nil {
+				tt.mutateExecution(&execution)
+			}
+
+			err := domainlive.ValidateLiveDeploymentCheckArtifactHandoff(artifact, execution)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate deployment check handoff: %v", err)
+			}
+		})
+	}
+}
+
 func validLiveDeploymentCheckArtifact(
 	t *testing.T,
 	now time.Time,
@@ -245,6 +331,33 @@ func validLiveDeploymentCheckArtifactRequest(
 		ReadinessFileSHA256: readinessSHA256,
 		AuditFilePath:       auditPath,
 		AuditFileSHA256:     auditSHA256,
+	}
+}
+
+func validLiveDeploymentCheckArtifactHandoffExecution(
+	req domainlive.BuildLiveDeploymentCheckArtifactRequest,
+) domainlive.LiveDeploymentCheckArtifactHandoffExecution {
+	return domainlive.LiveDeploymentCheckArtifactHandoffExecution{
+		ConfigPath:                req.ConfigPath,
+		PlanPath:                  req.PlanFilePath,
+		PlanFileSHA256:            req.PlanFileSHA256,
+		PlanArtifact:              req.Deployment.PlanArtifact,
+		ReadinessPath:             req.ReadinessFilePath,
+		ReadinessFileSHA256:       req.ReadinessFileSHA256,
+		ReadinessArtifact:         req.Deployment.ReadinessArtifact,
+		AuditPath:                 req.AuditFilePath,
+		AuditFileSHA256:           req.AuditFileSHA256,
+		AuditArtifact:             req.Deployment.AuditArtifact,
+		Execute:                   req.Deployment.Execute,
+		SubaccountConfirmed:       req.Deployment.SubaccountConfirmed,
+		SelectPending:             req.Deployment.SelectPending,
+		PendingQuery:              req.Report.PendingQuery,
+		DecisionID:                req.Deployment.DecisionID,
+		SelectedDecisionID:        req.Report.SelectedDecisionID,
+		MaxInitialLiveCapitalUSDT: req.Deployment.MaxInitialLiveCapitalUSDT,
+		MaxIterations:             req.Deployment.MaxIterations,
+		MaxRuntime:                req.Deployment.MaxRuntime,
+		IterationTimeout:          req.Deployment.IterationTimeout,
 	}
 }
 

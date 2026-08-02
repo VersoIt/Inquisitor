@@ -101,6 +101,29 @@ type BuildLiveDeploymentCheckArtifactRequest struct {
 	AuditFileSHA256     string
 }
 
+type LiveDeploymentCheckArtifactHandoffExecution struct {
+	ConfigPath                string
+	PlanPath                  string
+	PlanFileSHA256            string
+	PlanArtifact              LiveOrderPlanArtifact
+	ReadinessPath             string
+	ReadinessFileSHA256       string
+	ReadinessArtifact         LiveReadinessArtifact
+	AuditPath                 string
+	AuditFileSHA256           string
+	AuditArtifact             LiveLoopAuditArtifact
+	Execute                   bool
+	SubaccountConfirmed       bool
+	SelectPending             bool
+	PendingQuery              PendingLiveDecisionQuery
+	DecisionID                string
+	SelectedDecisionID        string
+	MaxInitialLiveCapitalUSDT decimal.Decimal
+	MaxIterations             int
+	MaxRuntime                time.Duration
+	IterationTimeout          time.Duration
+}
+
 func BuildLiveDeploymentCheckArtifact(req BuildLiveDeploymentCheckArtifactRequest) (LiveDeploymentCheckArtifact, error) {
 	maxPlanAge := liveDeploymentArtifactDurationOrDefault(req.Deployment.MaxPlanArtifactAge, DefaultLiveOrderPlanArtifactMaxAge)
 	maxReadinessAge := liveDeploymentArtifactDurationOrDefault(req.Deployment.MaxReadinessArtifactAge, DefaultLiveReadinessArtifactMaxAge)
@@ -240,6 +263,36 @@ func ValidateLiveDeploymentCheckArtifact(artifact LiveDeploymentCheckArtifact) e
 	return nil
 }
 
+func ValidateLiveDeploymentCheckArtifactHandoff(
+	artifact LiveDeploymentCheckArtifact,
+	execution LiveDeploymentCheckArtifactHandoffExecution,
+) error {
+	if err := ValidateLiveDeploymentCheckArtifact(artifact); err != nil {
+		return err
+	}
+	var problems []string
+	if !artifact.Ready {
+		problems = append(problems, "ready must be true")
+	}
+	if artifact.Summary.Failed != 0 {
+		problems = append(problems, fmt.Sprintf("failed checks must be zero, got %d", artifact.Summary.Failed))
+	}
+	if artifact.Summary.Warned != 0 {
+		problems = append(problems, fmt.Sprintf("warnings must be zero, got %d", artifact.Summary.Warned))
+	}
+	if !sameLiveReadinessHandoffPath(artifact.ConfigPath, execution.ConfigPath) {
+		problems = append(problems, fmt.Sprintf("config_path %q does not match execution config %q", artifact.ConfigPath, strings.TrimSpace(execution.ConfigPath)))
+	}
+	problems = append(problems, liveDeploymentCheckArtifactHandoffPlanProblems(artifact.PlanFile, execution)...)
+	problems = append(problems, liveDeploymentCheckArtifactHandoffReadinessProblems(artifact.ReadinessFile, execution)...)
+	problems = append(problems, liveDeploymentCheckArtifactHandoffAuditProblems(artifact.AuditFile, execution)...)
+	problems = append(problems, liveDeploymentCheckArtifactHandoffExecutionProblems(artifact.Execution, execution)...)
+	if len(problems) > 0 {
+		return errors.New("live deployment check artifact handoff validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 func ValidateLiveDeploymentCheckArtifactFreshness(
 	artifact LiveDeploymentCheckArtifact,
 	now time.Time,
@@ -268,6 +321,148 @@ func ValidateLiveDeploymentCheckArtifactFreshness(
 		return errors.New("live deployment check artifact freshness validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func liveDeploymentCheckArtifactHandoffPlanProblems(
+	plan LiveDeploymentCheckArtifactPlanFile,
+	execution LiveDeploymentCheckArtifactHandoffExecution,
+) []string {
+	var problems []string
+	if err := ValidateLiveOrderPlanArtifact(execution.PlanArtifact); err != nil {
+		return []string{err.Error()}
+	}
+	if !sameLiveReadinessHandoffPath(plan.Path, execution.PlanPath) {
+		problems = append(problems, fmt.Sprintf("plan_file.path %q does not match -plan-file %q", plan.Path, strings.TrimSpace(execution.PlanPath)))
+	}
+	if plan.SHA256 != strings.TrimSpace(execution.PlanFileSHA256) {
+		problems = append(problems, fmt.Sprintf("plan_file.sha256 %q does not match -plan-file sha256 %q", plan.SHA256, strings.TrimSpace(execution.PlanFileSHA256)))
+	}
+	compareText := map[string][2]string{
+		"plan_file.schema_version":  {plan.SchemaVersion, execution.PlanArtifact.SchemaVersion},
+		"plan_file.source":          {plan.Source, execution.PlanArtifact.Source},
+		"plan_file.pending_symbol":  {plan.PendingSymbol, execution.PlanArtifact.PendingSymbol},
+		"plan_file.decision_id":     {plan.DecisionID, execution.PlanArtifact.DecisionID},
+		"plan_file.submission_id":   {plan.SubmissionID, execution.PlanArtifact.SubmissionID},
+		"plan_file.client_order_id": {plan.ClientOrderID, execution.PlanArtifact.ClientOrderID},
+		"plan_file.symbol":          {plan.Symbol, execution.PlanArtifact.Symbol},
+		"plan_file.notional":        {plan.Notional, execution.PlanArtifact.Notional},
+		"plan_file.leverage":        {plan.Leverage, execution.PlanArtifact.Leverage},
+	}
+	for field, values := range compareText {
+		if values[0] != values[1] {
+			problems = append(problems, fmt.Sprintf("%s %q does not match plan artifact %q", field, values[0], values[1]))
+		}
+	}
+	return problems
+}
+
+func liveDeploymentCheckArtifactHandoffReadinessProblems(
+	readiness LiveDeploymentCheckArtifactReadiness,
+	execution LiveDeploymentCheckArtifactHandoffExecution,
+) []string {
+	var problems []string
+	if err := ValidateLiveReadinessArtifact(execution.ReadinessArtifact); err != nil {
+		return []string{err.Error()}
+	}
+	if !sameLiveReadinessHandoffPath(readiness.Path, execution.ReadinessPath) {
+		problems = append(problems, fmt.Sprintf("readiness_file.path %q does not match -readiness-file %q", readiness.Path, strings.TrimSpace(execution.ReadinessPath)))
+	}
+	if readiness.SHA256 != strings.TrimSpace(execution.ReadinessFileSHA256) {
+		problems = append(problems, fmt.Sprintf("readiness_file.sha256 %q does not match -readiness-file sha256 %q", readiness.SHA256, strings.TrimSpace(execution.ReadinessFileSHA256)))
+	}
+	if readiness.SchemaVersion != execution.ReadinessArtifact.SchemaVersion {
+		problems = append(problems, fmt.Sprintf("readiness_file.schema_version %q does not match readiness artifact %q", readiness.SchemaVersion, execution.ReadinessArtifact.SchemaVersion))
+	}
+	if !readiness.CreatedAt.Equal(execution.ReadinessArtifact.CreatedAt.UTC()) {
+		problems = append(problems, "readiness_file.created_at does not match readiness artifact")
+	}
+	if readiness.Ready != execution.ReadinessArtifact.Ready {
+		problems = append(problems, fmt.Sprintf("readiness_file.ready %t does not match readiness artifact %t", readiness.Ready, execution.ReadinessArtifact.Ready))
+	}
+	return problems
+}
+
+func liveDeploymentCheckArtifactHandoffAuditProblems(
+	audit LiveDeploymentCheckArtifactAudit,
+	execution LiveDeploymentCheckArtifactHandoffExecution,
+) []string {
+	var problems []string
+	if err := ValidateLiveLoopAuditArtifact(execution.AuditArtifact); err != nil {
+		return []string{err.Error()}
+	}
+	if !sameLiveReadinessHandoffPath(audit.Path, execution.AuditPath) {
+		problems = append(problems, fmt.Sprintf("audit_file.path %q does not match -audit-file %q", audit.Path, strings.TrimSpace(execution.AuditPath)))
+	}
+	if audit.SHA256 != strings.TrimSpace(execution.AuditFileSHA256) {
+		problems = append(problems, fmt.Sprintf("audit_file.sha256 %q does not match -audit-file sha256 %q", audit.SHA256, strings.TrimSpace(execution.AuditFileSHA256)))
+	}
+	if audit.SchemaVersion != execution.AuditArtifact.SchemaVersion {
+		problems = append(problems, fmt.Sprintf("audit_file.schema_version %q does not match audit artifact %q", audit.SchemaVersion, execution.AuditArtifact.SchemaVersion))
+	}
+	if !audit.CreatedAt.Equal(execution.AuditArtifact.CreatedAt.UTC()) {
+		problems = append(problems, "audit_file.created_at does not match audit artifact")
+	}
+	if audit.ReviewStatus != execution.AuditArtifact.Summary.ReviewStatus {
+		problems = append(problems, fmt.Sprintf("audit_file.review_status %q does not match audit artifact %q", audit.ReviewStatus, execution.AuditArtifact.Summary.ReviewStatus))
+	}
+	if audit.OperatorActionRequired != execution.AuditArtifact.Summary.OperatorActionRequired {
+		problems = append(problems, fmt.Sprintf("audit_file.operator_action_required %t does not match audit artifact %t", audit.OperatorActionRequired, execution.AuditArtifact.Summary.OperatorActionRequired))
+	}
+	return problems
+}
+
+func liveDeploymentCheckArtifactHandoffExecutionProblems(
+	artifactExecution LiveDeploymentCheckArtifactExecution,
+	execution LiveDeploymentCheckArtifactHandoffExecution,
+) []string {
+	var problems []string
+	if artifactExecution.Execute != execution.Execute {
+		problems = append(problems, fmt.Sprintf("execution.execute %t does not match live-loop execute %t", artifactExecution.Execute, execution.Execute))
+	}
+	if artifactExecution.SubaccountConfirmed != execution.SubaccountConfirmed {
+		problems = append(problems, fmt.Sprintf("execution.subaccount_confirmed %t does not match live-loop subaccount confirmation %t", artifactExecution.SubaccountConfirmed, execution.SubaccountConfirmed))
+	}
+	if artifactExecution.SelectPending != execution.SelectPending {
+		problems = append(problems, fmt.Sprintf("execution.select_pending %t does not match live-loop select-pending %t", artifactExecution.SelectPending, execution.SelectPending))
+	}
+	expectedPendingSymbol := ""
+	if execution.SelectPending {
+		if err := ValidatePendingLiveDecisionQuery(execution.PendingQuery); err != nil {
+			problems = append(problems, err.Error())
+		}
+		expectedPendingSymbol = execution.PendingQuery.Symbol
+	}
+	if artifactExecution.PendingSymbol != "" && artifactExecution.PendingSymbol != expectedPendingSymbol {
+		problems = append(problems, fmt.Sprintf("execution.pending_symbol %q does not match live-loop execution %q", artifactExecution.PendingSymbol, expectedPendingSymbol))
+	}
+	if artifactExecution.DecisionID != "" && artifactExecution.DecisionID != strings.TrimSpace(execution.DecisionID) {
+		problems = append(problems, fmt.Sprintf("execution.decision_id %q does not match live-loop execution %q", artifactExecution.DecisionID, strings.TrimSpace(execution.DecisionID)))
+	}
+	if artifactExecution.SelectedDecisionID != strings.TrimSpace(execution.SelectedDecisionID) {
+		problems = append(problems, fmt.Sprintf("execution.selected_decision_id %q does not match live-loop execution %q", artifactExecution.SelectedDecisionID, strings.TrimSpace(execution.SelectedDecisionID)))
+	}
+	maxCapital, err := decimal.NewFromString(strings.TrimSpace(artifactExecution.MaxInitialLiveCapitalUSDT))
+	if err != nil {
+		problems = append(problems, "execution.max_initial_live_capital_usdt must be a decimal")
+	} else if !maxCapital.Equal(execution.MaxInitialLiveCapitalUSDT) {
+		problems = append(problems, fmt.Sprintf("execution.max_initial_live_capital_usdt %s does not match live-loop max initial capital %s", maxCapital, execution.MaxInitialLiveCapitalUSDT))
+	}
+	if artifactExecution.MaxIterations != execution.MaxIterations {
+		problems = append(problems, fmt.Sprintf("execution.max_iterations %d does not match live-loop max iterations %d", artifactExecution.MaxIterations, execution.MaxIterations))
+	}
+	maxRuntime, maxRuntimeErr := time.ParseDuration(strings.TrimSpace(artifactExecution.MaxRuntime))
+	if maxRuntimeErr != nil {
+		problems = append(problems, "execution.max_runtime must be a duration")
+	} else if maxRuntime != execution.MaxRuntime {
+		problems = append(problems, fmt.Sprintf("execution.max_runtime %s does not match live-loop max runtime %s", maxRuntime, execution.MaxRuntime))
+	}
+	iterationTimeout, timeoutErr := time.ParseDuration(strings.TrimSpace(artifactExecution.IterationTimeout))
+	if timeoutErr != nil {
+		problems = append(problems, "execution.iteration_timeout must be a duration")
+	} else if iterationTimeout != execution.IterationTimeout {
+		problems = append(problems, fmt.Sprintf("execution.iteration_timeout %s does not match live-loop iteration timeout %s", iterationTimeout, execution.IterationTimeout))
+	}
+	return problems
 }
 
 func validateLiveDeploymentPlanFileArtifactProblems(plan LiveDeploymentCheckArtifactPlanFile) []string {

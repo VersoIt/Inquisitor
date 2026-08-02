@@ -73,6 +73,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	maxReadinessAge := flags.Duration("max-readiness-age", domainlive.DefaultLiveReadinessArtifactMaxAge, "maximum accepted age for -readiness-file based on created_at")
 	auditFile := flags.String("audit-file", "", "optional JSON artifact written by live-loop-audit; validates readiness audit verdict before execution")
 	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum accepted age for -audit-file based on created_at")
+	deployCheckFile := flags.String("deploy-check-file", "", "optional JSON artifact written by live-deploy-check; requires a fresh PASS deployment gate before execution")
+	maxDeployCheckAge := flags.Duration("max-deploy-check-age", domainlive.DefaultLiveDeploymentCheckArtifactMaxAge, "maximum accepted age for -deploy-check-file based on created_at")
 	decisionID := flags.String("decision-id", "", "persisted LIVE risk decision id to process")
 	selectPending := flags.Bool("select-pending", false, "select the oldest approved pending LIVE risk decision with no live order submission")
 	pendingSymbol := flags.String("pending-symbol", "", "optional symbol filter used with -select-pending")
@@ -105,21 +107,31 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	if *maxAuditAge <= 0 {
 		return fmt.Errorf("max-audit-age must be positive")
 	}
+	if *maxDeployCheckAge <= 0 {
+		return fmt.Errorf("max-deploy-check-age must be positive")
+	}
 
 	planArtifact, hasPlanArtifact, planArtifactSHA256, err := loadLiveLoopPlanArtifact(*planFile)
 	if err != nil {
 		return err
 	}
-	readinessArtifact, hasReadinessArtifact, err := loadLiveLoopReadinessArtifact(*readinessFile)
+	readinessArtifact, hasReadinessArtifact, readinessArtifactSHA256, err := loadLiveLoopReadinessArtifact(*readinessFile)
 	if err != nil {
 		return err
 	}
-	auditArtifact, hasAuditArtifact, err := loadLiveLoopAuditArtifact(*auditFile)
+	auditArtifact, hasAuditArtifact, auditArtifactSHA256, err := loadLiveLoopAuditArtifact(*auditFile)
+	if err != nil {
+		return err
+	}
+	deployCheckArtifact, hasDeployCheckArtifact, err := loadLiveLoopDeploymentCheckArtifact(*deployCheckFile)
 	if err != nil {
 		return err
 	}
 	if hasAuditArtifact && !hasReadinessArtifact {
 		return fmt.Errorf("audit-file requires -readiness-file")
+	}
+	if hasDeployCheckArtifact && (!hasPlanArtifact || !hasReadinessArtifact || !hasAuditArtifact) {
+		return fmt.Errorf("deploy-check-file requires -plan-file, -readiness-file, and -audit-file")
 	}
 	effectiveDecisionID := *decisionID
 	effectivePendingSymbol := *pendingSymbol
@@ -129,6 +141,7 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	effectiveLimitPrice := *limitPriceValue
 	effectiveExpectedSubmissionID := *expectedSubmissionID
 	effectiveExpectedClientOrderID := *expectedClientOrderID
+	artifactNow := time.Now().UTC()
 	if hasPlanArtifact {
 		if err := applyLiveLoopPlanArtifact(
 			args,
@@ -145,17 +158,22 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		); err != nil {
 			return err
 		}
-		if err := domainlive.ValidateLiveOrderPlanArtifactFreshness(planArtifact, time.Now().UTC(), *maxPlanAge); err != nil {
+		if err := domainlive.ValidateLiveOrderPlanArtifactFreshness(planArtifact, artifactNow, *maxPlanAge); err != nil {
 			return err
 		}
 	}
 	if hasReadinessArtifact {
-		if err := domainlive.ValidateLiveReadinessArtifactFreshness(readinessArtifact, time.Now().UTC(), *maxReadinessAge); err != nil {
+		if err := domainlive.ValidateLiveReadinessArtifactFreshness(readinessArtifact, artifactNow, *maxReadinessAge); err != nil {
 			return err
 		}
 	}
 	if hasAuditArtifact {
-		if err := domainlive.ValidateLiveLoopAuditArtifactFreshness(auditArtifact, time.Now().UTC(), *maxAuditAge); err != nil {
+		if err := domainlive.ValidateLiveLoopAuditArtifactFreshness(auditArtifact, artifactNow, *maxAuditAge); err != nil {
+			return err
+		}
+	}
+	if hasDeployCheckArtifact {
+		if err := domainlive.ValidateLiveDeploymentCheckArtifactFreshness(deployCheckArtifact, artifactNow, *maxDeployCheckAge); err != nil {
 			return err
 		}
 	}
@@ -204,6 +222,30 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			return err
 		}
 	}
+	deployCheckHandoffExecution := func(selectedDecisionID string) domainlive.LiveDeploymentCheckArtifactHandoffExecution {
+		return domainlive.LiveDeploymentCheckArtifactHandoffExecution{
+			ConfigPath:                strings.TrimSpace(*configPath),
+			PlanPath:                  strings.TrimSpace(*planFile),
+			PlanFileSHA256:            planArtifactSHA256,
+			PlanArtifact:              planArtifact,
+			ReadinessPath:             strings.TrimSpace(*readinessFile),
+			ReadinessFileSHA256:       readinessArtifactSHA256,
+			ReadinessArtifact:         readinessArtifact,
+			AuditPath:                 strings.TrimSpace(*auditFile),
+			AuditFileSHA256:           auditArtifactSHA256,
+			AuditArtifact:             auditArtifact,
+			Execute:                   *execute,
+			SubaccountConfirmed:       *subaccountConfirmed,
+			SelectPending:             *selectPending,
+			PendingQuery:              pendingQuery,
+			DecisionID:                effectiveDecisionID,
+			SelectedDecisionID:        selectedDecisionID,
+			MaxInitialLiveCapitalUSDT: maxInitialCapital,
+			MaxIterations:             *maxIterations,
+			MaxRuntime:                *maxRuntime,
+			IterationTimeout:          *iterationTimeout,
+		}
+	}
 	if hasReadinessArtifact {
 		if err := domainlive.ValidateLiveReadinessArtifactHandoff(readinessArtifact, domainlive.LiveReadinessArtifactHandoffExecution{
 			ConfigPath:         strings.TrimSpace(*configPath),
@@ -217,6 +259,11 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			PendingQuery:       pendingQuery,
 			SelectedDecisionID: selectedDecisionID,
 		}); err != nil {
+			return err
+		}
+	}
+	if hasDeployCheckArtifact && !*selectPending {
+		if err := domainlive.ValidateLiveDeploymentCheckArtifactHandoff(deployCheckArtifact, deployCheckHandoffExecution(selectedDecisionID)); err != nil {
 			return err
 		}
 	}
@@ -313,6 +360,11 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 				PendingQuery:       pendingQuery,
 				SelectedDecisionID: selectedDecisionID,
 			}); err != nil {
+				return err
+			}
+		}
+		if hasDeployCheckArtifact {
+			if err := domainlive.ValidateLiveDeploymentCheckArtifactHandoff(deployCheckArtifact, deployCheckHandoffExecution(selectedDecisionID)); err != nil {
 				return err
 			}
 		}
@@ -489,46 +541,70 @@ func loadLiveLoopPlanArtifact(path string) (domainlive.LiveOrderPlanArtifact, bo
 	return artifact, true, hex.EncodeToString(sum[:]), nil
 }
 
-func loadLiveLoopReadinessArtifact(path string) (domainlive.LiveReadinessArtifact, bool, error) {
+func loadLiveLoopReadinessArtifact(path string) (domainlive.LiveReadinessArtifact, bool, string, error) {
 	trimmedPath := strings.TrimSpace(path)
 	if trimmedPath == "" {
-		return domainlive.LiveReadinessArtifact{}, false, nil
+		return domainlive.LiveReadinessArtifact{}, false, "", nil
 	}
 	if path != trimmedPath {
-		return domainlive.LiveReadinessArtifact{}, false, fmt.Errorf("readiness-file must be trimmed")
+		return domainlive.LiveReadinessArtifact{}, false, "", fmt.Errorf("readiness-file must be trimmed")
 	}
 	payload, err := os.ReadFile(trimmedPath)
 	if err != nil {
-		return domainlive.LiveReadinessArtifact{}, false, fmt.Errorf("read live readiness artifact %q: %w", trimmedPath, err)
+		return domainlive.LiveReadinessArtifact{}, false, "", fmt.Errorf("read live readiness artifact %q: %w", trimmedPath, err)
 	}
 	var artifact domainlive.LiveReadinessArtifact
 	if err := json.Unmarshal(payload, &artifact); err != nil {
-		return domainlive.LiveReadinessArtifact{}, false, fmt.Errorf("decode live readiness artifact %q: %w", trimmedPath, err)
+		return domainlive.LiveReadinessArtifact{}, false, "", fmt.Errorf("decode live readiness artifact %q: %w", trimmedPath, err)
 	}
 	if err := domainlive.ValidateLiveReadinessArtifact(artifact); err != nil {
-		return domainlive.LiveReadinessArtifact{}, false, err
+		return domainlive.LiveReadinessArtifact{}, false, "", err
 	}
-	return artifact, true, nil
+	sum := sha256.Sum256(payload)
+	return artifact, true, hex.EncodeToString(sum[:]), nil
 }
 
-func loadLiveLoopAuditArtifact(path string) (domainlive.LiveLoopAuditArtifact, bool, error) {
+func loadLiveLoopAuditArtifact(path string) (domainlive.LiveLoopAuditArtifact, bool, string, error) {
 	trimmedPath := strings.TrimSpace(path)
 	if trimmedPath == "" {
-		return domainlive.LiveLoopAuditArtifact{}, false, nil
+		return domainlive.LiveLoopAuditArtifact{}, false, "", nil
 	}
 	if path != trimmedPath {
-		return domainlive.LiveLoopAuditArtifact{}, false, fmt.Errorf("audit-file must be trimmed")
+		return domainlive.LiveLoopAuditArtifact{}, false, "", fmt.Errorf("audit-file must be trimmed")
 	}
 	payload, err := os.ReadFile(trimmedPath)
 	if err != nil {
-		return domainlive.LiveLoopAuditArtifact{}, false, fmt.Errorf("read live-loop audit artifact %q: %w", trimmedPath, err)
+		return domainlive.LiveLoopAuditArtifact{}, false, "", fmt.Errorf("read live-loop audit artifact %q: %w", trimmedPath, err)
 	}
 	var artifact domainlive.LiveLoopAuditArtifact
 	if err := json.Unmarshal(payload, &artifact); err != nil {
-		return domainlive.LiveLoopAuditArtifact{}, false, fmt.Errorf("decode live-loop audit artifact %q: %w", trimmedPath, err)
+		return domainlive.LiveLoopAuditArtifact{}, false, "", fmt.Errorf("decode live-loop audit artifact %q: %w", trimmedPath, err)
 	}
 	if err := domainlive.ValidateLiveLoopAuditArtifact(artifact); err != nil {
-		return domainlive.LiveLoopAuditArtifact{}, false, err
+		return domainlive.LiveLoopAuditArtifact{}, false, "", err
+	}
+	sum := sha256.Sum256(payload)
+	return artifact, true, hex.EncodeToString(sum[:]), nil
+}
+
+func loadLiveLoopDeploymentCheckArtifact(path string) (domainlive.LiveDeploymentCheckArtifact, bool, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return domainlive.LiveDeploymentCheckArtifact{}, false, nil
+	}
+	if path != trimmedPath {
+		return domainlive.LiveDeploymentCheckArtifact{}, false, fmt.Errorf("deploy-check-file must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return domainlive.LiveDeploymentCheckArtifact{}, false, fmt.Errorf("read live deployment check artifact %q: %w", trimmedPath, err)
+	}
+	var artifact domainlive.LiveDeploymentCheckArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		return domainlive.LiveDeploymentCheckArtifact{}, false, fmt.Errorf("decode live deployment check artifact %q: %w", trimmedPath, err)
+	}
+	if err := domainlive.ValidateLiveDeploymentCheckArtifact(artifact); err != nil {
+		return domainlive.LiveDeploymentCheckArtifact{}, false, err
 	}
 	return artifact, true, nil
 }
