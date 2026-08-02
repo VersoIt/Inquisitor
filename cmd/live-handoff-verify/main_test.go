@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 )
 
@@ -253,6 +255,174 @@ func TestRunLiveHandoffVerifyAuditArtifactTableDriven(t *testing.T) {
 	}
 }
 
+func TestRunLiveHandoffVerifyDeployCheckArtifactTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	plan := validLiveHandoffPlanArtifact(now.Add(-time.Minute), domainlive.LiveOrderPlanArtifactSourceDecisionID)
+	plan.Quantity = "0.001"
+	plan.Notional = "100"
+	plan.MaxLoss = "1"
+	planFile := writeLiveHandoffPlanArtifact(t, plan)
+	audit := validLiveHandoffAuditArtifact(now.Add(-30*time.Second), "configs/live.local.yaml")
+	auditFile := writeLiveHandoffAuditArtifact(t, audit)
+	readiness := validLiveHandoffReadinessArtifact(t, now.Add(-20*time.Second), "configs/live.local.yaml", planFile, plan)
+	readiness.Audit = liveHandoffReadinessAuditFromAuditArtifact(audit)
+	readinessFile := writeLiveHandoffReadinessArtifact(t, readiness)
+	validDeployCheck := validLiveHandoffDeploymentCheckArtifact(t, now.Add(-10*time.Second), "configs/live.local.yaml", planFile, readinessFile, auditFile)
+
+	validArgs := func(deployCheckFile string) []string {
+		return []string{
+			"-config", "configs/live.local.yaml",
+			"-plan-file", planFile,
+			"-readiness-file", readinessFile,
+			"-audit-file", auditFile,
+			"-deploy-check-file", deployCheckFile,
+			"-decision-id", plan.DecisionID,
+			"-execute",
+			"-subaccount-confirmed",
+			"-max-initial-live-capital-usdt", "100",
+			"-max-iterations", "1",
+			"-max-runtime", "15s",
+			"-iteration-timeout", "10s",
+		}
+	}
+
+	tests := []struct {
+		name       string
+		artifact   domainlive.LiveDeploymentCheckArtifact
+		args       func(string) []string
+		wantErrSub string
+		wantLogSub string
+	}{
+		{
+			name:       "valid deploy check handoff",
+			artifact:   validDeployCheck,
+			args:       validArgs,
+			wantLogSub: `"deploy_check_ready":true`,
+		},
+		{
+			name:     "valid deploy check handoff defaults decision id from plan",
+			artifact: validDeployCheck,
+			args: func(deployCheckFile string) []string {
+				return []string{
+					"-config", "configs/live.local.yaml",
+					"-plan-file", planFile,
+					"-readiness-file", readinessFile,
+					"-audit-file", auditFile,
+					"-deploy-check-file", deployCheckFile,
+					"-execute",
+					"-subaccount-confirmed",
+					"-max-initial-live-capital-usdt", "100",
+					"-max-iterations", "1",
+					"-max-runtime", "15s",
+					"-iteration-timeout", "10s",
+				}
+			},
+			wantLogSub: `"selected_decision_id":"risk_decision_live_verify_0001"`,
+		},
+		{
+			name:     "deploy check requires audit file",
+			artifact: validDeployCheck,
+			args: func(deployCheckFile string) []string {
+				return []string{
+					"-config", "configs/live.local.yaml",
+					"-plan-file", planFile,
+					"-readiness-file", readinessFile,
+					"-deploy-check-file", deployCheckFile,
+					"-decision-id", plan.DecisionID,
+					"-execute",
+					"-subaccount-confirmed",
+				}
+			},
+			wantErrSub: "requires -audit-file",
+		},
+		{
+			name: "stale deploy check artifact",
+			artifact: mutateLiveHandoffDeploymentCheckArtifact(validDeployCheck, func(a *domainlive.LiveDeploymentCheckArtifact) {
+				a.CreatedAt = now.Add(-time.Hour)
+			}),
+			args: func(deployCheckFile string) []string {
+				return append(validArgs(deployCheckFile), "-max-deploy-check-age", "10m")
+			},
+			wantErrSub: "stale",
+		},
+		{
+			name: "failed deploy check artifact",
+			artifact: mutateLiveHandoffDeploymentCheckArtifact(validDeployCheck, func(a *domainlive.LiveDeploymentCheckArtifact) {
+				a.Checks[1].Status = domainlive.ReadinessCheckStatusFail
+				a.Checks[1].Details = "-execute=true is required"
+				a.Summary.Passed--
+				a.Summary.Failed++
+				a.FailedChecks = []string{a.Checks[1].Name}
+				a.Ready = false
+				a.Execution.Execute = false
+			}),
+			args:       validArgs,
+			wantErrSub: "ready",
+		},
+		{
+			name: "readiness sha mismatch",
+			artifact: mutateLiveHandoffDeploymentCheckArtifact(validDeployCheck, func(a *domainlive.LiveDeploymentCheckArtifact) {
+				a.ReadinessFile.SHA256 = strings.Repeat("d", 64)
+			}),
+			args:       validArgs,
+			wantErrSub: "readiness_file.sha256",
+		},
+		{
+			name:     "runtime mismatch",
+			artifact: validDeployCheck,
+			args: func(deployCheckFile string) []string {
+				args := validArgs(deployCheckFile)
+				return append(args, "-max-runtime", "20s")
+			},
+			wantErrSub: "execution.max_runtime",
+		},
+		{
+			name:     "execute flag mismatch",
+			artifact: validDeployCheck,
+			args: func(deployCheckFile string) []string {
+				return []string{
+					"-config", "configs/live.local.yaml",
+					"-plan-file", planFile,
+					"-readiness-file", readinessFile,
+					"-audit-file", auditFile,
+					"-deploy-check-file", deployCheckFile,
+					"-decision-id", plan.DecisionID,
+					"-subaccount-confirmed",
+					"-max-initial-live-capital-usdt", "100",
+					"-max-iterations", "1",
+					"-max-runtime", "15s",
+					"-iteration-timeout", "10s",
+				}
+			},
+			wantErrSub: "execution.execute",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deployCheckFile := writeLiveHandoffDeploymentCheckArtifact(t, tt.artifact)
+
+			var output bytes.Buffer
+			err := runLiveHandoffVerify(context.Background(), tt.args(deployCheckFile), liveHandoffVerifyDependencies{
+				now:    func() time.Time { return now },
+				output: &output,
+			})
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v\nlogs:\n%s", tt.wantErrSub, err, output.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verify deploy-check handoff: %v\nlogs:\n%s", err, output.String())
+			}
+			if !strings.Contains(output.String(), tt.wantLogSub) {
+				t.Fatalf("expected logs to contain %s, got\n%s", tt.wantLogSub, output.String())
+			}
+		})
+	}
+}
+
 func validLiveHandoffPlanArtifact(createdAt time.Time, source string) domainlive.LiveOrderPlanArtifact {
 	artifact := domainlive.LiveOrderPlanArtifact{
 		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
@@ -388,6 +558,98 @@ func writeLiveHandoffAuditArtifact(t *testing.T, artifact domainlive.LiveLoopAud
 	return path
 }
 
+func writeLiveHandoffDeploymentCheckArtifact(t *testing.T, artifact domainlive.LiveDeploymentCheckArtifact) string {
+	t.Helper()
+
+	if err := domainlive.ValidateLiveDeploymentCheckArtifact(artifact); err != nil {
+		t.Fatalf("validate deployment check artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal deployment check artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "live-deploy-check.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write deployment check artifact: %v", err)
+	}
+	return path
+}
+
+func validLiveHandoffDeploymentCheckArtifact(
+	t *testing.T,
+	createdAt time.Time,
+	configPath string,
+	planPath string,
+	readinessPath string,
+	auditPath string,
+) domainlive.LiveDeploymentCheckArtifact {
+	t.Helper()
+
+	plan, err := loadLiveHandoffPlanArtifactFile(planPath)
+	if err != nil {
+		t.Fatalf("load plan artifact: %v", err)
+	}
+	readiness, err := loadLiveHandoffReadinessArtifactFile(readinessPath)
+	if err != nil {
+		t.Fatalf("load readiness artifact: %v", err)
+	}
+	audit, hasAudit, err := loadLiveHandoffAuditArtifactFile(auditPath)
+	if err != nil {
+		t.Fatalf("load audit artifact: %v", err)
+	}
+	if !hasAudit {
+		t.Fatal("audit artifact is required")
+	}
+	deployment := domainlive.LiveDeploymentCheckRequest{
+		ConfigPath:                strings.TrimSpace(configPath),
+		PlanFilePath:              strings.TrimSpace(planPath),
+		PlanFileSHA256:            plan.SHA256,
+		PlanArtifact:              plan.Artifact,
+		ReadinessArtifact:         readiness.Artifact,
+		AuditArtifact:             audit.Artifact,
+		Now:                       createdAt.UTC(),
+		MaxPlanArtifactAge:        domainlive.DefaultLiveOrderPlanArtifactMaxAge,
+		MaxReadinessArtifactAge:   domainlive.DefaultLiveReadinessArtifactMaxAge,
+		MaxAuditArtifactAge:       domainlive.DefaultLiveLoopAuditArtifactMaxAge,
+		Execute:                   true,
+		SubaccountConfirmed:       true,
+		DecisionID:                plan.Artifact.DecisionID,
+		MaxInitialLiveCapitalUSDT: decimal.NewFromInt(100),
+		MicroCapitalLimitUSDT:     domainlive.DefaultLiveDeploymentMicroCapitalLimitUSDT(),
+		MaxIterations:             1,
+		MaxRuntime:                15 * time.Second,
+		IterationTimeout:          10 * time.Second,
+	}
+	if plan.Artifact.Source == domainlive.LiveOrderPlanArtifactSourceSelectPending {
+		deployment.DecisionID = ""
+		deployment.SelectPending = true
+		deployment.PendingSymbol = plan.Artifact.PendingSymbol
+	}
+	report, err := domainlive.BuildLiveDeploymentCheckReport(deployment)
+	if err != nil {
+		t.Fatalf("build deployment check report: %v", err)
+	}
+	if !report.Ready {
+		t.Fatalf("deployment check report must be ready: %#v", report)
+	}
+	artifact, err := domainlive.BuildLiveDeploymentCheckArtifact(domainlive.BuildLiveDeploymentCheckArtifactRequest{
+		Report:              report,
+		Deployment:          deployment,
+		CreatedAt:           createdAt.UTC(),
+		ConfigPath:          configPath,
+		PlanFilePath:        planPath,
+		PlanFileSHA256:      plan.SHA256,
+		ReadinessFilePath:   readinessPath,
+		ReadinessFileSHA256: readiness.SHA256,
+		AuditFilePath:       auditPath,
+		AuditFileSHA256:     audit.SHA256,
+	})
+	if err != nil {
+		t.Fatalf("build deployment check artifact: %v", err)
+	}
+	return artifact
+}
+
 func validLiveHandoffAuditArtifact(createdAt time.Time, configPath string) domainlive.LiveLoopAuditArtifact {
 	return domainlive.LiveLoopAuditArtifact{
 		SchemaVersion: domainlive.LiveLoopAuditArtifactSchemaVersion,
@@ -448,6 +710,18 @@ func mutateLiveHandoffReadinessArtifact(
 		plan := *artifact.PlanFile
 		artifact.PlanFile = &plan
 	}
+	if mutate != nil {
+		mutate(&artifact)
+	}
+	return artifact
+}
+
+func mutateLiveHandoffDeploymentCheckArtifact(
+	artifact domainlive.LiveDeploymentCheckArtifact,
+	mutate func(*domainlive.LiveDeploymentCheckArtifact),
+) domainlive.LiveDeploymentCheckArtifact {
+	artifact.FailedChecks = append([]string(nil), artifact.FailedChecks...)
+	artifact.Checks = append([]domainlive.LiveDeploymentCheckArtifactCheck(nil), artifact.Checks...)
 	if mutate != nil {
 		mutate(&artifact)
 	}
