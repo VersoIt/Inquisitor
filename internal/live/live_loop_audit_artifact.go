@@ -9,6 +9,8 @@ import (
 
 const LiveLoopAuditArtifactSchemaVersion = "inquisitor.live_loop_audit.v1"
 
+const DefaultLiveLoopAuditArtifactMaxAge = 10 * time.Minute
+
 type LiveLoopAuditArtifact struct {
 	SchemaVersion string                       `json:"schema_version"`
 	CreatedAt     time.Time                    `json:"created_at"`
@@ -112,6 +114,36 @@ func ValidateLiveLoopAuditArtifact(artifact LiveLoopAuditArtifact) error {
 	}
 	if len(problems) > 0 {
 		return errors.New("live-loop audit artifact validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func ValidateLiveLoopAuditArtifactFreshness(
+	artifact LiveLoopAuditArtifact,
+	now time.Time,
+	maxAge time.Duration,
+) error {
+	if err := ValidateLiveLoopAuditArtifact(artifact); err != nil {
+		return err
+	}
+	var problems []string
+	if now.IsZero() {
+		problems = append(problems, "now is required")
+	}
+	if maxAge <= 0 {
+		problems = append(problems, "max_age must be positive")
+	}
+	if len(problems) == 0 {
+		age := now.UTC().Sub(artifact.CreatedAt.UTC())
+		if age < 0 {
+			problems = append(problems, "created_at must not be in the future")
+		}
+		if age > maxAge {
+			problems = append(problems, fmt.Sprintf("artifact is stale: age=%s max=%s", age, maxAge))
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New("live-loop audit artifact freshness validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
 }

@@ -159,6 +159,100 @@ func TestRunLiveHandoffVerifyRequiresArtifacts(t *testing.T) {
 	}
 }
 
+func TestRunLiveHandoffVerifyAuditArtifactTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	plan := validLiveHandoffPlanArtifact(now.Add(-time.Minute), domainlive.LiveOrderPlanArtifactSourceDecisionID)
+
+	tests := []struct {
+		name            string
+		mutateAudit     func(*domainlive.LiveLoopAuditArtifact)
+		mutateReadiness func(*domainlive.LiveReadinessArtifact)
+		args            func(planFile string, readinessFile string, auditFile string) []string
+		wantErrSub      string
+		wantLogSub      string
+	}{
+		{
+			name: "valid audit artifact handoff",
+			args: func(planFile string, readinessFile string, auditFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-audit-file", auditFile}
+			},
+			wantLogSub: `"audit_review_status":"CLEAR"`,
+		},
+		{
+			name: "stale audit artifact",
+			mutateAudit: func(a *domainlive.LiveLoopAuditArtifact) {
+				a.CreatedAt = now.Add(-time.Hour)
+			},
+			args: func(planFile string, readinessFile string, auditFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-audit-file", auditFile, "-max-audit-age", "10m"}
+			},
+			wantErrSub: "stale",
+		},
+		{
+			name: "readiness audit mismatch",
+			mutateReadiness: func(a *domainlive.LiveReadinessArtifact) {
+				a.Audit.Completed = 1
+			},
+			args: func(planFile string, readinessFile string, auditFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-audit-file", auditFile}
+			},
+			wantErrSub: "audit.completed",
+		},
+		{
+			name: "audit config mismatch",
+			mutateAudit: func(a *domainlive.LiveLoopAuditArtifact) {
+				a.ConfigPath = "configs/other-live.yaml"
+			},
+			args: func(planFile string, readinessFile string, auditFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-audit-file", auditFile}
+			},
+			wantErrSub: "audit config_path",
+		},
+		{
+			name: "nonpositive max audit age",
+			args: func(planFile string, readinessFile string, auditFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-audit-file", auditFile, "-max-audit-age", "0s"}
+			},
+			wantErrSub: "max-audit-age",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			planFile := writeLiveHandoffPlanArtifact(t, plan)
+			audit := validLiveHandoffAuditArtifact(now.Add(-30*time.Second), "configs/live.local.yaml")
+			if tt.mutateAudit != nil {
+				tt.mutateAudit(&audit)
+			}
+			auditFile := writeLiveHandoffAuditArtifact(t, audit)
+			readiness := validLiveHandoffReadinessArtifact(t, now.Add(-20*time.Second), "configs/live.local.yaml", planFile, plan)
+			readiness.Audit = liveHandoffReadinessAuditFromAuditArtifact(audit)
+			if tt.mutateReadiness != nil {
+				tt.mutateReadiness(&readiness)
+			}
+			readinessFile := writeLiveHandoffReadinessArtifact(t, readiness)
+
+			var output bytes.Buffer
+			err := runLiveHandoffVerify(context.Background(), tt.args(planFile, readinessFile, auditFile), liveHandoffVerifyDependencies{
+				now:    func() time.Time { return now },
+				output: &output,
+			})
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v\nlogs:\n%s", tt.wantErrSub, err, output.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verify handoff: %v\nlogs:\n%s", err, output.String())
+			}
+			if !strings.Contains(output.String(), tt.wantLogSub) {
+				t.Fatalf("expected logs to contain %s, got\n%s", tt.wantLogSub, output.String())
+			}
+		})
+	}
+}
+
 func validLiveHandoffPlanArtifact(createdAt time.Time, source string) domainlive.LiveOrderPlanArtifact {
 	artifact := domainlive.LiveOrderPlanArtifact{
 		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
@@ -275,6 +369,54 @@ func writeLiveHandoffReadinessArtifact(t *testing.T, artifact domainlive.LiveRea
 		t.Fatalf("write readiness artifact: %v", err)
 	}
 	return path
+}
+
+func writeLiveHandoffAuditArtifact(t *testing.T, artifact domainlive.LiveLoopAuditArtifact) string {
+	t.Helper()
+
+	if err := domainlive.ValidateLiveLoopAuditArtifact(artifact); err != nil {
+		t.Fatalf("validate audit artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal audit artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "live-loop-audit.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write audit artifact: %v", err)
+	}
+	return path
+}
+
+func validLiveHandoffAuditArtifact(createdAt time.Time, configPath string) domainlive.LiveLoopAuditArtifact {
+	return domainlive.LiveLoopAuditArtifact{
+		SchemaVersion: domainlive.LiveLoopAuditArtifactSchemaVersion,
+		CreatedAt:     createdAt,
+		ConfigPath:    configPath,
+		Query: domainlive.LiveLoopAuditArtifactQuery{
+			Limit:             10,
+			IncludeIterations: true,
+		},
+		Summary: domainlive.LiveLoopAuditArtifactSummary{
+			ReviewStatus:           domainlive.LiveLoopAuditReviewStatusClear,
+			ReviewReason:           "no recent live-loop audit runs found",
+			OperatorActionRequired: false,
+		},
+	}
+}
+
+func liveHandoffReadinessAuditFromAuditArtifact(artifact domainlive.LiveLoopAuditArtifact) domainlive.LiveReadinessArtifactAudit {
+	return domainlive.LiveReadinessArtifactAudit{
+		Limit:                  artifact.Query.Limit,
+		Total:                  artifact.Summary.Total,
+		Running:                artifact.Summary.Running,
+		Completed:              artifact.Summary.Completed,
+		Failed:                 artifact.Summary.Failed,
+		ReviewStatus:           artifact.Summary.ReviewStatus,
+		ReviewRunID:            artifact.Summary.ReviewRunID,
+		ReviewReason:           artifact.Summary.ReviewReason,
+		OperatorActionRequired: artifact.Summary.OperatorActionRequired,
+	}
 }
 
 func liveHandoffPlanFileSHA256(t *testing.T, path string) string {

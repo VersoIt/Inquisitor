@@ -14,6 +14,8 @@ func TestValidateLiveReadinessArtifactHandoffTableDriven(t *testing.T) {
 	planPath := "artifacts/live-order-plan.json"
 	planSHA256 := strings.Repeat("c", 64)
 	validArtifact := validLiveReadinessHandoffArtifact(now, planPath, planSHA256, plan)
+	validAuditArtifact := validLiveReadinessHandoffAuditArtifact(now, validArtifact.ConfigPath)
+	validArtifact.Audit = liveReadinessHandoffAuditFromArtifact(validAuditArtifact)
 	validExecution := domainlive.LiveReadinessArtifactHandoffExecution{
 		ConfigPath:         validArtifact.ConfigPath,
 		PlanPath:           planPath,
@@ -29,6 +31,10 @@ func TestValidateLiveReadinessArtifactHandoffTableDriven(t *testing.T) {
 		wantErrSub string
 	}{
 		{name: "valid explicit handoff with plan file"},
+		{name: "valid handoff with audit artifact", mutate: func(_ *domainlive.LiveReadinessArtifact, e *domainlive.LiveReadinessArtifactHandoffExecution) {
+			e.HasAuditArtifact = true
+			e.AuditArtifact = validAuditArtifact
+		}},
 		{name: "valid readiness-only fallback without plan file", mutate: func(a *domainlive.LiveReadinessArtifact, e *domainlive.LiveReadinessArtifactHandoffExecution) {
 			a.PlanFile = nil
 			e.HasPlanArtifact = false
@@ -73,6 +79,21 @@ func TestValidateLiveReadinessArtifactHandoffTableDriven(t *testing.T) {
 		{name: "plan metadata mismatch", mutate: func(a *domainlive.LiveReadinessArtifact, _ *domainlive.LiveReadinessArtifactHandoffExecution) {
 			a.PlanFile.DecisionID = "risk_decision_live_artifact_0002"
 		}, wantErrSub: "plan_file.decision_id"},
+		{name: "audit artifact config mismatch", mutate: func(_ *domainlive.LiveReadinessArtifact, e *domainlive.LiveReadinessArtifactHandoffExecution) {
+			e.HasAuditArtifact = true
+			e.AuditArtifact = validAuditArtifact
+			e.AuditArtifact.ConfigPath = "configs/other-live.yaml"
+		}, wantErrSub: "audit config_path"},
+		{name: "audit artifact summary mismatch", mutate: func(a *domainlive.LiveReadinessArtifact, e *domainlive.LiveReadinessArtifactHandoffExecution) {
+			e.HasAuditArtifact = true
+			e.AuditArtifact = validAuditArtifact
+			a.Audit.Completed = 1
+		}, wantErrSub: "audit.completed"},
+		{name: "invalid audit artifact fails closed", mutate: func(_ *domainlive.LiveReadinessArtifact, e *domainlive.LiveReadinessArtifactHandoffExecution) {
+			e.HasAuditArtifact = true
+			e.AuditArtifact = validAuditArtifact
+			e.AuditArtifact.SchemaVersion = "old"
+		}, wantErrSub: "schema_version"},
 		{name: "select pending symbol mismatch", mutate: func(_ *domainlive.LiveReadinessArtifact, e *domainlive.LiveReadinessArtifactHandoffExecution) {
 			e.SelectPending = true
 			e.PendingQuery = domainlive.PendingLiveDecisionQuery{Symbol: "ETHUSDT", Limit: 1}
@@ -156,6 +177,40 @@ func validLiveReadinessHandoffArtifact(
 			Symbol:        plan.Symbol,
 			MaxAge:        domainlive.DefaultLiveOrderPlanArtifactMaxAge.String(),
 		},
+	}
+}
+
+func validLiveReadinessHandoffAuditArtifact(
+	createdAt time.Time,
+	configPath string,
+) domainlive.LiveLoopAuditArtifact {
+	return domainlive.LiveLoopAuditArtifact{
+		SchemaVersion: domainlive.LiveLoopAuditArtifactSchemaVersion,
+		CreatedAt:     createdAt,
+		ConfigPath:    configPath,
+		Query: domainlive.LiveLoopAuditArtifactQuery{
+			Limit:             10,
+			IncludeIterations: true,
+		},
+		Summary: domainlive.LiveLoopAuditArtifactSummary{
+			ReviewStatus:           domainlive.LiveLoopAuditReviewStatusClear,
+			ReviewReason:           "no recent live-loop audit runs found",
+			OperatorActionRequired: false,
+		},
+	}
+}
+
+func liveReadinessHandoffAuditFromArtifact(artifact domainlive.LiveLoopAuditArtifact) domainlive.LiveReadinessArtifactAudit {
+	return domainlive.LiveReadinessArtifactAudit{
+		Limit:                  artifact.Query.Limit,
+		Total:                  artifact.Summary.Total,
+		Running:                artifact.Summary.Running,
+		Completed:              artifact.Summary.Completed,
+		Failed:                 artifact.Summary.Failed,
+		ReviewStatus:           artifact.Summary.ReviewStatus,
+		ReviewRunID:            artifact.Summary.ReviewRunID,
+		ReviewReason:           artifact.Summary.ReviewReason,
+		OperatorActionRequired: artifact.Summary.OperatorActionRequired,
 	}
 }
 

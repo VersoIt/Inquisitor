@@ -80,6 +80,47 @@ func TestValidateLiveLoopAuditArtifactTableDriven(t *testing.T) {
 	}
 }
 
+func TestValidateLiveLoopAuditArtifactFreshnessTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	valid := validLiveLoopAuditArtifact(t, now.Add(-time.Minute), nil, true)
+
+	tests := []struct {
+		name       string
+		artifact   domainlive.LiveLoopAuditArtifact
+		now        time.Time
+		maxAge     time.Duration
+		wantErrSub string
+	}{
+		{name: "fresh artifact", artifact: valid, now: now, maxAge: 10 * time.Minute},
+		{name: "stale artifact", artifact: mutateLiveLoopAuditArtifact(valid, func(a *domainlive.LiveLoopAuditArtifact) {
+			a.CreatedAt = now.Add(-11 * time.Minute)
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "stale"},
+		{name: "future artifact", artifact: mutateLiveLoopAuditArtifact(valid, func(a *domainlive.LiveLoopAuditArtifact) {
+			a.CreatedAt = now.Add(time.Second)
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "future"},
+		{name: "zero max age", artifact: valid, now: now, wantErrSub: "max_age"},
+		{name: "missing now", artifact: valid, maxAge: 10 * time.Minute, wantErrSub: "now"},
+		{name: "invalid artifact first", artifact: mutateLiveLoopAuditArtifact(valid, func(a *domainlive.LiveLoopAuditArtifact) {
+			a.SchemaVersion = "old"
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "schema_version"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := domainlive.ValidateLiveLoopAuditArtifactFreshness(tt.artifact, tt.now, tt.maxAge)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate audit freshness: %v", err)
+			}
+		})
+	}
+}
+
 func validLiveLoopAuditArtifact(
 	t *testing.T,
 	createdAt time.Time,
@@ -224,6 +265,17 @@ func cloneLiveLoopAuditArtifact(artifact domainlive.LiveLoopAuditArtifact) domai
 			artifact.Runs[index].FinishedAt = &finishedAt
 		}
 		artifact.Runs[index].Iterations = append([]domainlive.LiveLoopAuditArtifactIteration(nil), artifact.Runs[index].Iterations...)
+	}
+	return artifact
+}
+
+func mutateLiveLoopAuditArtifact(
+	artifact domainlive.LiveLoopAuditArtifact,
+	mutate func(*domainlive.LiveLoopAuditArtifact),
+) domainlive.LiveLoopAuditArtifact {
+	artifact = cloneLiveLoopAuditArtifact(artifact)
+	if mutate != nil {
+		mutate(&artifact)
 	}
 	return artifact
 }

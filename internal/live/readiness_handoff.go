@@ -13,6 +13,8 @@ type LiveReadinessArtifactHandoffExecution struct {
 	HasPlanArtifact    bool
 	PlanArtifact       LiveOrderPlanArtifact
 	PlanFileSHA256     string
+	HasAuditArtifact   bool
+	AuditArtifact      LiveLoopAuditArtifact
 	SelectPending      bool
 	PendingQuery       PendingLiveDecisionQuery
 	SelectedDecisionID string
@@ -62,6 +64,9 @@ func ValidateLiveReadinessArtifactHandoff(
 	} else if artifact.PlanFile != nil {
 		problems = append(problems, "readiness-file plan_file requires -plan-file")
 	}
+	if execution.HasAuditArtifact {
+		problems = append(problems, liveReadinessArtifactHandoffAuditProblems(artifact.Audit, execution)...)
+	}
 	if len(problems) > 0 {
 		return errors.New("live readiness artifact handoff validation failed: " + strings.Join(problems, "; "))
 	}
@@ -95,6 +100,48 @@ func liveReadinessArtifactHandoffPlanFileProblems(
 		if values[0] != values[1] {
 			problems = append(problems, fmt.Sprintf("%s %q does not match plan artifact %q", field, values[0], values[1]))
 		}
+	}
+	return problems
+}
+
+func liveReadinessArtifactHandoffAuditProblems(
+	readinessAudit LiveReadinessArtifactAudit,
+	execution LiveReadinessArtifactHandoffExecution,
+) []string {
+	var problems []string
+	if err := ValidateLiveLoopAuditArtifact(execution.AuditArtifact); err != nil {
+		return []string{err.Error()}
+	}
+	audit := execution.AuditArtifact
+	if audit.ConfigPath != strings.TrimSpace(execution.ConfigPath) {
+		problems = append(problems, fmt.Sprintf("audit config_path %q does not match execution config %q", audit.ConfigPath, strings.TrimSpace(execution.ConfigPath)))
+	}
+	if readinessAudit.Limit != audit.Query.Limit {
+		problems = append(problems, fmt.Sprintf("audit.limit %d does not match audit artifact query.limit %d", readinessAudit.Limit, audit.Query.Limit))
+	}
+	compareInts := map[string][2]int{
+		"audit.total":     {readinessAudit.Total, audit.Summary.Total},
+		"audit.running":   {readinessAudit.Running, audit.Summary.Running},
+		"audit.completed": {readinessAudit.Completed, audit.Summary.Completed},
+		"audit.failed":    {readinessAudit.Failed, audit.Summary.Failed},
+	}
+	for field, values := range compareInts {
+		if values[0] != values[1] {
+			problems = append(problems, fmt.Sprintf("%s %d does not match audit artifact %d", field, values[0], values[1]))
+		}
+	}
+	compareText := map[string][2]string{
+		"audit.review_status": {string(readinessAudit.ReviewStatus), string(audit.Summary.ReviewStatus)},
+		"audit.review_run_id": {readinessAudit.ReviewRunID, audit.Summary.ReviewRunID},
+		"audit.review_reason": {readinessAudit.ReviewReason, audit.Summary.ReviewReason},
+	}
+	for field, values := range compareText {
+		if values[0] != values[1] {
+			problems = append(problems, fmt.Sprintf("%s %q does not match audit artifact %q", field, values[0], values[1]))
+		}
+	}
+	if readinessAudit.OperatorActionRequired != audit.Summary.OperatorActionRequired {
+		problems = append(problems, fmt.Sprintf("audit.operator_action_required %t does not match audit artifact %t", readinessAudit.OperatorActionRequired, audit.Summary.OperatorActionRequired))
 	}
 	return problems
 }

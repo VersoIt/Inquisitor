@@ -84,6 +84,7 @@ LIVE_AUDIT_STATUS ?=
 LIVE_AUDIT_LIMIT ?= 10
 LIVE_AUDIT_INCLUDE_ITERATIONS ?= 1
 LIVE_AUDIT_ARTIFACT ?=
+LIVE_AUDIT_MAX_AGE ?= 10m
 LIVE_SCAN_SYMBOL ?=
 LIVE_SCAN_LIMIT ?= 10
 LIVE_READINESS_SYMBOL ?=
@@ -214,7 +215,7 @@ live-readiness:
 	$(GO) run ./cmd/live-readiness -config $(CONFIG) -max-initial-live-capital-usdt $(LIVE_MAX_INITIAL_CAPITAL) -pending-limit $(LIVE_READINESS_PENDING_LIMIT) -audit-limit $(LIVE_READINESS_AUDIT_LIMIT) -require-pending=$(if $(LIVE_READINESS_REQUIRE_PENDING),true,false) $(if $(LIVE_READINESS_SYMBOL),-symbol $(LIVE_READINESS_SYMBOL),) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE) -max-plan-age $(LIVE_PLAN_MAX_AGE),) $(if $(LIVE_READINESS_ARTIFACT),-artifact-path $(LIVE_READINESS_ARTIFACT),) $(if $(LIVE_SUBACCOUNT_CONFIRMED),-subaccount-confirmed,)
 
 live-handoff-verify:
-	$(GO) run ./cmd/live-handoff-verify -config $(CONFIG) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE),) $(if $(LIVE_READINESS_FILE),-readiness-file $(LIVE_READINESS_FILE),) -max-plan-age $(LIVE_PLAN_MAX_AGE) -max-readiness-age $(LIVE_READINESS_MAX_AGE) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),)
+	$(GO) run ./cmd/live-handoff-verify -config $(CONFIG) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE),) $(if $(LIVE_READINESS_FILE),-readiness-file $(LIVE_READINESS_FILE),) $(if $(LIVE_AUDIT_ARTIFACT),-audit-file $(LIVE_AUDIT_ARTIFACT),) -max-plan-age $(LIVE_PLAN_MAX_AGE) -max-readiness-age $(LIVE_READINESS_MAX_AGE) -max-audit-age $(LIVE_AUDIT_MAX_AGE) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),)
 
 live-order-plan:
 	$(GO) run ./cmd/live-order-plan -config $(CONFIG) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_LOOP_RUN_ID),-run-id $(LIVE_LOOP_RUN_ID),) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_PLAN_FILE),-artifact-path $(LIVE_PLAN_FILE),)
