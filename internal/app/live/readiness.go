@@ -328,11 +328,30 @@ func (s *Service) liveReadinessPlanArtifactCheck(
 }
 
 func liveReadinessAuditCheck(audit LiveLoopAuditReport) domainlive.ReadinessCheck {
-	if audit.Summary.Running > 0 {
-		return domainlive.NewReadinessCheck("recent_live_loop_audit", domainlive.ReadinessCheckStatusFail, "recent live-loop audit contains RUNNING runs")
+	details := strings.TrimSpace(audit.Summary.ReviewReason)
+	switch audit.Summary.ReviewStatus {
+	case domainlive.LiveLoopAuditReviewStatusBlocked:
+		if details == "" {
+			details = "recent live-loop audit contains RUNNING runs"
+		}
+		return domainlive.NewReadinessCheck("recent_live_loop_audit", domainlive.ReadinessCheckStatusFail, details)
+	case domainlive.LiveLoopAuditReviewStatusReview:
+		if details == "" {
+			details = "recent live-loop audit contains FAILED runs that require operator review"
+		}
+		return domainlive.NewReadinessCheck("recent_live_loop_audit", domainlive.ReadinessCheckStatusWarn, details)
+	case domainlive.LiveLoopAuditReviewStatusClear:
+		if details == "" {
+			details = "recent live-loop audit has no running or failed runs"
+		}
+		return domainlive.NewReadinessCheck("recent_live_loop_audit", domainlive.ReadinessCheckStatusPass, details)
+	default:
+		if audit.Summary.Running > 0 {
+			return domainlive.NewReadinessCheck("recent_live_loop_audit", domainlive.ReadinessCheckStatusFail, "recent live-loop audit contains RUNNING runs")
+		}
+		if audit.Summary.Failed > 0 {
+			return domainlive.NewReadinessCheck("recent_live_loop_audit", domainlive.ReadinessCheckStatusWarn, "recent live-loop audit contains FAILED runs that require operator review")
+		}
+		return domainlive.NewReadinessCheck("recent_live_loop_audit", domainlive.ReadinessCheckStatusPass, "recent live-loop audit has no running or failed runs")
 	}
-	if audit.Summary.Failed > 0 {
-		return domainlive.NewReadinessCheck("recent_live_loop_audit", domainlive.ReadinessCheckStatusWarn, "recent live-loop audit contains FAILED runs that require operator review")
-	}
-	return domainlive.NewReadinessCheck("recent_live_loop_audit", domainlive.ReadinessCheckStatusPass, "recent live-loop audit has no running or failed runs")
 }

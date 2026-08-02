@@ -16,6 +16,14 @@ const (
 	LiveLoopRunStatusFailed    LiveLoopRunStatus = "FAILED"
 )
 
+type LiveLoopAuditReviewStatus string
+
+const (
+	LiveLoopAuditReviewStatusClear   LiveLoopAuditReviewStatus = "CLEAR"
+	LiveLoopAuditReviewStatusReview  LiveLoopAuditReviewStatus = "REVIEW"
+	LiveLoopAuditReviewStatusBlocked LiveLoopAuditReviewStatus = "BLOCKED"
+)
+
 type LiveLoopAuditIterationAction string
 
 const (
@@ -95,6 +103,12 @@ type LiveLoopAuditStats struct {
 	Skipped  int
 }
 
+type LiveLoopAuditReview struct {
+	Status LiveLoopAuditReviewStatus
+	RunID  string
+	Reason string
+}
+
 type LiveLoopJournal interface {
 	RecordLiveLoopRunStarted(ctx context.Context, run LiveLoopRunStarted) (LiveLoopAuditStats, error)
 	RecordLiveLoopRunFinished(ctx context.Context, run LiveLoopRunFinished) (LiveLoopAuditStats, error)
@@ -107,6 +121,10 @@ type LiveLoopAuditReader interface {
 
 func (s LiveLoopAuditStats) Total() int {
 	return s.Inserted + s.Updated + s.Skipped
+}
+
+func (r LiveLoopAuditReview) OperatorActionRequired() bool {
+	return r.Status == LiveLoopAuditReviewStatusReview || r.Status == LiveLoopAuditReviewStatusBlocked
 }
 
 func ValidateLiveLoopRunStarted(run LiveLoopRunStarted) error {
@@ -328,9 +346,56 @@ func ValidateLiveLoopAuditQuery(query LiveLoopAuditQuery) error {
 	return nil
 }
 
+func SummarizeLiveLoopAuditReview(runs []LiveLoopRunAudit) (LiveLoopAuditReview, error) {
+	if err := ValidateLiveLoopRunAudits(runs); err != nil {
+		return LiveLoopAuditReview{}, err
+	}
+	for _, run := range runs {
+		if run.Status == LiveLoopRunStatusRunning {
+			return LiveLoopAuditReview{
+				Status: LiveLoopAuditReviewStatusBlocked,
+				RunID:  run.RunID,
+				Reason: fmt.Sprintf("live-loop run %s is still RUNNING", FormatLiveLoopRunKey(run.RunID, run.StartedAt)),
+			}, nil
+		}
+	}
+	for _, run := range runs {
+		if run.Status == LiveLoopRunStatusFailed {
+			reason := fmt.Sprintf("live-loop run %s FAILED", FormatLiveLoopRunKey(run.RunID, run.StartedAt))
+			if strings.TrimSpace(run.Error) != "" {
+				reason += ": " + strings.TrimSpace(run.Error)
+			}
+			return LiveLoopAuditReview{
+				Status: LiveLoopAuditReviewStatusReview,
+				RunID:  run.RunID,
+				Reason: reason,
+			}, nil
+		}
+	}
+	if len(runs) == 0 {
+		return LiveLoopAuditReview{
+			Status: LiveLoopAuditReviewStatusClear,
+			Reason: "no recent live-loop audit runs found",
+		}, nil
+	}
+	return LiveLoopAuditReview{
+		Status: LiveLoopAuditReviewStatusClear,
+		Reason: "recent live-loop audit has no running or failed runs",
+	}, nil
+}
+
 func KnownLiveLoopRunStatus(status LiveLoopRunStatus) bool {
 	switch status {
 	case LiveLoopRunStatusRunning, LiveLoopRunStatusCompleted, LiveLoopRunStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func KnownLiveLoopAuditReviewStatus(status LiveLoopAuditReviewStatus) bool {
+	switch status {
+	case LiveLoopAuditReviewStatusClear, LiveLoopAuditReviewStatusReview, LiveLoopAuditReviewStatusBlocked:
 		return true
 	default:
 		return false

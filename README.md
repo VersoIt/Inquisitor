@@ -535,6 +535,8 @@ Inspect recent live-loop audit rows after smoke, health, or an armed live-loop a
 go run ./cmd/live-loop-audit -config configs/live.local.yaml -limit 10
 ```
 
+The summary log includes `review_status` (`CLEAR`, `REVIEW`, or `BLOCKED`) plus `operator_action_required`; `BLOCKED` means a recent run is still `RUNNING`, while `REVIEW` means a recent `FAILED` run should be inspected before proceeding.
+
 Useful filters:
 
 ```powershell

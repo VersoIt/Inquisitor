@@ -37,8 +37,68 @@ func TestServiceBuildLiveLoopAuditReportSummarizesRuns(t *testing.T) {
 	if got.Summary.Total != 3 || got.Summary.Completed != 1 || got.Summary.Failed != 1 || got.Summary.Running != 1 {
 		t.Fatalf("summary mismatch: %#v", got.Summary)
 	}
+	if got.Summary.ReviewStatus != domainlive.LiveLoopAuditReviewStatusBlocked ||
+		!got.Summary.OperatorActionRequired ||
+		!strings.Contains(got.Summary.ReviewReason, "RUNNING") {
+		t.Fatalf("review summary mismatch: %#v", got.Summary)
+	}
 	if len(got.Runs) != 3 || got.Runs[0].RunID == "" {
 		t.Fatalf("runs mismatch: %#v", got.Runs)
+	}
+}
+
+func TestServiceBuildLiveLoopAuditReportReviewSummaryTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		runs       []domainlive.LiveLoopRunAudit
+		wantStatus domainlive.LiveLoopAuditReviewStatus
+		wantAction bool
+		wantReason string
+	}{
+		{
+			name:       "no runs is clear",
+			wantStatus: domainlive.LiveLoopAuditReviewStatusClear,
+			wantReason: "no recent",
+		},
+		{
+			name:       "completed runs are clear",
+			runs:       []domainlive.LiveLoopRunAudit{liveLoopAuditRun(now, domainlive.LiveLoopRunStatusCompleted)},
+			wantStatus: domainlive.LiveLoopAuditReviewStatusClear,
+			wantReason: "no running or failed",
+		},
+		{
+			name:       "failed runs require review",
+			runs:       []domainlive.LiveLoopRunAudit{liveLoopAuditRun(now, domainlive.LiveLoopRunStatusFailed)},
+			wantStatus: domainlive.LiveLoopAuditReviewStatusReview,
+			wantAction: true,
+			wantReason: "FAILED",
+		},
+		{
+			name:       "running runs block",
+			runs:       []domainlive.LiveLoopRunAudit{liveLoopAuditRun(now, domainlive.LiveLoopRunStatusRunning)},
+			wantStatus: domainlive.LiveLoopAuditReviewStatusBlocked,
+			wantAction: true,
+			wantReason: "RUNNING",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &fakeLiveLoopAuditReader{runs: tt.runs}
+			service := applive.NewService(applive.WithLiveLoopAuditReader(reader))
+
+			got, err := service.BuildLiveLoopAuditReport(context.Background(), applive.LiveLoopAuditReportRequest{})
+			if err != nil {
+				t.Fatalf("build live loop audit report: %v", err)
+			}
+			if got.Summary.ReviewStatus != tt.wantStatus ||
+				got.Summary.OperatorActionRequired != tt.wantAction ||
+				!strings.Contains(got.Summary.ReviewReason, tt.wantReason) {
+				t.Fatalf("summary mismatch: got %#v want status=%s action=%t reason containing %q", got.Summary, tt.wantStatus, tt.wantAction, tt.wantReason)
+			}
+		})
 	}
 }
 

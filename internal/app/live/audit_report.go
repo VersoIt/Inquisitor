@@ -16,10 +16,14 @@ type LiveLoopAuditReportRequest struct {
 }
 
 type LiveLoopAuditReportSummary struct {
-	Total     int
-	Running   int
-	Completed int
-	Failed    int
+	Total                  int
+	Running                int
+	Completed              int
+	Failed                 int
+	ReviewStatus           domainlive.LiveLoopAuditReviewStatus
+	ReviewRunID            string
+	ReviewReason           string
+	OperatorActionRequired bool
 }
 
 type LiveLoopAuditReport struct {
@@ -74,5 +78,13 @@ func (s *Service) BuildLiveLoopAuditReport(
 			report.Summary.Failed++
 		}
 	}
+	review, err := domainlive.SummarizeLiveLoopAuditReview(runs)
+	if err != nil {
+		return LiveLoopAuditReport{}, err
+	}
+	report.Summary.ReviewStatus = review.Status
+	report.Summary.ReviewRunID = review.RunID
+	report.Summary.ReviewReason = review.Reason
+	report.Summary.OperatorActionRequired = review.OperatorActionRequired()
 	return report, nil
 }

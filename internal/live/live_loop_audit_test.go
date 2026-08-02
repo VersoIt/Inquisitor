@@ -153,6 +153,90 @@ func TestLiveLoopAuditStatsAndStatusHelpers(t *testing.T) {
 	}
 }
 
+func TestSummarizeLiveLoopAuditReviewTableDriven(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	completed := liveLoopRunAuditWithStatus("live_loop_review_completed_0001", now, live.LiveLoopRunStatusCompleted)
+	failed := liveLoopRunAuditWithStatus("live_loop_review_failed_0001", now.Add(-time.Minute), live.LiveLoopRunStatusFailed)
+	running := liveLoopRunAuditWithStatus("live_loop_review_running_0001", now.Add(-2*time.Minute), live.LiveLoopRunStatusRunning)
+	invalid := completed
+	invalid.RunID = " live_loop_review_invalid_0001 "
+
+	tests := []struct {
+		name           string
+		runs           []live.LiveLoopRunAudit
+		wantStatus     live.LiveLoopAuditReviewStatus
+		wantRunID      string
+		wantReasonSub  string
+		wantAction     bool
+		wantErrSub     string
+		wantKnownState bool
+	}{
+		{
+			name:           "empty audit is clear",
+			wantStatus:     live.LiveLoopAuditReviewStatusClear,
+			wantReasonSub:  "no recent",
+			wantKnownState: true,
+		},
+		{
+			name:           "completed runs are clear",
+			runs:           []live.LiveLoopRunAudit{completed},
+			wantStatus:     live.LiveLoopAuditReviewStatusClear,
+			wantReasonSub:  "no running or failed",
+			wantKnownState: true,
+		},
+		{
+			name:           "failed run requires review",
+			runs:           []live.LiveLoopRunAudit{completed, failed},
+			wantStatus:     live.LiveLoopAuditReviewStatusReview,
+			wantRunID:      failed.RunID,
+			wantReasonSub:  "FAILED: live loop failed",
+			wantAction:     true,
+			wantKnownState: true,
+		},
+		{
+			name:           "running run blocks before failed review",
+			runs:           []live.LiveLoopRunAudit{failed, running},
+			wantStatus:     live.LiveLoopAuditReviewStatusBlocked,
+			wantRunID:      running.RunID,
+			wantReasonSub:  "still RUNNING",
+			wantAction:     true,
+			wantKnownState: true,
+		},
+		{
+			name:       "invalid audit run fails closed",
+			runs:       []live.LiveLoopRunAudit{invalid},
+			wantErrSub: "run_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := live.SummarizeLiveLoopAuditReview(tt.runs)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("summarize review: %v", err)
+			}
+			if got.Status != tt.wantStatus || got.RunID != tt.wantRunID || got.OperatorActionRequired() != tt.wantAction {
+				t.Fatalf("review mismatch: got %#v want status=%s run=%s action=%t", got, tt.wantStatus, tt.wantRunID, tt.wantAction)
+			}
+			if !strings.Contains(got.Reason, tt.wantReasonSub) {
+				t.Fatalf("expected reason to contain %q, got %q", tt.wantReasonSub, got.Reason)
+			}
+			if live.KnownLiveLoopAuditReviewStatus(got.Status) != tt.wantKnownState {
+				t.Fatalf("known status mismatch for %s", got.Status)
+			}
+		})
+	}
+	if live.KnownLiveLoopAuditReviewStatus("BROKEN") {
+		t.Fatal("BROKEN must not be a known live-loop audit review status")
+	}
+}
+
 func TestValidateLiveLoopRunAuditRejectsUnsafeInputsTableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -308,4 +392,33 @@ func validLiveLoopRunAudit() live.LiveLoopRunAudit {
 		CompletedWithinBounds: true,
 		Iterations:            []live.LiveLoopIterationAudit{iteration},
 	}
+}
+
+func liveLoopRunAuditWithStatus(runID string, startedAt time.Time, status live.LiveLoopRunStatus) live.LiveLoopRunAudit {
+	run := validLiveLoopRunAudit()
+	run.RunID = runID
+	run.StartedAt = startedAt
+	run.FinishedAt = startedAt.Add(3 * time.Second)
+	run.Status = status
+	for index := range run.Iterations {
+		run.Iterations[index].RunID = runID
+		run.Iterations[index].RunStartedAt = startedAt
+		run.Iterations[index].StartedAt = startedAt.Add(time.Second)
+		run.Iterations[index].FinishedAt = startedAt.Add(2 * time.Second)
+	}
+	switch status {
+	case live.LiveLoopRunStatusRunning:
+		run.FinishedAt = time.Time{}
+		run.CompletedWithinBounds = false
+		run.IterationsAttempted = 0
+		run.IterationsSucceeded = 0
+		run.StopReason = ""
+		run.StopDetails = ""
+		run.Iterations = nil
+	case live.LiveLoopRunStatusFailed:
+		run.CompletedWithinBounds = false
+		run.IterationsSucceeded = 0
+		run.Error = "live loop failed"
+	}
+	return run
 }

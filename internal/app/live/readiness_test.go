@@ -164,7 +164,7 @@ func TestServiceBuildLiveReadinessReportWarnsOnRecentFailedRuns(t *testing.T) {
 		t.Fatalf("expected warning-only readiness, got ready=%t summary=%#v checks=%#v", got.Ready, got.Summary, got.Checks)
 	}
 	check := readinessCheckByName(got.Checks, "recent_live_loop_audit")
-	if check.Status != domainlive.ReadinessCheckStatusWarn {
+	if check.Status != domainlive.ReadinessCheckStatusWarn || !strings.Contains(check.Details, "FAILED") {
 		t.Fatalf("audit check mismatch: %#v", check)
 	}
 }

@@ -123,6 +123,8 @@ func TestRunLiveLoopAuditLogsReport(t *testing.T) {
 		`"msg":"live-loop audit report"`,
 		`"runs":1`,
 		`"completed":1`,
+		`"review_status":"CLEAR"`,
+		`"operator_action_required":false`,
 		`"status_filter":"COMPLETED"`,
 		`"msg":"live-loop audit run"`,
 		`"run_id":"live_loop_audit_cli_0001"`,
