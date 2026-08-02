@@ -166,6 +166,66 @@ func TestRunLiveDeployCheckRequiresArtifacts(t *testing.T) {
 	}
 }
 
+func TestRunLiveDeployCheckWritesArtifactBeforeFailure(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	plan := validLiveDeployPlanArtifact(now.Add(-time.Minute), domainlive.LiveOrderPlanArtifactSourceDecisionID)
+	planFile := writeLiveDeployPlanArtifact(t, plan)
+	audit := validLiveDeployAuditArtifact(now.Add(-20*time.Second), "configs/live.local.yaml")
+	readiness := validLiveDeployReadinessArtifact(t, now.Add(-30*time.Second), "configs/live.local.yaml", planFile, plan)
+	readiness.Audit = liveDeployReadinessAuditFromAuditArtifact(audit)
+	readinessFile := writeLiveDeployReadinessArtifact(t, readiness)
+	auditFile := writeLiveDeployAuditArtifact(t, audit)
+	artifactPath := filepath.Join(t.TempDir(), "artifacts", "live-deploy-check.json")
+
+	var output bytes.Buffer
+	err := runLiveDeployCheck(context.Background(), []string{
+		"-config", "configs/live.local.yaml",
+		"-plan-file", planFile,
+		"-readiness-file", readinessFile,
+		"-audit-file", auditFile,
+		"-artifact-path", artifactPath,
+		"-decision-id", plan.DecisionID,
+		"-subaccount-confirmed",
+	}, liveDeployCheckDependencies{
+		now:    func() time.Time { return now },
+		output: &output,
+	})
+	if err == nil || !strings.Contains(err.Error(), "live_loop_armed") {
+		t.Fatalf("expected live_loop_armed failure, got %v\nlogs:\n%s", err, output.String())
+	}
+	if !strings.Contains(output.String(), `"msg":"live deploy check artifact written"`) {
+		t.Fatalf("expected artifact write log, got\n%s", output.String())
+	}
+
+	artifact := readLiveDeployCheckArtifact(t, artifactPath)
+	if err := domainlive.ValidateLiveDeploymentCheckArtifact(artifact); err != nil {
+		t.Fatalf("validate deployment check artifact: %v", err)
+	}
+	if artifact.Ready {
+		t.Fatal("expected failed artifact")
+	}
+	if !sameLiveDeployStringSet(artifact.FailedChecks, []string{"live_loop_armed"}) {
+		t.Fatalf("failed checks mismatch: got %#v", artifact.FailedChecks)
+	}
+	if artifact.PlanFile.SHA256 != liveDeployPlanFileSHA256(t, planFile) {
+		t.Fatalf("plan sha mismatch: got %q", artifact.PlanFile.SHA256)
+	}
+	readinessLoaded, err := loadLiveDeployReadinessArtifactFile(readinessFile)
+	if err != nil {
+		t.Fatalf("load readiness artifact: %v", err)
+	}
+	if artifact.ReadinessFile.SHA256 != readinessLoaded.SHA256 {
+		t.Fatalf("readiness sha mismatch: got %q want %q", artifact.ReadinessFile.SHA256, readinessLoaded.SHA256)
+	}
+	auditLoaded, err := loadLiveDeployAuditArtifactFile(auditFile)
+	if err != nil {
+		t.Fatalf("load audit artifact: %v", err)
+	}
+	if artifact.AuditFile.SHA256 != auditLoaded.SHA256 {
+		t.Fatalf("audit sha mismatch: got %q want %q", artifact.AuditFile.SHA256, auditLoaded.SHA256)
+	}
+}
+
 func TestParseLiveDeployPositiveDecimalFlagTableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -361,6 +421,20 @@ func writeLiveDeployAuditArtifact(t *testing.T, artifact domainlive.LiveLoopAudi
 	return path
 }
 
+func readLiveDeployCheckArtifact(t *testing.T, path string) domainlive.LiveDeploymentCheckArtifact {
+	t.Helper()
+
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read deployment check artifact: %v", err)
+	}
+	var artifact domainlive.LiveDeploymentCheckArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		t.Fatalf("decode deployment check artifact: %v", err)
+	}
+	return artifact
+}
+
 func liveDeployPlanFileSHA256(t *testing.T, path string) string {
 	t.Helper()
 
@@ -369,4 +443,21 @@ func liveDeployPlanFileSHA256(t *testing.T, path string) string {
 		t.Fatalf("load plan artifact: %v", err)
 	}
 	return loaded.SHA256
+}
+
+func sameLiveDeployStringSet(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]int, len(left))
+	for _, value := range left {
+		seen[value]++
+	}
+	for _, value := range right {
+		if seen[value] == 0 {
+			return false
+		}
+		seen[value]--
+	}
+	return true
 }
