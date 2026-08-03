@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
 
 func TestRunLiveHandoffVerifyTableDriven(t *testing.T) {
@@ -247,6 +248,136 @@ func TestRunLiveHandoffVerifyAuditArtifactTableDriven(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("verify handoff: %v\nlogs:\n%s", err, output.String())
+			}
+			if !strings.Contains(output.String(), tt.wantLogSub) {
+				t.Fatalf("expected logs to contain %s, got\n%s", tt.wantLogSub, output.String())
+			}
+		})
+	}
+}
+
+func TestRunLiveHandoffVerifyKillSwitchArtifactTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	plan := validLiveHandoffPlanArtifact(now.Add(-time.Minute), domainlive.LiveOrderPlanArtifactSourceDecisionID)
+
+	tests := []struct {
+		name             string
+		mutateKillSwitch func(*domainrisk.KillSwitchArtifact)
+		mutateReadiness  func(*domainlive.LiveReadinessArtifact)
+		args             func(planFile string, readinessFile string, killSwitchFile string) []string
+		wantErrSub       string
+		wantLogSub       string
+	}{
+		{
+			name: "valid inactive kill switch handoff",
+			args: func(planFile string, readinessFile string, killSwitchFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-kill-switch-file", killSwitchFile}
+			},
+			wantLogSub: `"kill_switch_active":false`,
+		},
+		{
+			name: "stale kill switch artifact",
+			mutateKillSwitch: func(a *domainrisk.KillSwitchArtifact) {
+				a.CreatedAt = now.Add(-time.Hour)
+			},
+			args: func(planFile string, readinessFile string, killSwitchFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-kill-switch-file", killSwitchFile, "-max-kill-switch-age", "10m"}
+			},
+			wantErrSub: "stale",
+		},
+		{
+			name: "active kill switch artifact stops handoff",
+			mutateKillSwitch: func(a *domainrisk.KillSwitchArtifact) {
+				updatedAt := now.Add(-2 * time.Minute)
+				a.State = &domainrisk.KillSwitchArtifactState{
+					Active:    true,
+					Reason:    "operator emergency stop",
+					Source:    "operator",
+					UpdatedAt: &updatedAt,
+				}
+			},
+			mutateReadiness: func(a *domainlive.LiveReadinessArtifact) {
+				updatedAt := now.Add(-2 * time.Minute)
+				a.KillSwitch = domainlive.LiveReadinessArtifactKillSwitch{
+					Active:    true,
+					Reason:    "operator emergency stop",
+					Source:    "operator",
+					UpdatedAt: &updatedAt,
+				}
+			},
+			args: func(planFile string, readinessFile string, killSwitchFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-kill-switch-file", killSwitchFile}
+			},
+			wantErrSub: "inactive",
+		},
+		{
+			name: "kill switch config mismatch",
+			mutateKillSwitch: func(a *domainrisk.KillSwitchArtifact) {
+				a.ConfigPath = "configs/other-live.yaml"
+			},
+			args: func(planFile string, readinessFile string, killSwitchFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-kill-switch-file", killSwitchFile}
+			},
+			wantErrSub: "config_path",
+		},
+		{
+			name: "kill switch readiness mismatch",
+			mutateReadiness: func(a *domainlive.LiveReadinessArtifact) {
+				updatedAt := now.Add(-2 * time.Minute)
+				a.KillSwitch = domainlive.LiveReadinessArtifactKillSwitch{
+					Reason:    "operator verified recovery",
+					Source:    "operator",
+					UpdatedAt: &updatedAt,
+				}
+			},
+			args: func(planFile string, readinessFile string, killSwitchFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-kill-switch-file", killSwitchFile}
+			},
+			wantErrSub: "readiness",
+		},
+		{
+			name: "untrimmed kill switch path",
+			args: func(planFile string, readinessFile string, killSwitchFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-kill-switch-file", killSwitchFile + " "}
+			},
+			wantErrSub: "kill-switch-file",
+		},
+		{
+			name: "nonpositive max kill switch age",
+			args: func(planFile string, readinessFile string, killSwitchFile string) []string {
+				return []string{"-config", "configs/live.local.yaml", "-plan-file", planFile, "-readiness-file", readinessFile, "-kill-switch-file", killSwitchFile, "-max-kill-switch-age", "0s"}
+			},
+			wantErrSub: "max-kill-switch-age",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			planFile := writeLiveHandoffPlanArtifact(t, plan)
+			readiness := validLiveHandoffReadinessArtifact(t, now.Add(-20*time.Second), "configs/live.local.yaml", planFile, plan)
+			if tt.mutateReadiness != nil {
+				tt.mutateReadiness(&readiness)
+			}
+			readinessFile := writeLiveHandoffReadinessArtifact(t, readiness)
+			killSwitch := validLiveHandoffKillSwitchArtifact(t, now.Add(-30*time.Second), "configs/live.local.yaml")
+			if tt.mutateKillSwitch != nil {
+				tt.mutateKillSwitch(&killSwitch)
+			}
+			killSwitchFile := writeLiveHandoffKillSwitchArtifact(t, killSwitch)
+
+			var output bytes.Buffer
+			err := runLiveHandoffVerify(context.Background(), tt.args(planFile, readinessFile, killSwitchFile), liveHandoffVerifyDependencies{
+				now:    func() time.Time { return now },
+				output: &output,
+			})
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v\nlogs:\n%s", tt.wantErrSub, err, output.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verify kill switch handoff: %v\nlogs:\n%s", err, output.String())
 			}
 			if !strings.Contains(output.String(), tt.wantLogSub) {
 				t.Fatalf("expected logs to contain %s, got\n%s", tt.wantLogSub, output.String())
@@ -537,6 +668,39 @@ func writeLiveHandoffReadinessArtifact(t *testing.T, artifact domainlive.LiveRea
 	path := filepath.Join(t.TempDir(), "live-readiness.json")
 	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
 		t.Fatalf("write readiness artifact: %v", err)
+	}
+	return path
+}
+
+func validLiveHandoffKillSwitchArtifact(t *testing.T, createdAt time.Time, configPath string) domainrisk.KillSwitchArtifact {
+	t.Helper()
+
+	state := domainrisk.KillSwitchState{}
+	artifact, err := domainrisk.BuildKillSwitchArtifact(domainrisk.BuildKillSwitchArtifactRequest{
+		CreatedAt:  createdAt,
+		ConfigPath: configPath,
+		Action:     domainrisk.KillSwitchArtifactActionState,
+		State:      &state,
+	})
+	if err != nil {
+		t.Fatalf("build kill switch artifact: %v", err)
+	}
+	return artifact
+}
+
+func writeLiveHandoffKillSwitchArtifact(t *testing.T, artifact domainrisk.KillSwitchArtifact) string {
+	t.Helper()
+
+	if err := domainrisk.ValidateKillSwitchArtifact(artifact); err != nil {
+		t.Fatalf("validate kill switch artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal kill switch artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "risk-kill-switch-state.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write kill switch artifact: %v", err)
 	}
 	return path
 }

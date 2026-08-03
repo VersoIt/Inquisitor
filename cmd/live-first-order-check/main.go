@@ -327,6 +327,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		"-config", normalized.ConfigPath,
 		"-plan-file", planFile,
 		"-readiness-file", readinessFile,
+		"-kill-switch-file", killSwitchFile,
 		"-audit-file", auditFile,
 		"-deploy-check-file", deployCheckFile,
 		"-max-plan-age", normalized.MaxPlanAge.String(),

@@ -61,6 +61,9 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-run-id", "live_loop_first_order_001")
 				assertLiveFirstOrderFlag(t, bundle.SuggestedLiveLoop.Args, "-execute")
 
+				verify := liveFirstOrderCommandByName(t, bundle.Commands, "live-handoff-verify")
+				assertLiveFirstOrderFlagValue(t, verify.Args, "-kill-switch-file", bundle.KillSwitchFile)
+
 				ops := liveFirstOrderCommandByName(t, bundle.Commands, "live-ops-report")
 				assertLiveFirstOrderFlagValue(t, ops.Args, "-artifact-path", bundle.OpsReportFile)
 				assertLiveFirstOrderFlagValue(t, ops.Args, "-symbol", "BTCUSDT")

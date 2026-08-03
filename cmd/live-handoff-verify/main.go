@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	"github.com/VersoIt/Inquisitor/internal/logger"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
 
 type liveHandoffVerifyDependencies struct {
@@ -39,6 +41,11 @@ type liveHandoffAuditArtifactFile struct {
 	SHA256   string
 }
 
+type liveHandoffKillSwitchArtifactFile struct {
+	Artifact domainrisk.KillSwitchArtifact
+	SHA256   string
+}
+
 func main() {
 	if err := runLiveHandoffVerify(context.Background(), os.Args[1:], liveHandoffVerifyDependencies{}); err != nil {
 		slog.Error("live handoff verify failed", "error", err)
@@ -54,10 +61,12 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 	configPath := flags.String("config", "configs/config.example.yaml", "config path expected inside the readiness artifact")
 	planFile := flags.String("plan-file", "", "JSON artifact written by live-order-plan")
 	readinessFile := flags.String("readiness-file", "", "JSON artifact written by live-readiness")
+	killSwitchFile := flags.String("kill-switch-file", "", "optional JSON artifact written by risk-kill-switch -action state; validates inactive Kill Switch snapshot")
 	auditFile := flags.String("audit-file", "", "optional JSON artifact written by live-loop-audit; validates readiness audit verdict")
 	deployCheckFile := flags.String("deploy-check-file", "", "optional JSON artifact written by live-deploy-check; validates final go/no-go report")
 	maxPlanAge := flags.Duration("max-plan-age", domainlive.DefaultLiveOrderPlanArtifactMaxAge, "maximum accepted age for -plan-file based on submission_created_at")
 	maxReadinessAge := flags.Duration("max-readiness-age", domainlive.DefaultLiveReadinessArtifactMaxAge, "maximum accepted age for -readiness-file based on created_at")
+	maxKillSwitchAge := flags.Duration("max-kill-switch-age", domainrisk.DefaultKillSwitchArtifactMaxAge, "maximum accepted age for -kill-switch-file based on created_at")
 	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum accepted age for -audit-file based on created_at")
 	maxDeployCheckAge := flags.Duration("max-deploy-check-age", domainlive.DefaultLiveDeploymentCheckArtifactMaxAge, "maximum accepted age for -deploy-check-file based on created_at")
 	decisionID := flags.String("decision-id", "", "optional explicit selected decision id; defaults to the plan artifact decision_id")
@@ -82,6 +91,9 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 	if *maxReadinessAge <= 0 {
 		return fmt.Errorf("max-readiness-age must be positive")
 	}
+	if *maxKillSwitchAge <= 0 {
+		return fmt.Errorf("max-kill-switch-age must be positive")
+	}
 	if *maxAuditAge <= 0 {
 		return fmt.Errorf("max-audit-age must be positive")
 	}
@@ -97,6 +109,10 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 		return err
 	}
 	readiness, err := loadLiveHandoffReadinessArtifactFile(*readinessFile)
+	if err != nil {
+		return err
+	}
+	killSwitch, hasKillSwitchArtifact, err := loadLiveHandoffKillSwitchArtifactFile(*killSwitchFile)
 	if err != nil {
 		return err
 	}
@@ -117,6 +133,11 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 	}
 	if err := domainlive.ValidateLiveReadinessArtifactFreshness(readiness.Artifact, now, *maxReadinessAge); err != nil {
 		return err
+	}
+	if hasKillSwitchArtifact {
+		if err := domainrisk.ValidateKillSwitchArtifactFreshness(killSwitch.Artifact, now, *maxKillSwitchAge); err != nil {
+			return err
+		}
 	}
 	if hasAuditArtifact {
 		if err := domainlive.ValidateLiveLoopAuditArtifactFreshness(audit.Artifact, now, *maxAuditAge); err != nil {
@@ -149,6 +170,16 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 		SelectedDecisionID: selectedDecisionID,
 	}); err != nil {
 		return err
+	}
+	if hasKillSwitchArtifact {
+		if err := domainrisk.ValidateKillSwitchArtifactHandoff(killSwitch.Artifact, domainrisk.KillSwitchArtifactHandoffExecution{
+			ConfigPath: strings.TrimSpace(*configPath),
+		}); err != nil {
+			return err
+		}
+		if err := validateLiveHandoffKillSwitchReadiness(killSwitch.Artifact, readiness.Artifact); err != nil {
+			return err
+		}
 	}
 	if hasDeployCheckArtifact {
 		if err := domainlive.ValidateLiveDeploymentCheckArtifactHandoff(deployCheckArtifact, domainlive.LiveDeploymentCheckArtifactHandoffExecution{
@@ -187,6 +218,9 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 		"config", strings.TrimSpace(*configPath),
 		"plan_file", strings.TrimSpace(*planFile),
 		"readiness_file", strings.TrimSpace(*readinessFile),
+		"kill_switch_file", strings.TrimSpace(*killSwitchFile),
+		"kill_switch_verified", hasKillSwitchArtifact,
+		"kill_switch_active", liveHandoffKillSwitchArtifactActiveLogValue(killSwitch, hasKillSwitchArtifact),
 		"audit_file", strings.TrimSpace(*auditFile),
 		"deploy_check_file", strings.TrimSpace(*deployCheckFile),
 		"deploy_check_ready", hasDeployCheckArtifact && deployCheckArtifact.Ready,
@@ -201,6 +235,7 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 		"client_order_id", plan.Artifact.ClientOrderID,
 		"plan_sha256", plan.SHA256,
 		"readiness_created_at", readiness.Artifact.CreatedAt.Format(time.RFC3339Nano),
+		"kill_switch_created_at", liveHandoffKillSwitchArtifactCreatedAtLogValue(killSwitch, hasKillSwitchArtifact),
 		"audit_created_at", liveHandoffAuditArtifactCreatedAtLogValue(audit.Artifact, hasAuditArtifact),
 		"deploy_check_created_at", liveHandoffDeploymentCheckArtifactCreatedAtLogValue(deployCheckArtifact, hasDeployCheckArtifact),
 		"plan_submission_created_at", plan.Artifact.SubmissionCreatedAt.Format(time.RFC3339Nano),
@@ -272,6 +307,32 @@ func loadLiveHandoffReadinessArtifactFile(path string) (liveHandoffReadinessArti
 	}, nil
 }
 
+func loadLiveHandoffKillSwitchArtifactFile(path string) (liveHandoffKillSwitchArtifactFile, bool, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return liveHandoffKillSwitchArtifactFile{}, false, nil
+	}
+	if path != trimmedPath {
+		return liveHandoffKillSwitchArtifactFile{}, false, fmt.Errorf("kill-switch-file must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return liveHandoffKillSwitchArtifactFile{}, false, fmt.Errorf("read kill switch artifact %q: %w", trimmedPath, err)
+	}
+	var artifact domainrisk.KillSwitchArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		return liveHandoffKillSwitchArtifactFile{}, false, fmt.Errorf("decode kill switch artifact %q: %w", trimmedPath, err)
+	}
+	if err := domainrisk.ValidateKillSwitchArtifact(artifact); err != nil {
+		return liveHandoffKillSwitchArtifactFile{}, false, err
+	}
+	sum := sha256.Sum256(payload)
+	return liveHandoffKillSwitchArtifactFile{
+		Artifact: artifact,
+		SHA256:   hex.EncodeToString(sum[:]),
+	}, true, nil
+}
+
 func loadLiveHandoffAuditArtifactFile(path string) (liveHandoffAuditArtifactFile, bool, error) {
 	trimmedPath := strings.TrimSpace(path)
 	if trimmedPath == "" {
@@ -338,11 +399,68 @@ func parseLiveHandoffPositiveDecimalFlag(name string, value string) (decimal.Dec
 	return parsed, nil
 }
 
+func validateLiveHandoffKillSwitchReadiness(
+	artifact domainrisk.KillSwitchArtifact,
+	readiness domainlive.LiveReadinessArtifact,
+) error {
+	if err := domainrisk.ValidateKillSwitchArtifact(artifact); err != nil {
+		return err
+	}
+	if err := domainlive.ValidateLiveReadinessArtifact(readiness); err != nil {
+		return err
+	}
+	var problems []string
+	if artifact.State == nil {
+		problems = append(problems, "kill_switch_file.state is required")
+	} else {
+		if artifact.State.Active != readiness.KillSwitch.Active {
+			problems = append(problems, fmt.Sprintf("kill_switch.active %t does not match readiness kill_switch.active %t", artifact.State.Active, readiness.KillSwitch.Active))
+		}
+		if artifact.State.Reason != readiness.KillSwitch.Reason {
+			problems = append(problems, fmt.Sprintf("kill_switch.reason %q does not match readiness kill_switch.reason %q", artifact.State.Reason, readiness.KillSwitch.Reason))
+		}
+		if artifact.State.Source != readiness.KillSwitch.Source {
+			problems = append(problems, fmt.Sprintf("kill_switch.source %q does not match readiness kill_switch.source %q", artifact.State.Source, readiness.KillSwitch.Source))
+		}
+		if !sameLiveHandoffOptionalTime(artifact.State.UpdatedAt, readiness.KillSwitch.UpdatedAt) {
+			problems = append(problems, "kill_switch.updated_at does not match readiness kill_switch.updated_at")
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New("live handoff kill switch readiness validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func sameLiveHandoffOptionalTime(left *time.Time, right *time.Time) bool {
+	if left == nil && right == nil {
+		return true
+	}
+	if left == nil || right == nil {
+		return false
+	}
+	return left.UTC().Equal(right.UTC())
+}
+
 func liveHandoffAuditArtifactCreatedAtLogValue(artifact domainlive.LiveLoopAuditArtifact, ok bool) string {
 	if !ok {
 		return ""
 	}
 	return artifact.CreatedAt.Format(time.RFC3339Nano)
+}
+
+func liveHandoffKillSwitchArtifactActiveLogValue(file liveHandoffKillSwitchArtifactFile, ok bool) any {
+	if !ok || file.Artifact.State == nil {
+		return nil
+	}
+	return file.Artifact.State.Active
+}
+
+func liveHandoffKillSwitchArtifactCreatedAtLogValue(file liveHandoffKillSwitchArtifactFile, ok bool) string {
+	if !ok {
+		return ""
+	}
+	return file.Artifact.CreatedAt.Format(time.RFC3339Nano)
 }
 
 func liveHandoffDeploymentCheckArtifactCreatedAtLogValue(artifact domainlive.LiveDeploymentCheckArtifact, ok bool) string {

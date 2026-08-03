@@ -3,11 +3,14 @@ package risk
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
 const KillSwitchArtifactSchemaVersion = "inquisitor.risk_kill_switch.v1"
+
+const DefaultKillSwitchArtifactMaxAge = 10 * time.Minute
 
 const (
 	KillSwitchArtifactActionState    = "state"
@@ -24,6 +27,10 @@ type BuildKillSwitchArtifactRequest struct {
 	State      *KillSwitchState
 	Events     []KillSwitchEvent
 	Event      *KillSwitchEvent
+}
+
+type KillSwitchArtifactHandoffExecution struct {
+	ConfigPath string
 }
 
 type KillSwitchArtifact struct {
@@ -122,6 +129,57 @@ func ValidateKillSwitchArtifact(artifact KillSwitchArtifact) error {
 	return nil
 }
 
+func ValidateKillSwitchArtifactFreshness(artifact KillSwitchArtifact, now time.Time, maxAge time.Duration) error {
+	if err := ValidateKillSwitchArtifact(artifact); err != nil {
+		return err
+	}
+	var problems []string
+	if now.IsZero() {
+		problems = append(problems, "now is required")
+	}
+	if maxAge <= 0 {
+		problems = append(problems, "max_age must be positive")
+	}
+	if len(problems) == 0 {
+		age := now.UTC().Sub(artifact.CreatedAt.UTC())
+		if age < 0 {
+			problems = append(problems, "created_at must not be in the future")
+		}
+		if age > maxAge {
+			problems = append(problems, fmt.Sprintf("artifact is stale: age=%s max=%s", age, maxAge))
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New("kill switch artifact freshness validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func ValidateKillSwitchArtifactHandoff(
+	artifact KillSwitchArtifact,
+	execution KillSwitchArtifactHandoffExecution,
+) error {
+	if err := ValidateKillSwitchArtifact(artifact); err != nil {
+		return err
+	}
+	var problems []string
+	if artifact.Action != KillSwitchArtifactActionState {
+		problems = append(problems, "action must be state for handoff")
+	}
+	if !sameKillSwitchArtifactHandoffPath(artifact.ConfigPath, execution.ConfigPath) {
+		problems = append(problems, fmt.Sprintf("config_path %q does not match execution config %q", artifact.ConfigPath, strings.TrimSpace(execution.ConfigPath)))
+	}
+	if artifact.State == nil {
+		problems = append(problems, "state is required for handoff")
+	} else if artifact.State.Active {
+		problems = append(problems, "kill switch state must be inactive")
+	}
+	if len(problems) > 0 {
+		return errors.New("kill switch artifact handoff validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 func KillSwitchStateFromEvent(event KillSwitchEvent) KillSwitchState {
 	return KillSwitchState{
 		Active:    event.Active,
@@ -129,6 +187,10 @@ func KillSwitchStateFromEvent(event KillSwitchEvent) KillSwitchState {
 		Source:    event.Source,
 		UpdatedAt: event.CreatedAt.UTC(),
 	}
+}
+
+func sameKillSwitchArtifactHandoffPath(left string, right string) bool {
+	return filepath.Clean(strings.TrimSpace(left)) == filepath.Clean(strings.TrimSpace(right))
 }
 
 func knownKillSwitchArtifactAction(action string) bool {

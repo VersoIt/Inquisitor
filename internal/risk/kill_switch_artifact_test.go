@@ -233,6 +233,90 @@ func TestValidateKillSwitchArtifactRejectsInvalidArtifactsTableDriven(t *testing
 	}
 }
 
+func TestValidateKillSwitchArtifactFreshnessTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	valid := validKillSwitchStateArtifact(now.Add(-time.Minute), &risk.KillSwitchArtifactState{})
+
+	tests := []struct {
+		name       string
+		artifact   risk.KillSwitchArtifact
+		now        time.Time
+		maxAge     time.Duration
+		wantErrSub string
+	}{
+		{name: "fresh artifact", artifact: valid, now: now, maxAge: risk.DefaultKillSwitchArtifactMaxAge},
+		{name: "stale artifact", artifact: withKillSwitchArtifactMutation(valid, func(a *risk.KillSwitchArtifact) {
+			a.CreatedAt = now.Add(-11 * time.Minute)
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "stale"},
+		{name: "future artifact", artifact: withKillSwitchArtifactMutation(valid, func(a *risk.KillSwitchArtifact) {
+			a.CreatedAt = now.Add(time.Second)
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "future"},
+		{name: "zero max age", artifact: valid, now: now, wantErrSub: "max_age"},
+		{name: "missing now", artifact: valid, maxAge: 10 * time.Minute, wantErrSub: "now"},
+		{name: "invalid artifact first", artifact: withKillSwitchArtifactMutation(valid, func(a *risk.KillSwitchArtifact) {
+			a.State = nil
+		}), now: now, maxAge: 10 * time.Minute, wantErrSub: "state"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := risk.ValidateKillSwitchArtifactFreshness(tt.artifact, tt.now, tt.maxAge)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate kill switch freshness: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateKillSwitchArtifactHandoffTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	valid := validKillSwitchStateArtifact(now, &risk.KillSwitchArtifactState{})
+	validExecution := risk.KillSwitchArtifactHandoffExecution{ConfigPath: "configs/live.local.yaml"}
+
+	tests := []struct {
+		name       string
+		artifact   risk.KillSwitchArtifact
+		execution  risk.KillSwitchArtifactHandoffExecution
+		wantErrSub string
+	}{
+		{name: "valid inactive state handoff", artifact: valid, execution: validExecution},
+		{name: "cleaned config path still matches", artifact: valid, execution: risk.KillSwitchArtifactHandoffExecution{ConfigPath: "configs/./live.local.yaml"}},
+		{name: "config mismatch", artifact: valid, execution: risk.KillSwitchArtifactHandoffExecution{ConfigPath: "configs/other-live.yaml"}, wantErrSub: "config_path"},
+		{name: "active kill switch stops handoff", artifact: withKillSwitchArtifactMutation(valid, func(a *risk.KillSwitchArtifact) {
+			updatedAt := now.Add(-time.Minute)
+			a.State = &risk.KillSwitchArtifactState{
+				Active:    true,
+				Reason:    "operator emergency stop",
+				Source:    "operator",
+				UpdatedAt: &updatedAt,
+			}
+		}), execution: validExecution, wantErrSub: "inactive"},
+		{name: "list action stops handoff", artifact: validKillSwitchListArtifact(now, &risk.KillSwitchArtifactQuery{Limit: 1}, nil), execution: validExecution, wantErrSub: "action"},
+		{name: "missing state stops handoff", artifact: validKillSwitchStateArtifact(now, nil), execution: validExecution, wantErrSub: "state"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := risk.ValidateKillSwitchArtifactHandoff(tt.artifact, tt.execution)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate kill switch handoff: %v", err)
+			}
+		})
+	}
+}
+
 func assertKillSwitchArtifactWriteMirror(t *testing.T, artifact risk.KillSwitchArtifact, active bool, eventID string) {
 	t.Helper()
 	if artifact.Event == nil || artifact.State == nil {
