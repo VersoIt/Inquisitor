@@ -112,6 +112,43 @@ func (s *Service) ReleaseKillSwitch(ctx context.Context, req KillSwitchRequest) 
 	return s.appendKillSwitchEvent(ctx, req, false)
 }
 
+func (s *Service) CurrentKillSwitchState(ctx context.Context) (domainrisk.KillSwitchState, error) {
+	if err := ctx.Err(); err != nil {
+		return domainrisk.KillSwitchState{}, err
+	}
+	if s == nil || s.killSwitchRepo == nil {
+		return domainrisk.KillSwitchState{}, fmt.Errorf("risk service requires kill switch repository")
+	}
+	state, err := s.killSwitchRepo.CurrentKillSwitchState(ctx)
+	if err != nil {
+		return domainrisk.KillSwitchState{}, fmt.Errorf("load current kill switch state: %w", err)
+	}
+	if err := domainrisk.ValidateKillSwitchState(state); err != nil {
+		return domainrisk.KillSwitchState{}, err
+	}
+	return state, nil
+}
+
+func (s *Service) ListKillSwitchEvents(ctx context.Context, query domainrisk.KillSwitchEventQuery) ([]domainrisk.KillSwitchEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s == nil || s.killSwitchRepo == nil {
+		return nil, fmt.Errorf("risk service requires kill switch repository")
+	}
+	if err := domainrisk.ValidateKillSwitchEventQuery(query); err != nil {
+		return nil, err
+	}
+	events, err := s.killSwitchRepo.ListKillSwitchEvents(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list kill switch events: %w", err)
+	}
+	if err := domainrisk.ValidateKillSwitchEvents(events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
 func (s *Service) appendKillSwitchEvent(ctx context.Context, req KillSwitchRequest, active bool) (domainrisk.KillSwitchEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return domainrisk.KillSwitchEvent{}, err

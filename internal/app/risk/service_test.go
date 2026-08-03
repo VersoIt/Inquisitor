@@ -208,6 +208,108 @@ func TestServiceKillSwitchCommandsRejectMissingDependencies(t *testing.T) {
 	}
 }
 
+func TestServiceKillSwitchReadUseCasesTableDriven(t *testing.T) {
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	state := domainrisk.KillSwitchState{
+		Active:    true,
+		Reason:    "operator emergency stop",
+		Source:    "operator",
+		UpdatedAt: now,
+	}
+	events := []domainrisk.KillSwitchEvent{{
+		EventID:   "risk_kill_switch_0001",
+		Active:    true,
+		Reason:    "operator emergency stop",
+		Source:    "operator",
+		CreatedAt: now,
+	}}
+
+	tests := []struct {
+		name       string
+		run        func(*appRisk.Service, context.Context) error
+		assertRepo func(*testing.T, *fakeKillSwitchRepo)
+		wantErrSub string
+	}{
+		{
+			name: "current state",
+			run: func(service *appRisk.Service, ctx context.Context) error {
+				got, err := service.CurrentKillSwitchState(ctx)
+				if err != nil {
+					return err
+				}
+				if got != state {
+					return fmt.Errorf("state mismatch: %#v", got)
+				}
+				return nil
+			},
+			assertRepo: func(t *testing.T, repo *fakeKillSwitchRepo) {
+				t.Helper()
+				if repo.currentCall != 1 {
+					t.Fatalf("current calls mismatch: %d", repo.currentCall)
+				}
+			},
+		},
+		{
+			name: "list events",
+			run: func(service *appRisk.Service, ctx context.Context) error {
+				got, err := service.ListKillSwitchEvents(ctx, domainrisk.KillSwitchEventQuery{Source: "operator", Limit: 5})
+				if err != nil {
+					return err
+				}
+				if len(got) != 1 || got[0] != events[0] {
+					return fmt.Errorf("events mismatch: %#v", got)
+				}
+				return nil
+			},
+			assertRepo: func(t *testing.T, repo *fakeKillSwitchRepo) {
+				t.Helper()
+				if repo.listCalls != 1 || repo.query.Source != "operator" || repo.query.Limit != 5 {
+					t.Fatalf("list query mismatch: calls=%d query=%#v", repo.listCalls, repo.query)
+				}
+			},
+		},
+		{
+			name: "invalid list query",
+			run: func(service *appRisk.Service, ctx context.Context) error {
+				_, err := service.ListKillSwitchEvents(ctx, domainrisk.KillSwitchEventQuery{Source: "Operator"})
+				return err
+			},
+			wantErrSub: "source",
+		},
+		{
+			name: "repository error",
+			run: func(service *appRisk.Service, ctx context.Context) error {
+				_, err := service.CurrentKillSwitchState(ctx)
+				return err
+			},
+			wantErrSub: "repo unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &fakeKillSwitchRepo{state: state, events: events}
+			if tt.name == "repository error" {
+				repo.err = errors.New("repo unavailable")
+			}
+			service := appRisk.NewService(nil, appRisk.WithKillSwitchRepository(repo))
+			err := tt.run(service, context.Background())
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("run use case: %v", err)
+			}
+			if tt.assertRepo != nil {
+				tt.assertRepo(t, repo)
+			}
+		})
+	}
+}
+
 type fakeEngine struct {
 	input    domainrisk.EvaluationInput
 	decision domainrisk.Decision
@@ -245,9 +347,12 @@ func (r *fakeDecisionAuditRepo) ListDecisions(context.Context, domainrisk.Decisi
 
 type fakeKillSwitchRepo struct {
 	state       domainrisk.KillSwitchState
+	events      []domainrisk.KillSwitchEvent
+	query       domainrisk.KillSwitchEventQuery
 	appended    domainrisk.KillSwitchEvent
 	currentCall int
 	appendCalls int
+	listCalls   int
 	err         error
 }
 
@@ -268,8 +373,13 @@ func (r *fakeKillSwitchRepo) CurrentKillSwitchState(context.Context) (domainrisk
 	return r.state, nil
 }
 
-func (r *fakeKillSwitchRepo) ListKillSwitchEvents(context.Context, domainrisk.KillSwitchEventQuery) ([]domainrisk.KillSwitchEvent, error) {
-	return nil, fmt.Errorf("not implemented")
+func (r *fakeKillSwitchRepo) ListKillSwitchEvents(_ context.Context, query domainrisk.KillSwitchEventQuery) ([]domainrisk.KillSwitchEvent, error) {
+	r.listCalls++
+	r.query = query
+	if r.err != nil {
+		return nil, r.err
+	}
+	return append([]domainrisk.KillSwitchEvent(nil), r.events...), nil
 }
 
 func auditIntent(now time.Time) domainrisk.TradeIntent {
