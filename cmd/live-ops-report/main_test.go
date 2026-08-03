@@ -195,6 +195,9 @@ func TestRunLiveOpsReportRejectsUnsafeFlagsBeforeSideEffects(t *testing.T) {
 		{name: "bad position drift baseline age", args: []string{"-position-drift-baseline-max-age", "0s"}, wantErrSub: "position-drift-baseline-max-age"},
 		{name: "untrimmed position drift symbols", args: []string{"-position-drift-symbols", " BTCUSDT "}, wantErrSub: "position-drift-symbols"},
 		{name: "position drift symbol item whitespace", args: []string{"-position-drift-symbols", "BTCUSDT, ETHUSDT"}, wantErrSub: "position-drift-symbols"},
+		{name: "untrimmed kill switch event id", args: []string{"-position-drift", "-activate-kill-switch-on-position-drift-blocked", "-kill-switch-event-id", " risk_kill_switch_drift_0001 "}, wantErrSub: "kill-switch-event-id"},
+		{name: "kill switch event id without activation", args: []string{"-position-drift", "-kill-switch-event-id", "risk_kill_switch_drift_0001"}, wantErrSub: "activate-kill-switch-on-position-drift-blocked"},
+		{name: "kill switch activation requires drift", args: []string{"-activate-kill-switch-on-position-drift-blocked"}, wantErrSub: "position-drift"},
 	}
 
 	for _, tt := range tests {
@@ -217,6 +220,40 @@ func TestRunLiveOpsReportRejectsUnsafeFlagsBeforeSideEffects(t *testing.T) {
 			}
 			if loaded || opened {
 				t.Fatalf("unsafe flags must stop before side effects: loaded=%t opened=%t", loaded, opened)
+			}
+		})
+	}
+}
+
+func TestLiveOpsKillSwitchEventIDFromFlagTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		value      string
+		activate   bool
+		want       string
+		wantErrSub string
+	}{
+		{name: "empty without activation"},
+		{name: "empty with activation", activate: true},
+		{name: "explicit with activation", value: "risk_kill_switch_drift_0001", activate: true, want: "risk_kill_switch_drift_0001"},
+		{name: "untrimmed", value: " risk_kill_switch_drift_0001 ", activate: true, wantErrSub: "trimmed"},
+		{name: "without activation", value: "risk_kill_switch_drift_0001", wantErrSub: "activate-kill-switch-on-position-drift-blocked"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := liveOpsKillSwitchEventIDFromFlag(tt.value, tt.activate)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("event id from flag: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("event id mismatch: got %q want %q", got, tt.want)
 			}
 		})
 	}
@@ -368,6 +405,82 @@ func TestRunLiveOpsReportCanFailOnBlockedPositionDrift(t *testing.T) {
 		!strings.Contains(output.String(), `"name":"position_exposure_drift"`) ||
 		!strings.Contains(output.String(), `"status":"FAIL"`) {
 		t.Fatalf("expected blocked drift logs, got\n%s", output.String())
+	}
+}
+
+func TestRunLiveOpsReportActivatesKillSwitchOnBlockedPositionDrift(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	query := domainlive.PositionSnapshotQuery{Exchange: "bybit", Category: "linear", Symbol: "BTCUSDT"}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	positionReader := &fakeLiveOpsPositionReader{snapshots: map[string]domainlive.PositionSnapshot{
+		liveOpsPositionKey(query): liveOpsPositionSnapshot(t, query, now.Add(-time.Second), true),
+	}}
+	positionHistory := &fakeLiveOpsPositionHistoryReader{snapshots: map[string]domainlive.PositionSnapshot{
+		liveOpsPositionKey(query): liveOpsPositionSnapshot(t, query, now.Add(-time.Minute), false),
+	}}
+	killSwitch := &fakeLiveOpsKillSwitchRepository{}
+	var output bytes.Buffer
+	err = runLiveOpsReport(context.Background(), []string{
+		"-symbol", "BTCUSDT",
+		"-position-drift-symbols", "BTCUSDT",
+		"-activate-kill-switch-on-position-drift-blocked",
+		"-kill-switch-event-id", "risk_kill_switch_ops_drift_0001",
+	}, liveOpsReportDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			return validLiveOpsConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newPendingReader: func(*sql.DB) domainlive.PendingLiveDecisionReader {
+			return &fakeLiveOpsPendingReader{candidates: []domainlive.PendingLiveDecision{
+				liveOpsPendingDecision("risk_decision_live_ops_cli_0001", "BTCUSDT", now.Add(-2*time.Minute)),
+			}}
+		},
+		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
+			return &fakeLiveOpsAuditReader{runs: []domainlive.LiveLoopRunAudit{
+				liveOpsAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
+			}}
+		},
+		newKillSwitch: func(*sql.DB) domainrisk.KillSwitchRepository {
+			return killSwitch
+		},
+		newPositionReader: func(*config.Config) (domainlive.PositionSnapshotReader, error) {
+			return positionReader, nil
+		},
+		newPositionHistory: func(*sql.DB) domainlive.PositionSnapshotHistoryReader {
+			return positionHistory
+		},
+		now: func() time.Time {
+			return now
+		},
+		output: &output,
+	})
+	if err == nil || !strings.Contains(err.Error(), "position_exposure_drift") {
+		t.Fatalf("expected blocked drift error, got %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+	if killSwitch.appendCalls != 1 || len(killSwitch.appended) != 1 {
+		t.Fatalf("kill switch append mismatch: calls=%d events=%#v", killSwitch.appendCalls, killSwitch.appended)
+	}
+	event := killSwitch.appended[0]
+	if !event.Active ||
+		event.EventID != "risk_kill_switch_ops_drift_0001" ||
+		event.Source != "live_position_drift" ||
+		event.Reason != "position drift BLOCKED: position_exposure_drift" ||
+		!event.CreatedAt.Equal(now) {
+		t.Fatalf("kill switch event mismatch: %#v", event)
+	}
+	if !strings.Contains(output.String(), `"msg":"live ops report activated kill switch for position drift"`) ||
+		!strings.Contains(output.String(), `"event_id":"risk_kill_switch_ops_drift_0001"`) {
+		t.Fatalf("expected kill switch activation log, got\n%s", output.String())
 	}
 }
 
@@ -661,13 +774,21 @@ func (r *fakeLiveOpsAuditReader) ListLiveLoopRunAudits(
 }
 
 type fakeLiveOpsKillSwitchRepository struct {
-	state domainrisk.KillSwitchState
-	calls int
-	err   error
+	state       domainrisk.KillSwitchState
+	appended    []domainrisk.KillSwitchEvent
+	calls       int
+	appendCalls int
+	err         error
+	appendErr   error
 }
 
-func (r *fakeLiveOpsKillSwitchRepository) AppendKillSwitchEvent(context.Context, domainrisk.KillSwitchEvent) (domainrisk.KillSwitchStats, error) {
-	return domainrisk.KillSwitchStats{}, fmt.Errorf("not implemented")
+func (r *fakeLiveOpsKillSwitchRepository) AppendKillSwitchEvent(_ context.Context, event domainrisk.KillSwitchEvent) (domainrisk.KillSwitchStats, error) {
+	r.appendCalls++
+	if r.appendErr != nil {
+		return domainrisk.KillSwitchStats{}, r.appendErr
+	}
+	r.appended = append(r.appended, event)
+	return domainrisk.KillSwitchStats{Inserted: 1}, nil
 }
 
 func (r *fakeLiveOpsKillSwitchRepository) CurrentKillSwitchState(context.Context) (domainrisk.KillSwitchState, error) {

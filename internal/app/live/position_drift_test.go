@@ -233,6 +233,200 @@ func TestServiceBuildLivePositionDriftReportRejectsUnsafeInputsTableDriven(t *te
 	}
 }
 
+func TestServiceActivateKillSwitchForBlockedPositionDriftTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	blockedReport := applive.LivePositionDriftReport{
+		Status: domainlive.LiveOpsStatusBlocked,
+		Checks: []domainlive.ReadinessCheck{
+			domainlive.NewReadinessCheck("current_position_snapshot", domainlive.ReadinessCheckStatusPass, "fresh"),
+			domainlive.NewReadinessCheck("position_exposure_drift", domainlive.ReadinessCheckStatusFail, "BTCUSDT exposure drift detected"),
+			domainlive.NewReadinessCheck("position_exposure_drift", domainlive.ReadinessCheckStatusFail, "ETHUSDT exposure drift detected"),
+		},
+	}
+
+	tests := []struct {
+		name          string
+		setup         func() (*applive.Service, *fakeLiveKillSwitchRepository)
+		req           applive.LivePositionDriftKillSwitchRequest
+		wantActivated bool
+		wantReason    string
+		wantErrSub    string
+	}{
+		{
+			name: "clear report does not append event",
+			setup: func() (*applive.Service, *fakeLiveKillSwitchRepository) {
+				repo := &fakeLiveKillSwitchRepository{}
+				return applive.NewService(
+					applive.WithClock(clock.FixedClock{Time: now}),
+					applive.WithKillSwitchRepository(repo),
+				), repo
+			},
+			req: applive.LivePositionDriftKillSwitchRequest{
+				EventID: "risk_kill_switch_drift_0001",
+				Report: applive.LivePositionDriftReport{
+					Status: domainlive.LiveOpsStatusClear,
+					Checks: []domainlive.ReadinessCheck{
+						domainlive.NewReadinessCheck("position_exposure_drift", domainlive.ReadinessCheckStatusPass, "matched"),
+					},
+				},
+			},
+		},
+		{
+			name: "attention report does not append event",
+			setup: func() (*applive.Service, *fakeLiveKillSwitchRepository) {
+				repo := &fakeLiveKillSwitchRepository{}
+				return applive.NewService(
+					applive.WithClock(clock.FixedClock{Time: now}),
+					applive.WithKillSwitchRepository(repo),
+				), repo
+			},
+			req: applive.LivePositionDriftKillSwitchRequest{
+				EventID: "risk_kill_switch_drift_0001",
+				Report: applive.LivePositionDriftReport{
+					Status: domainlive.LiveOpsStatusAttention,
+					Checks: []domainlive.ReadinessCheck{
+						domainlive.NewReadinessCheck("db_position_baseline", domainlive.ReadinessCheckStatusWarn, "missing baseline"),
+					},
+				},
+			},
+		},
+		{
+			name: "blocked report appends active kill switch event",
+			setup: func() (*applive.Service, *fakeLiveKillSwitchRepository) {
+				repo := &fakeLiveKillSwitchRepository{}
+				return applive.NewService(
+					applive.WithClock(clock.FixedClock{Time: now}),
+					applive.WithKillSwitchRepository(repo),
+				), repo
+			},
+			req: applive.LivePositionDriftKillSwitchRequest{
+				EventID: "risk_kill_switch_drift_0001",
+				Report:  blockedReport,
+			},
+			wantActivated: true,
+			wantReason:    "position drift BLOCKED: position_exposure_drift",
+		},
+		{
+			name: "explicit reason and source are normalized by domain event",
+			setup: func() (*applive.Service, *fakeLiveKillSwitchRepository) {
+				repo := &fakeLiveKillSwitchRepository{}
+				return applive.NewService(
+					applive.WithClock(clock.FixedClock{Time: now}),
+					applive.WithKillSwitchRepository(repo),
+				), repo
+			},
+			req: applive.LivePositionDriftKillSwitchRequest{
+				EventID: "risk_kill_switch_drift_0001",
+				Report:  blockedReport,
+				Reason:  "manual drift escalation",
+				Source:  "LIVE_POSITION_DRIFT",
+			},
+			wantActivated: true,
+			wantReason:    "manual drift escalation",
+		},
+		{
+			name: "nil service is rejected only when blocked",
+			setup: func() (*applive.Service, *fakeLiveKillSwitchRepository) {
+				return nil, nil
+			},
+			req: applive.LivePositionDriftKillSwitchRequest{
+				EventID: "risk_kill_switch_drift_0001",
+				Report:  blockedReport,
+			},
+			wantErrSub: "service",
+		},
+		{
+			name: "missing kill switch repository",
+			setup: func() (*applive.Service, *fakeLiveKillSwitchRepository) {
+				return applive.NewService(applive.WithClock(clock.FixedClock{Time: now})), nil
+			},
+			req: applive.LivePositionDriftKillSwitchRequest{
+				EventID: "risk_kill_switch_drift_0001",
+				Report:  blockedReport,
+			},
+			wantErrSub: "kill switch repository",
+		},
+		{
+			name: "append error is propagated",
+			setup: func() (*applive.Service, *fakeLiveKillSwitchRepository) {
+				repo := &fakeLiveKillSwitchRepository{appendErr: errors.New("postgres unavailable")}
+				return applive.NewService(
+					applive.WithClock(clock.FixedClock{Time: now}),
+					applive.WithKillSwitchRepository(repo),
+				), repo
+			},
+			req: applive.LivePositionDriftKillSwitchRequest{
+				EventID: "risk_kill_switch_drift_0001",
+				Report:  blockedReport,
+			},
+			wantErrSub: "postgres unavailable",
+		},
+		{
+			name: "invalid event id is rejected",
+			setup: func() (*applive.Service, *fakeLiveKillSwitchRepository) {
+				repo := &fakeLiveKillSwitchRepository{}
+				return applive.NewService(
+					applive.WithClock(clock.FixedClock{Time: now}),
+					applive.WithKillSwitchRepository(repo),
+				), repo
+			},
+			req: applive.LivePositionDriftKillSwitchRequest{
+				Report: blockedReport,
+			},
+			wantErrSub: "event_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, repo := tt.setup()
+			result, err := service.ActivateKillSwitchForBlockedPositionDrift(context.Background(), tt.req)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("activate kill switch: %v", err)
+			}
+			if result.Activated != tt.wantActivated {
+				t.Fatalf("activated mismatch: got %t want %t", result.Activated, tt.wantActivated)
+			}
+			if tt.wantActivated {
+				if repo.appendCalls != 1 || len(repo.appended) != 1 {
+					t.Fatalf("append calls mismatch: calls=%d appended=%#v", repo.appendCalls, repo.appended)
+				}
+				event := repo.appended[0]
+				if !event.Active ||
+					event.EventID != tt.req.EventID ||
+					event.Reason != tt.wantReason ||
+					event.Source != applive.LivePositionDriftKillSwitchSource ||
+					!event.CreatedAt.Equal(now) ||
+					result.Event != event {
+					t.Fatalf("kill switch event mismatch: result=%#v repo=%#v", result.Event, event)
+				}
+				return
+			}
+			if repo != nil && repo.appendCalls != 0 {
+				t.Fatalf("non-blocked report must not append kill switch events: %#v", repo.appended)
+			}
+		})
+	}
+}
+
+func TestLivePositionDriftKillSwitchReasonFallsBackWithoutFailedChecks(t *testing.T) {
+	got := applive.LivePositionDriftKillSwitchReason(applive.LivePositionDriftReport{
+		Status: domainlive.LiveOpsStatusBlocked,
+		Checks: []domainlive.ReadinessCheck{
+			domainlive.NewReadinessCheck("db_position_baseline", domainlive.ReadinessCheckStatusWarn, "missing baseline"),
+		},
+	})
+	if got != "position drift status BLOCKED" {
+		t.Fatalf("reason mismatch: got %q", got)
+	}
+}
+
 type fakeLivePositionDriftSnapshotReader struct {
 	snapshots map[string]domainlive.PositionSnapshot
 	queries   []domainlive.PositionSnapshotQuery

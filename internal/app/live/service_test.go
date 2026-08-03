@@ -649,13 +649,21 @@ func (j *fakeLiveOrderJournal) RecordOrderAcknowledgement(_ context.Context, ack
 type fakeLiveKillSwitchRepository struct {
 	state        domainrisk.KillSwitchState
 	states       []domainrisk.KillSwitchState
+	appended     []domainrisk.KillSwitchEvent
 	currentCalls int
+	appendCalls  int
+	appendErr    error
 	errAt        int
 	err          error
 }
 
-func (r *fakeLiveKillSwitchRepository) AppendKillSwitchEvent(context.Context, domainrisk.KillSwitchEvent) (domainrisk.KillSwitchStats, error) {
-	return domainrisk.KillSwitchStats{}, fmt.Errorf("not implemented")
+func (r *fakeLiveKillSwitchRepository) AppendKillSwitchEvent(_ context.Context, event domainrisk.KillSwitchEvent) (domainrisk.KillSwitchStats, error) {
+	r.appendCalls++
+	if r.appendErr != nil {
+		return domainrisk.KillSwitchStats{}, r.appendErr
+	}
+	r.appended = append(r.appended, event)
+	return domainrisk.KillSwitchStats{Inserted: 1}, nil
 }
 
 func (r *fakeLiveKillSwitchRepository) CurrentKillSwitchState(context.Context) (domainrisk.KillSwitchState, error) {

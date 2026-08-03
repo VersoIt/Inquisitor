@@ -140,6 +140,18 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				assertLiveFirstOrderFlagValue(t, ops.Args, "-position-drift-baseline-max-age", "10m0s")
 			},
 		},
+		{
+			name: "position drift kill switch activation implies drift",
+			mutate: func(req *liveFirstOrderCheckRequest) {
+				req.PositionDriftKillSwitch = true
+			},
+			assert: func(t *testing.T, bundle liveFirstOrderCheckBundle) {
+				ops := liveFirstOrderCommandByName(t, bundle.Commands, "live-ops-report")
+				assertLiveFirstOrderFlag(t, ops.Args, "-position-drift")
+				assertLiveFirstOrderFlag(t, ops.Args, "-activate-kill-switch-on-position-drift-blocked")
+				assertLiveFirstOrderFlag(t, ops.Args, "-fail-on-non-clear")
+			},
+		},
 	}
 
 	for _, tt := range tests {

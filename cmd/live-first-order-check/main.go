@@ -86,6 +86,7 @@ type liveFirstOrderCheckRequest struct {
 	PositionDriftSymbols        string
 	PositionDriftCurrentMaxAge  time.Duration
 	PositionDriftBaselineMaxAge time.Duration
+	PositionDriftKillSwitch     bool
 	MaxIterations               int
 	MaxRuntime                  time.Duration
 	IterationTimeout            time.Duration
@@ -127,6 +128,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 	positionDriftSymbols := flags.String("position-drift-symbols", "", "optional comma-separated symbols for first-order ops position drift; defaults to exchange.symbols from config")
 	positionDriftCurrentMaxAge := flags.Duration("position-drift-current-max-age", domainlive.DefaultPositionDriftCurrentMaxAge, "maximum accepted age for current exchange position snapshots in first-order ops drift")
 	positionDriftBaselineMaxAge := flags.Duration("position-drift-baseline-max-age", domainlive.DefaultPositionDriftBaselineMaxAge, "maximum age before DB position baselines become ATTENTION in first-order ops drift")
+	activateKillSwitchOnPositionDriftBlocked := flags.Bool("activate-kill-switch-on-position-drift-blocked", false, "append an active Kill Switch event from the generated ops report when first-order position drift is BLOCKED")
 	maxIterations := flags.Int("max-iterations", defaultLiveFirstOrderMaxIterations, "first-order live-loop iteration bound mirrored into deploy-check/live-loop")
 	maxRuntime := flags.Duration("max-runtime", defaultLiveFirstOrderMaxRuntime, "first-order live-loop runtime bound mirrored into deploy-check/live-loop")
 	iterationTimeout := flags.Duration("iteration-timeout", defaultLiveFirstOrderIterationTimeout, "first-order live-loop per-iteration timeout mirrored into deploy-check/live-loop")
@@ -182,6 +184,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 		PositionDriftSymbols:        *positionDriftSymbols,
 		PositionDriftCurrentMaxAge:  *positionDriftCurrentMaxAge,
 		PositionDriftBaselineMaxAge: *positionDriftBaselineMaxAge,
+		PositionDriftKillSwitch:     *activateKillSwitchOnPositionDriftBlocked,
 		MaxIterations:               *maxIterations,
 		MaxRuntime:                  *maxRuntime,
 		IterationTimeout:            *iterationTimeout,
@@ -345,6 +348,9 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 			"-position-drift-baseline-max-age", normalized.PositionDriftBaselineMaxAge.String(),
 		)
 	}
+	if normalized.PositionDriftKillSwitch {
+		opsReportArgs = append(opsReportArgs, "-activate-kill-switch-on-position-drift-blocked")
+	}
 	opsReportArgs = appendOptionalLiveFirstOrderFlag(opsReportArgs, "-position-drift-symbols", normalized.PositionDriftSymbols)
 
 	liveLoopArgs := normalized.goRunArgs("./cmd/live-loop",
@@ -409,6 +415,9 @@ func normalizeLiveFirstOrderCheckRequest(req liveFirstOrderCheckRequest) (liveFi
 	req.LimitPrice = trimLiveFirstOrderFlag(&problems, "limit-price", req.LimitPrice)
 	req.PositionDriftSymbols = normalizeLiveFirstOrderSymbolListFlag(&problems, "position-drift-symbols", req.PositionDriftSymbols)
 	if req.PositionDriftSymbols != "" {
+		req.PositionDrift = true
+	}
+	if req.PositionDriftKillSwitch {
 		req.PositionDrift = true
 	}
 	if req.GoBinary == "" {

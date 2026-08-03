@@ -59,6 +59,8 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	artifactPath := flags.String("artifact-path", "", "optional path to write a machine-readable JSON live ops report artifact")
 	failOnBlocked := flags.Bool("fail-on-blocked", false, "return a non-zero exit code when the computed ops status is BLOCKED")
 	failOnNonClear := flags.Bool("fail-on-non-clear", false, "return a non-zero exit code when the computed ops status is ATTENTION or BLOCKED")
+	activateKillSwitchOnPositionDriftBlocked := flags.Bool("activate-kill-switch-on-position-drift-blocked", false, "append an active Kill Switch event when the optional position drift section is BLOCKED")
+	killSwitchEventIDValue := flags.String("kill-switch-event-id", "", "optional explicit Kill Switch event id for -activate-kill-switch-on-position-drift-blocked; auto-generated when omitted")
 	timeout := flags.Duration("timeout", 10*time.Second, "maximum live ops report command duration")
 	logLevel := flags.String("log-level", "", "optional log level override: debug, info, warn, error")
 	if err := flags.Parse(args); err != nil {
@@ -79,6 +81,10 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	if *positionDriftBaselineMaxAge <= 0 {
 		return fmt.Errorf("position-drift-baseline-max-age must be positive")
 	}
+	killSwitchEventID, err := liveOpsKillSwitchEventIDFromFlag(*killSwitchEventIDValue, *activateKillSwitchOnPositionDriftBlocked)
+	if err != nil {
+		return err
+	}
 
 	pendingQuery, err := liveOpsPendingQueryFromFlags(*symbolValue, *pendingLimit)
 	if err != nil {
@@ -97,6 +103,9 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 		return err
 	}
 	positionDriftEnabled := *checkPositionDrift || hasPositionDriftSymbols
+	if *activateKillSwitchOnPositionDriftBlocked && !positionDriftEnabled {
+		return fmt.Errorf("activate-kill-switch-on-position-drift-blocked requires -position-drift or -position-drift-symbols")
+	}
 	firstOrderReview, hasFirstOrderReview, err := loadLiveOpsFirstOrderReviewArtifactFile(*firstOrderReviewFile)
 	if err != nil {
 		return err
@@ -187,6 +196,27 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 			"status", artifact.Status,
 			"failed", artifact.Summary.Failed,
 		)
+	}
+	if *activateKillSwitchOnPositionDriftBlocked && report.HasPositionDrift && report.PositionDrift.Status == domainlive.LiveOpsStatusBlocked {
+		if killSwitchEventID == "" {
+			killSwitchEventID = applive.LivePositionDriftGeneratedKillSwitchEventID(reportNow)
+		}
+		guard, err := service.ActivateKillSwitchForBlockedPositionDrift(reportCtx, applive.LivePositionDriftKillSwitchRequest{
+			Report:  report.PositionDrift,
+			EventID: killSwitchEventID,
+		})
+		if err != nil {
+			return err
+		}
+		if guard.Activated {
+			log.Warn(
+				"live ops report activated kill switch for position drift",
+				"event_id", guard.Event.EventID,
+				"reason", guard.Event.Reason,
+				"source", guard.Event.Source,
+			)
+		}
+		return fmt.Errorf("live ops report position drift blocked: %s", liveOpsFailedCheckNames(report.PositionDrift.Checks))
 	}
 	if *failOnBlocked && report.Status == domainlive.LiveOpsStatusBlocked {
 		return fmt.Errorf("live ops report blocked: %s", liveOpsFailedCheckNames(report.Checks))
@@ -309,6 +339,17 @@ func liveOpsPositionDriftSymbolListFromFlag(value string) ([]string, bool, error
 		symbols = append(symbols, symbol)
 	}
 	return symbols, true, nil
+}
+
+func liveOpsKillSwitchEventIDFromFlag(value string, activate bool) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if value != trimmed {
+		return "", fmt.Errorf("kill-switch-event-id must be trimmed")
+	}
+	if trimmed != "" && !activate {
+		return "", fmt.Errorf("kill-switch-event-id requires -activate-kill-switch-on-position-drift-blocked")
+	}
+	return trimmed, nil
 }
 
 func liveOpsPositionDriftQueriesFromConfig(

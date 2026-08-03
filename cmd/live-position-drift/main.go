@@ -17,6 +17,7 @@ import (
 	bybitrest "github.com/VersoIt/Inquisitor/internal/exchanges/bybit/rest"
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	"github.com/VersoIt/Inquisitor/internal/logger"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
@@ -25,6 +26,7 @@ type livePositionDriftDependencies struct {
 	openDB            func(context.Context, config.DatabaseConfig) (*sql.DB, error)
 	newPositionReader func(*config.Config) (domainlive.PositionSnapshotReader, error)
 	newHistoryReader  func(*sql.DB) domainlive.PositionSnapshotHistoryReader
+	newKillSwitch     func(*sql.DB) domainrisk.KillSwitchRepository
 	now               func() time.Time
 	output            io.Writer
 }
@@ -46,6 +48,8 @@ func runLivePositionDrift(ctx context.Context, args []string, deps livePositionD
 	currentMaxAge := flags.Duration("current-max-age", domainlive.DefaultPositionDriftCurrentMaxAge, "maximum accepted age for current exchange position snapshots")
 	baselineMaxAge := flags.Duration("baseline-max-age", domainlive.DefaultPositionDriftBaselineMaxAge, "maximum age before DB position baseline becomes ATTENTION")
 	failOnBlocked := flags.Bool("fail-on-blocked", false, "return a non-zero exit code when position drift status is BLOCKED")
+	activateKillSwitchOnBlocked := flags.Bool("activate-kill-switch-on-blocked", false, "append an active Kill Switch event when position drift status is BLOCKED")
+	killSwitchEventIDValue := flags.String("kill-switch-event-id", "", "optional explicit Kill Switch event id for -activate-kill-switch-on-blocked; auto-generated when omitted")
 	timeout := flags.Duration("timeout", 15*time.Second, "maximum live position drift command duration")
 	logLevel := flags.String("log-level", "", "optional log level override: debug, info, warn, error")
 	if err := flags.Parse(args); err != nil {
@@ -62,6 +66,10 @@ func runLivePositionDrift(ctx context.Context, args []string, deps livePositionD
 	}
 	if *baselineMaxAge <= 0 {
 		return fmt.Errorf("baseline-max-age must be positive")
+	}
+	killSwitchEventID, err := livePositionDriftKillSwitchEventIDFromFlag(*killSwitchEventIDValue, *activateKillSwitchOnBlocked)
+	if err != nil {
+		return err
 	}
 	explicitSymbols, hasExplicitSymbols, err := livePositionDriftSymbolListFromFlag(*symbolsValue)
 	if err != nil {
@@ -97,11 +105,15 @@ func runLivePositionDrift(ctx context.Context, args []string, deps livePositionD
 		return fmt.Errorf("create live position reader for drift report: %w", err)
 	}
 	reportNow := deps.now().UTC()
-	service := applive.NewService(
+	options := []applive.Option{
 		applive.WithClock(clock.FixedClock{Time: reportNow}),
 		applive.WithPositionSnapshotReader(positionReader),
 		applive.WithPositionSnapshotHistoryReader(deps.newHistoryReader(db)),
-	)
+	}
+	if *activateKillSwitchOnBlocked {
+		options = append(options, applive.WithKillSwitchRepository(deps.newKillSwitch(db)))
+	}
+	service := applive.NewService(options...)
 	report, err := service.BuildLivePositionDriftReport(driftCtx, applive.LivePositionDriftReportRequest{
 		Queries:        queries,
 		CurrentMaxAge:  *currentMaxAge,
@@ -111,7 +123,27 @@ func runLivePositionDrift(ctx context.Context, args []string, deps livePositionD
 		return err
 	}
 	logLivePositionDriftReport(log, report)
-	if *failOnBlocked && report.Status == domainlive.LiveOpsStatusBlocked {
+	if *activateKillSwitchOnBlocked {
+		if killSwitchEventID == "" {
+			killSwitchEventID = livePositionDriftGeneratedKillSwitchEventID(reportNow)
+		}
+		guard, err := service.ActivateKillSwitchForBlockedPositionDrift(driftCtx, applive.LivePositionDriftKillSwitchRequest{
+			Report:  report,
+			EventID: killSwitchEventID,
+		})
+		if err != nil {
+			return err
+		}
+		if guard.Activated {
+			log.Warn(
+				"live position drift activated kill switch",
+				"event_id", guard.Event.EventID,
+				"reason", guard.Event.Reason,
+				"source", guard.Event.Source,
+			)
+		}
+	}
+	if (*failOnBlocked || *activateKillSwitchOnBlocked) && report.Status == domainlive.LiveOpsStatusBlocked {
 		return fmt.Errorf("live position drift blocked: %s", livePositionDriftFailedCheckNames(report.Checks))
 	}
 	log.Info("live position drift completed", "status", report.Status)
@@ -133,6 +165,11 @@ func (deps livePositionDriftDependencies) withDefaults() livePositionDriftDepend
 			return postgres.NewLiveOrderJournalRepository(db)
 		}
 	}
+	if deps.newKillSwitch == nil {
+		deps.newKillSwitch = func(db *sql.DB) domainrisk.KillSwitchRepository {
+			return postgres.NewRiskKillSwitchRepository(db)
+		}
+	}
 	if deps.now == nil {
 		deps.now = func() time.Time {
 			return time.Now().UTC()
@@ -152,6 +189,21 @@ func newBybitLivePositionReader(cfg *config.Config) (domainlive.PositionSnapshot
 		cfg.Exchange.RestBaseURL,
 		bybitrest.WithHMACAuth(livePositionDriftEnvValue(cfg.Live.APIKeyEnv), livePositionDriftEnvValue(cfg.Live.APISecretEnv)),
 	)
+}
+
+func livePositionDriftKillSwitchEventIDFromFlag(value string, activate bool) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if value != trimmed {
+		return "", fmt.Errorf("kill-switch-event-id must be trimmed")
+	}
+	if trimmed != "" && !activate {
+		return "", fmt.Errorf("kill-switch-event-id requires -activate-kill-switch-on-blocked")
+	}
+	return trimmed, nil
+}
+
+func livePositionDriftGeneratedKillSwitchEventID(now time.Time) string {
+	return applive.LivePositionDriftGeneratedKillSwitchEventID(now)
 }
 
 func livePositionDriftSymbolListFromFlag(value string) ([]string, bool, error) {
