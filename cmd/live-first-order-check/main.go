@@ -51,6 +51,7 @@ type liveFirstOrderCheckBundle struct {
 	ReadinessFile            string
 	AuditFile                string
 	DeployCheckFile          string
+	OpsReportFile            string
 	ReviewFile               string
 	Commands                 []liveFirstOrderCommand
 	SuggestedLiveLoop        liveFirstOrderCommand
@@ -80,6 +81,7 @@ type liveFirstOrderCheckRequest struct {
 	MaxReadinessAge           time.Duration
 	MaxAuditAge               time.Duration
 	MaxDeployCheckAge         time.Duration
+	MaxOpsReportAge           time.Duration
 	MaxIterations             int
 	MaxRuntime                time.Duration
 	IterationTimeout          time.Duration
@@ -116,6 +118,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 	maxReadinessAge := flags.Duration("max-readiness-age", domainlive.DefaultLiveReadinessArtifactMaxAge, "maximum readiness artifact age accepted by downstream checks")
 	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum audit artifact age accepted by downstream checks")
 	maxDeployCheckAge := flags.Duration("max-deploy-check-age", domainlive.DefaultLiveDeploymentCheckArtifactMaxAge, "maximum deploy-check artifact age accepted by live-loop")
+	maxOpsReportAge := flags.Duration("max-ops-report-age", domainlive.DefaultLiveOpsReportArtifactMaxAge, "maximum ops-report artifact age accepted by live-loop")
 	maxIterations := flags.Int("max-iterations", defaultLiveFirstOrderMaxIterations, "first-order live-loop iteration bound mirrored into deploy-check/live-loop")
 	maxRuntime := flags.Duration("max-runtime", defaultLiveFirstOrderMaxRuntime, "first-order live-loop runtime bound mirrored into deploy-check/live-loop")
 	iterationTimeout := flags.Duration("iteration-timeout", defaultLiveFirstOrderIterationTimeout, "first-order live-loop per-iteration timeout mirrored into deploy-check/live-loop")
@@ -166,6 +169,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 		MaxReadinessAge:           *maxReadinessAge,
 		MaxAuditAge:               *maxAuditAge,
 		MaxDeployCheckAge:         *maxDeployCheckAge,
+		MaxOpsReportAge:           *maxOpsReportAge,
 		MaxIterations:             *maxIterations,
 		MaxRuntime:                *maxRuntime,
 		IterationTimeout:          *iterationTimeout,
@@ -186,6 +190,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 		"readiness_file", bundle.ReadinessFile,
 		"audit_file", bundle.AuditFile,
 		"deploy_check_file", bundle.DeployCheckFile,
+		"ops_report_file", bundle.OpsReportFile,
 		"review_file", bundle.ReviewFile,
 		"commands", len(bundle.Commands),
 	)
@@ -242,6 +247,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 	readinessFile := filepath.Join(normalized.ArtifactDir, "live-readiness.json")
 	auditFile := filepath.Join(normalized.ArtifactDir, "live-loop-audit.json")
 	deployCheckFile := filepath.Join(normalized.ArtifactDir, "live-deploy-check.json")
+	opsReportFile := filepath.Join(normalized.ArtifactDir, "live-ops-report.json")
 	reviewFile := filepath.Join(normalized.ArtifactDir, "live-first-order-review.json")
 
 	planArgs := normalized.goRunArgs("./cmd/live-order-plan",
@@ -312,6 +318,15 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 	)
 	verifyArgs = appendLiveFirstOrderSourceFlags(verifyArgs, normalized)
 
+	opsReportArgs := normalized.goRunArgs("./cmd/live-ops-report",
+		"-config", normalized.ConfigPath,
+		"-pending-limit", fmt.Sprintf("%d", normalized.ReadinessPendingLimit),
+		"-audit-limit", fmt.Sprintf("%d", normalized.ReadinessAuditLimit),
+		"-artifact-path", opsReportFile,
+		"-fail-on-non-clear",
+	)
+	opsReportArgs = appendOptionalLiveFirstOrderFlag(opsReportArgs, "-symbol", normalized.Symbol)
+
 	liveLoopArgs := normalized.goRunArgs("./cmd/live-loop",
 		"-config", normalized.ConfigPath,
 		"-plan-file", planFile,
@@ -322,6 +337,8 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		"-max-readiness-age", normalized.MaxReadinessAge.String(),
 		"-max-audit-age", normalized.MaxAuditAge.String(),
 		"-max-deploy-check-age", normalized.MaxDeployCheckAge.String(),
+		"-ops-report-file", opsReportFile,
+		"-max-ops-report-age", normalized.MaxOpsReportAge.String(),
 		"-run-id", normalized.RunID,
 		"-max-initial-live-capital-usdt", normalized.MaxInitialLiveCapitalUSDT.String(),
 		"-max-iterations", fmt.Sprintf("%d", normalized.MaxIterations),
@@ -344,6 +361,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		ReadinessFile:   readinessFile,
 		AuditFile:       auditFile,
 		DeployCheckFile: deployCheckFile,
+		OpsReportFile:   opsReportFile,
 		ReviewFile:      reviewFile,
 		Commands: []liveFirstOrderCommand{
 			{Name: "live-order-plan", Args: planArgs},
@@ -351,6 +369,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 			{Name: "live-loop-audit", Args: auditArgs},
 			{Name: "live-deploy-check", Args: deployArgs},
 			{Name: "live-handoff-verify", Args: verifyArgs},
+			{Name: "live-ops-report", Args: opsReportArgs},
 		},
 		SuggestedLiveLoop:        liveFirstOrderCommand{Name: "live-loop", Args: liveLoopArgs},
 		SuggestedPostOrderReview: liveFirstOrderCommand{Name: "live-first-order-review", Args: reviewArgs},
@@ -422,6 +441,9 @@ func normalizeLiveFirstOrderCheckRequest(req liveFirstOrderCheckRequest) (liveFi
 	}
 	if req.MaxDeployCheckAge <= 0 {
 		problems = append(problems, "max-deploy-check-age must be positive")
+	}
+	if req.MaxOpsReportAge <= 0 {
+		problems = append(problems, "max-ops-report-age must be positive")
 	}
 	if req.MaxIterations != 1 {
 		problems = append(problems, "max-iterations must be 1 for the first live order")

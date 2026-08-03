@@ -31,6 +31,7 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 					"live-loop-audit",
 					"live-deploy-check",
 					"live-handoff-verify",
+					"live-ops-report",
 				})
 				plan := liveFirstOrderCommandByName(t, bundle.Commands, "live-order-plan")
 				assertLiveFirstOrderFlagValue(t, plan.Args, "-decision-id", "risk_decision_live_first_order_001")
@@ -50,8 +51,14 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				assertLiveFirstOrderFlag(t, deploy.Args, "-subaccount-confirmed")
 
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-deploy-check-file", bundle.DeployCheckFile)
+				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-ops-report-file", bundle.OpsReportFile)
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-run-id", "live_loop_first_order_001")
 				assertLiveFirstOrderFlag(t, bundle.SuggestedLiveLoop.Args, "-execute")
+
+				ops := liveFirstOrderCommandByName(t, bundle.Commands, "live-ops-report")
+				assertLiveFirstOrderFlagValue(t, ops.Args, "-artifact-path", bundle.OpsReportFile)
+				assertLiveFirstOrderFlagValue(t, ops.Args, "-symbol", "BTCUSDT")
+				assertLiveFirstOrderFlag(t, ops.Args, "-fail-on-non-clear")
 
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderReview.Args, "-plan-file", bundle.PlanFile)
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderReview.Args, "-artifact-path", bundle.ReviewFile)
@@ -66,7 +73,7 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 			},
 			assert: func(t *testing.T, bundle liveFirstOrderCheckBundle) {
 				for _, command := range append(bundle.Commands, bundle.SuggestedLiveLoop) {
-					if command.Name == "live-readiness" || command.Name == "live-loop-audit" {
+					if command.Name == "live-readiness" || command.Name == "live-loop-audit" || command.Name == "live-ops-report" {
 						continue
 					}
 					assertLiveFirstOrderFlag(t, command.Args, "-select-pending")
@@ -120,6 +127,7 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				bundle.ReadinessFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-readiness.json") ||
 				bundle.AuditFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-loop-audit.json") ||
 				bundle.DeployCheckFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-deploy-check.json") ||
+				bundle.OpsReportFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-ops-report.json") ||
 				bundle.ReviewFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-first-order-review.json") {
 				t.Fatalf("artifact path mismatch: %#v", bundle)
 			}
@@ -167,6 +175,9 @@ func TestBuildLiveFirstOrderCheckBundleRejectsUnsafeFlagsTableDriven(t *testing.
 		{name: "untrimmed decision id", mutate: func(req *liveFirstOrderCheckRequest) {
 			req.DecisionID = " risk_decision_live_first_order_001 "
 		}, wantErrSub: "decision-id must be trimmed"},
+		{name: "invalid ops report age", mutate: func(req *liveFirstOrderCheckRequest) {
+			req.MaxOpsReportAge = 0
+		}, wantErrSub: "max-ops-report-age"},
 	}
 
 	for _, tt := range tests {
@@ -257,7 +268,7 @@ func TestRunLiveFirstOrderCheckExecutesCommandsInOrder(t *testing.T) {
 	if mkdirPath != filepath.Clean(artifactDir) {
 		t.Fatalf("mkdir path mismatch: got %q want %q", mkdirPath, filepath.Clean(artifactDir))
 	}
-	want := []string{"live-order-plan", "live-readiness", "live-loop-audit", "live-deploy-check", "live-handoff-verify"}
+	want := []string{"live-order-plan", "live-readiness", "live-loop-audit", "live-deploy-check", "live-handoff-verify", "live-ops-report"}
 	if !reflect.DeepEqual(ran, want) {
 		t.Fatalf("command order mismatch: got %#v want %#v", ran, want)
 	}
@@ -347,6 +358,7 @@ func validLiveFirstOrderCheckRequest() liveFirstOrderCheckRequest {
 		MaxReadinessAge:           10 * time.Minute,
 		MaxAuditAge:               10 * time.Minute,
 		MaxDeployCheckAge:         10 * time.Minute,
+		MaxOpsReportAge:           10 * time.Minute,
 		MaxIterations:             1,
 		MaxRuntime:                15 * time.Second,
 		IterationTimeout:          10 * time.Second,

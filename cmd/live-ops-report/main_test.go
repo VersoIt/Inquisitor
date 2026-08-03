@@ -574,6 +574,54 @@ func TestRunLiveOpsReportCanFailOnBlockedStatus(t *testing.T) {
 	}
 }
 
+func TestRunLiveOpsReportCanFailOnAttentionStatus(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	var output bytes.Buffer
+	err = runLiveOpsReport(context.Background(), []string{
+		"-symbol", "BTCUSDT",
+		"-fail-on-non-clear",
+	}, liveOpsReportDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			return validLiveOpsConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newPendingReader: func(*sql.DB) domainlive.PendingLiveDecisionReader {
+			return &fakeLiveOpsPendingReader{}
+		},
+		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
+			return &fakeLiveOpsAuditReader{runs: []domainlive.LiveLoopRunAudit{
+				liveOpsAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
+			}}
+		},
+		newKillSwitch: func(*sql.DB) domainrisk.KillSwitchRepository {
+			return &fakeLiveOpsKillSwitchRepository{}
+		},
+		now: func() time.Time {
+			return now
+		},
+		output: &output,
+	})
+	if err == nil || !strings.Contains(err.Error(), "ATTENTION") || !strings.Contains(err.Error(), "pending_live_decision") {
+		t.Fatalf("expected attention non-clear error, got %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+	if !strings.Contains(output.String(), `"status":"ATTENTION"`) ||
+		!strings.Contains(output.String(), `"name":"pending_live_decision"`) ||
+		!strings.Contains(output.String(), `"status":"WARN"`) {
+		t.Fatalf("expected attention logs, got\n%s", output.String())
+	}
+}
+
 type fakeLiveOpsPendingReader struct {
 	query      domainlive.PendingLiveDecisionQuery
 	candidates []domainlive.PendingLiveDecision

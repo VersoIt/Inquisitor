@@ -58,6 +58,7 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	positionDriftBaselineMaxAge := flags.Duration("position-drift-baseline-max-age", domainlive.DefaultPositionDriftBaselineMaxAge, "maximum age before DB position baselines become ATTENTION")
 	artifactPath := flags.String("artifact-path", "", "optional path to write a machine-readable JSON live ops report artifact")
 	failOnBlocked := flags.Bool("fail-on-blocked", false, "return a non-zero exit code when the computed ops status is BLOCKED")
+	failOnNonClear := flags.Bool("fail-on-non-clear", false, "return a non-zero exit code when the computed ops status is ATTENTION or BLOCKED")
 	timeout := flags.Duration("timeout", 10*time.Second, "maximum live ops report command duration")
 	logLevel := flags.String("log-level", "", "optional log level override: debug, info, warn, error")
 	if err := flags.Parse(args); err != nil {
@@ -189,6 +190,9 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	}
 	if *failOnBlocked && report.Status == domainlive.LiveOpsStatusBlocked {
 		return fmt.Errorf("live ops report blocked: %s", liveOpsFailedCheckNames(report.Checks))
+	}
+	if *failOnNonClear && report.Status != domainlive.LiveOpsStatusClear {
+		return fmt.Errorf("live ops report is not clear: status=%s checks=%s", report.Status, liveOpsNonClearCheckNames(report.Checks))
 	}
 	log.Info("live ops report completed", "status", report.Status)
 	return nil
@@ -420,6 +424,19 @@ func liveOpsFailedCheckNames(checks []domainlive.ReadinessCheck) string {
 	var names []string
 	for _, check := range checks {
 		if check.Status == domainlive.ReadinessCheckStatusFail {
+			names = append(names, check.Name)
+		}
+	}
+	if len(names) == 0 {
+		return "unknown"
+	}
+	return strings.Join(names, ", ")
+}
+
+func liveOpsNonClearCheckNames(checks []domainlive.ReadinessCheck) string {
+	var names []string
+	for _, check := range checks {
+		if check.Status == domainlive.ReadinessCheckStatusFail || check.Status == domainlive.ReadinessCheckStatusWarn {
 			names = append(names, check.Name)
 		}
 	}
