@@ -64,6 +64,7 @@ func runRiskKillSwitch(ctx context.Context, args []string, deps riskKillSwitchDe
 	sourceValue := flags.String("source", "", "event source for activate/release, or optional list filter; defaults to operator for writes")
 	activeValue := flags.String("active", "", "optional list filter: true or false")
 	limitValue := flags.Int("limit", defaultRiskKillSwitchLimit, "maximum events to list, from 1 to 1000")
+	artifactPathValue := flags.String("artifact-path", "", "optional path to write a machine-readable JSON risk Kill Switch artifact")
 	timeout := flags.Duration("timeout", 10*time.Second, "maximum risk kill switch command duration")
 	logLevel := flags.String("log-level", "", "optional log level override: debug, info, warn, error")
 	if err := flags.Parse(args); err != nil {
@@ -85,6 +86,10 @@ func runRiskKillSwitch(ctx context.Context, args []string, deps riskKillSwitchDe
 		*limitValue,
 		commandNow,
 	)
+	if err != nil {
+		return err
+	}
+	artifactPath, err := riskKillSwitchArtifactPathFromFlag(*artifactPathValue)
 	if err != nil {
 		return err
 	}
@@ -119,17 +124,35 @@ func runRiskKillSwitch(ctx context.Context, args []string, deps riskKillSwitchDe
 			return err
 		}
 		logRiskKillSwitchState(log, state)
+		if err := writeRiskKillSwitchArtifactIfRequested(log, artifactPath, domainrisk.BuildKillSwitchArtifactRequest{
+			CreatedAt:  commandNow,
+			ConfigPath: *configPath,
+			Action:     req.Action,
+			State:      &state,
+		}); err != nil {
+			return err
+		}
 	case riskKillSwitchActionList:
-		events, err := service.ListKillSwitchEvents(commandCtx, domainrisk.KillSwitchEventQuery{
+		query := domainrisk.KillSwitchEventQuery{
 			EventID: req.EventID,
 			Active:  req.Active,
 			Source:  req.Source,
 			Limit:   req.Limit,
-		})
+		}
+		events, err := service.ListKillSwitchEvents(commandCtx, query)
 		if err != nil {
 			return err
 		}
 		logRiskKillSwitchEvents(log, req, events)
+		if err := writeRiskKillSwitchArtifactIfRequested(log, artifactPath, domainrisk.BuildKillSwitchArtifactRequest{
+			CreatedAt:  commandNow,
+			ConfigPath: *configPath,
+			Action:     req.Action,
+			Query:      &query,
+			Events:     events,
+		}); err != nil {
+			return err
+		}
 	case riskKillSwitchActionActivate:
 		event, err := service.ActivateKillSwitch(commandCtx, apprisk.KillSwitchRequest{
 			EventID: req.EventID,
@@ -140,6 +163,16 @@ func runRiskKillSwitch(ctx context.Context, args []string, deps riskKillSwitchDe
 			return err
 		}
 		logRiskKillSwitchEvent(log, "risk kill switch activated", event)
+		state := domainrisk.KillSwitchStateFromEvent(event)
+		if err := writeRiskKillSwitchArtifactIfRequested(log, artifactPath, domainrisk.BuildKillSwitchArtifactRequest{
+			CreatedAt:  commandNow,
+			ConfigPath: *configPath,
+			Action:     req.Action,
+			State:      &state,
+			Event:      &event,
+		}); err != nil {
+			return err
+		}
 	case riskKillSwitchActionRelease:
 		event, err := service.ReleaseKillSwitch(commandCtx, apprisk.KillSwitchRequest{
 			EventID: req.EventID,
@@ -150,9 +183,34 @@ func runRiskKillSwitch(ctx context.Context, args []string, deps riskKillSwitchDe
 			return err
 		}
 		logRiskKillSwitchEvent(log, "risk kill switch released", event)
+		state := domainrisk.KillSwitchStateFromEvent(event)
+		if err := writeRiskKillSwitchArtifactIfRequested(log, artifactPath, domainrisk.BuildKillSwitchArtifactRequest{
+			CreatedAt:  commandNow,
+			ConfigPath: *configPath,
+			Action:     req.Action,
+			State:      &state,
+			Event:      &event,
+		}); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unsupported risk kill switch action %q", req.Action)
 	}
+	return nil
+}
+
+func writeRiskKillSwitchArtifactIfRequested(log *slog.Logger, path string, req domainrisk.BuildKillSwitchArtifactRequest) error {
+	if path == "" {
+		return nil
+	}
+	artifact, err := domainrisk.BuildKillSwitchArtifact(req)
+	if err != nil {
+		return fmt.Errorf("build risk kill switch artifact: %w", err)
+	}
+	if err := writeRiskKillSwitchArtifact(path, artifact); err != nil {
+		return err
+	}
+	log.Info("risk kill switch artifact written", "path", path, "schema_version", artifact.SchemaVersion, "action", artifact.Action)
 	return nil
 }
 

@@ -638,13 +638,13 @@ Run `live-position-drift` when you need to compare current exchange positions ag
 go run ./cmd/live-position-drift -config configs/live.local.yaml -symbols BTCUSDT,ETHUSDT -activate-kill-switch-on-blocked -fail-on-blocked
 ```
 
-Inspect and operate the persistent Kill Switch with `risk-kill-switch`. `state` and `list` are read-only. `activate` and `release` append immutable audit events; both require `-reason`, and `-event-id` is optional for scripted idempotency:
+Inspect and operate the persistent Kill Switch with `risk-kill-switch`. `state` and `list` are read-only. `activate` and `release` append immutable audit events; both require `-reason`, and `-event-id` is optional for scripted idempotency. Pass `-artifact-path` when you want a durable machine-readable JSON snapshot of the observed state, listed events, or appended event:
 
 ```powershell
-go run ./cmd/risk-kill-switch -config configs/live.local.yaml -action state
-go run ./cmd/risk-kill-switch -config configs/live.local.yaml -action list -limit 20
-go run ./cmd/risk-kill-switch -config configs/live.local.yaml -action activate -reason "operator emergency stop"
-go run ./cmd/risk-kill-switch -config configs/live.local.yaml -action release -reason "operator verified recovery"
+go run ./cmd/risk-kill-switch -config configs/live.local.yaml -action state -artifact-path artifacts/risk-kill-switch-state.json
+go run ./cmd/risk-kill-switch -config configs/live.local.yaml -action list -limit 20 -artifact-path artifacts/risk-kill-switch-events.json
+go run ./cmd/risk-kill-switch -config configs/live.local.yaml -action activate -reason "operator emergency stop" -artifact-path artifacts/risk-kill-switch-activate.json
+go run ./cmd/risk-kill-switch -config configs/live.local.yaml -action release -reason "operator verified recovery" -artifact-path artifacts/risk-kill-switch-release.json
 ```
 
 Submit one persisted approved LIVE risk decision manually. The command refuses to submit unless `-execute=true` is present, reruns startup preflight including the same fresh account and flat-position guards, generates deterministic idempotency IDs from `decision_id`, journals the submission before exchange I/O, records the exchange acknowledgement, then queries Bybit order status by the same deterministic client order ID, stores the status snapshot, reconciles the live position by symbol, and stores the position snapshot:
@@ -731,10 +731,10 @@ make live-first-order-review CONFIG=configs/live.local.yaml LIVE_FIRST_ORDER_ART
 make live-ops-report CONFIG=configs/live.local.yaml LIVE_OPS_SYMBOL=BTCUSDT LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT=artifacts/live-first-order/live-first-order-review.json LIVE_OPS_ARTIFACT=artifacts/live-ops-report.json
 make live-ops-report CONFIG=configs/live.local.yaml LIVE_OPS_SYMBOL=BTCUSDT LIVE_OPS_POSITION_DRIFT=1 LIVE_OPS_POSITION_DRIFT_SYMBOLS=BTCUSDT,ETHUSDT LIVE_OPS_ACTIVATE_KILL_SWITCH_ON_POSITION_DRIFT_BLOCKED=1 LIVE_OPS_FAIL_ON_BLOCKED=1
 make live-position-drift CONFIG=configs/live.local.yaml LIVE_DRIFT_SYMBOLS=BTCUSDT,ETHUSDT LIVE_DRIFT_ACTIVATE_KILL_SWITCH_ON_BLOCKED=1 LIVE_DRIFT_FAIL_ON_BLOCKED=1
-make risk-kill-switch CONFIG=configs/live.local.yaml RISK_KILL_SWITCH_ACTION=state
-make risk-kill-switch CONFIG=configs/live.local.yaml RISK_KILL_SWITCH_ACTION=list RISK_KILL_SWITCH_LIMIT=20
-make risk-kill-switch CONFIG=configs/live.local.yaml RISK_KILL_SWITCH_ACTION=activate RISK_KILL_SWITCH_REASON="operator emergency stop"
-make risk-kill-switch CONFIG=configs/live.local.yaml RISK_KILL_SWITCH_ACTION=release RISK_KILL_SWITCH_REASON="operator verified recovery"
+make risk-kill-switch CONFIG=configs/live.local.yaml RISK_KILL_SWITCH_ACTION=state RISK_KILL_SWITCH_ARTIFACT=artifacts/risk-kill-switch-state.json
+make risk-kill-switch CONFIG=configs/live.local.yaml RISK_KILL_SWITCH_ACTION=list RISK_KILL_SWITCH_LIMIT=20 RISK_KILL_SWITCH_ARTIFACT=artifacts/risk-kill-switch-events.json
+make risk-kill-switch CONFIG=configs/live.local.yaml RISK_KILL_SWITCH_ACTION=activate RISK_KILL_SWITCH_REASON="operator emergency stop" RISK_KILL_SWITCH_ARTIFACT=artifacts/risk-kill-switch-activate.json
+make risk-kill-switch CONFIG=configs/live.local.yaml RISK_KILL_SWITCH_ACTION=release RISK_KILL_SWITCH_REASON="operator verified recovery" RISK_KILL_SWITCH_ARTIFACT=artifacts/risk-kill-switch-release.json
 make live-health CONFIG=configs/live.local.yaml LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_HEALTH_RUN_ID=live_loop_health_001
 make live-loop CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_FILE=artifacts/live-readiness.json LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json LIVE_DEPLOY_ARTIFACT=artifacts/live-deploy-check.json LIVE_OPS_REPORT_FILE=artifacts/live-ops-report.json LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-loop CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1 LIVE_LOOP_RUN_ID=live_loop_001

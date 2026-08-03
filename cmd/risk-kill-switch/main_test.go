@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +118,7 @@ func TestRunRiskKillSwitchRejectsUnsafeFlagsBeforeSideEffects(t *testing.T) {
 		{name: "untrimmed event id", args: []string{"-action", "list", "-event-id", " risk_kill_switch_0001 "}, wantErrSub: "event-id"},
 		{name: "bad active filter", args: []string{"-action", "list", "-active", "yes"}, wantErrSub: "active"},
 		{name: "limit above max", args: []string{"-action", "list", "-limit", "1001"}, wantErrSub: "limit"},
+		{name: "untrimmed artifact path", args: []string{"-artifact-path", " artifacts/risk-kill-switch.json "}, wantErrSub: "artifact-path"},
 	}
 
 	for _, tt := range tests {
@@ -157,7 +161,11 @@ func TestRunRiskKillSwitchLogsCurrentState(t *testing.T) {
 		UpdatedAt: now.Add(-time.Minute),
 	}}
 	var output bytes.Buffer
-	err = runRiskKillSwitch(context.Background(), []string{"-action", "state"}, riskKillSwitchDependencies{
+	artifactPath := filepath.Join(t.TempDir(), "artifacts", "risk-kill-switch-state.json")
+	err = runRiskKillSwitch(context.Background(), []string{
+		"-action", "state",
+		"-artifact-path", artifactPath,
+	}, riskKillSwitchDependencies{
 		loadConfig: func(string) (*config.Config, error) {
 			return validRiskKillSwitchConfig(), nil
 		},
@@ -181,8 +189,19 @@ func TestRunRiskKillSwitchLogsCurrentState(t *testing.T) {
 	if repo.currentCalls != 1 {
 		t.Fatalf("current calls mismatch: %d", repo.currentCalls)
 	}
+	artifact := readRiskKillSwitchArtifact(t, artifactPath)
+	if artifact.Action != domainrisk.KillSwitchArtifactActionState ||
+		artifact.State == nil ||
+		!artifact.State.Active ||
+		artifact.State.Reason != "operator emergency stop" ||
+		artifact.Query != nil ||
+		artifact.Event != nil ||
+		len(artifact.Events) != 0 {
+		t.Fatalf("state artifact mismatch: %#v", artifact)
+	}
 	for _, want := range []string{
 		`"msg":"risk kill switch state"`,
+		`"msg":"risk kill switch artifact written"`,
 		`"active":true`,
 		`"reason":"operator emergency stop"`,
 		`"source":"operator"`,
@@ -209,11 +228,13 @@ func TestRunRiskKillSwitchListsEvents(t *testing.T) {
 		CreatedAt: now.Add(-time.Minute),
 	}}}
 	var output bytes.Buffer
+	artifactPath := filepath.Join(t.TempDir(), "artifacts", "risk-kill-switch-list.json")
 	err = runRiskKillSwitch(context.Background(), []string{
 		"-action", "list",
 		"-active", "true",
 		"-source", "live_position_drift",
 		"-limit", "5",
+		"-artifact-path", artifactPath,
 	}, riskKillSwitchDependencies{
 		loadConfig: func(string) (*config.Config, error) {
 			return validRiskKillSwitchConfig(), nil
@@ -238,8 +259,22 @@ func TestRunRiskKillSwitchListsEvents(t *testing.T) {
 	if repo.listCalls != 1 || repo.query.Limit != 5 || repo.query.Source != "live_position_drift" || repo.query.Active == nil || !*repo.query.Active {
 		t.Fatalf("list query mismatch: calls=%d query=%#v", repo.listCalls, repo.query)
 	}
+	artifact := readRiskKillSwitchArtifact(t, artifactPath)
+	if artifact.Action != domainrisk.KillSwitchArtifactActionList ||
+		artifact.Query == nil ||
+		artifact.Query.Active == nil ||
+		!*artifact.Query.Active ||
+		artifact.Query.Source != "live_position_drift" ||
+		artifact.Query.Limit != 5 ||
+		len(artifact.Events) != 1 ||
+		artifact.Events[0].EventID != "risk_kill_switch_0001" ||
+		artifact.State != nil ||
+		artifact.Event != nil {
+		t.Fatalf("list artifact mismatch: %#v", artifact)
+	}
 	for _, want := range []string{
 		`"msg":"risk kill switch events"`,
+		`"msg":"risk kill switch artifact written"`,
 		`"events":1`,
 		`"active_filter":true`,
 		`"msg":"risk kill switch event"`,
@@ -287,7 +322,9 @@ func TestRunRiskKillSwitchWritesEventsTableDriven(t *testing.T) {
 
 			repo := &fakeRiskKillSwitchRepository{}
 			var output bytes.Buffer
-			err = runRiskKillSwitch(context.Background(), tt.args, riskKillSwitchDependencies{
+			artifactPath := filepath.Join(t.TempDir(), "artifacts", "risk-kill-switch-write.json")
+			args := append(append([]string{}, tt.args...), "-artifact-path", artifactPath)
+			err = runRiskKillSwitch(context.Background(), args, riskKillSwitchDependencies{
 				loadConfig: func(string) (*config.Config, error) {
 					return validRiskKillSwitchConfig(), nil
 				},
@@ -320,6 +357,23 @@ func TestRunRiskKillSwitchWritesEventsTableDriven(t *testing.T) {
 			}
 			if !strings.Contains(output.String(), tt.wantLog) || !strings.Contains(output.String(), `"event_id":"`+tt.wantID+`"`) {
 				t.Fatalf("expected write log, got\n%s", output.String())
+			}
+			artifact := readRiskKillSwitchArtifact(t, artifactPath)
+			wantAction := domainrisk.KillSwitchArtifactActionRelease
+			if tt.wantActive {
+				wantAction = domainrisk.KillSwitchArtifactActionActivate
+			}
+			if artifact.Action != wantAction ||
+				artifact.Event == nil ||
+				artifact.State == nil ||
+				artifact.Event.Active != tt.wantActive ||
+				artifact.State.Active != tt.wantActive ||
+				artifact.Event.EventID != tt.wantID ||
+				artifact.State.Reason != event.Reason ||
+				artifact.State.Source != event.Source ||
+				artifact.State.UpdatedAt == nil ||
+				!artifact.State.UpdatedAt.Equal(event.CreatedAt.UTC()) {
+				t.Fatalf("write artifact mismatch: %#v", artifact)
 			}
 		})
 	}
@@ -392,4 +446,23 @@ func (r *fakeRiskKillSwitchRepository) ListKillSwitchEvents(_ context.Context, q
 
 func validRiskKillSwitchConfig() *config.Config {
 	return &config.Config{App: config.AppConfig{LogLevel: "info"}}
+}
+
+func readRiskKillSwitchArtifact(t *testing.T, path string) domainrisk.KillSwitchArtifact {
+	t.Helper()
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read risk kill switch artifact: %v", err)
+	}
+	if len(payload) == 0 || payload[len(payload)-1] != '\n' {
+		t.Fatalf("artifact must end with newline, got %q", string(payload))
+	}
+	var artifact domainrisk.KillSwitchArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		t.Fatalf("decode risk kill switch artifact: %v\npayload:\n%s", err, string(payload))
+	}
+	if err := domainrisk.ValidateKillSwitchArtifact(artifact); err != nil {
+		t.Fatalf("validate risk kill switch artifact: %v\npayload:\n%s", err, string(payload))
+	}
+	return artifact
 }
