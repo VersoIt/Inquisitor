@@ -110,6 +110,36 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				assertLiveFirstOrderFlag(t, readiness.Args, "-require-pending=false")
 			},
 		},
+		{
+			name: "position drift opts into ops report exchange check",
+			mutate: func(req *liveFirstOrderCheckRequest) {
+				req.PositionDrift = true
+				req.PositionDriftSymbols = "btcusdt,ethusdt"
+				req.PositionDriftCurrentMaxAge = 3 * time.Second
+				req.PositionDriftBaselineMaxAge = 7 * time.Minute
+			},
+			assert: func(t *testing.T, bundle liveFirstOrderCheckBundle) {
+				ops := liveFirstOrderCommandByName(t, bundle.Commands, "live-ops-report")
+				assertLiveFirstOrderFlag(t, ops.Args, "-position-drift")
+				assertLiveFirstOrderFlagValue(t, ops.Args, "-position-drift-symbols", "BTCUSDT,ETHUSDT")
+				assertLiveFirstOrderFlagValue(t, ops.Args, "-position-drift-current-max-age", "3s")
+				assertLiveFirstOrderFlagValue(t, ops.Args, "-position-drift-baseline-max-age", "7m0s")
+				assertLiveFirstOrderFlag(t, ops.Args, "-fail-on-non-clear")
+			},
+		},
+		{
+			name: "position drift symbols imply drift",
+			mutate: func(req *liveFirstOrderCheckRequest) {
+				req.PositionDriftSymbols = "solusdt"
+			},
+			assert: func(t *testing.T, bundle liveFirstOrderCheckBundle) {
+				ops := liveFirstOrderCommandByName(t, bundle.Commands, "live-ops-report")
+				assertLiveFirstOrderFlag(t, ops.Args, "-position-drift")
+				assertLiveFirstOrderFlagValue(t, ops.Args, "-position-drift-symbols", "SOLUSDT")
+				assertLiveFirstOrderFlagValue(t, ops.Args, "-position-drift-current-max-age", "5s")
+				assertLiveFirstOrderFlagValue(t, ops.Args, "-position-drift-baseline-max-age", "10m0s")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -178,6 +208,18 @@ func TestBuildLiveFirstOrderCheckBundleRejectsUnsafeFlagsTableDriven(t *testing.
 		{name: "invalid ops report age", mutate: func(req *liveFirstOrderCheckRequest) {
 			req.MaxOpsReportAge = 0
 		}, wantErrSub: "max-ops-report-age"},
+		{name: "invalid position drift current age", mutate: func(req *liveFirstOrderCheckRequest) {
+			req.PositionDriftCurrentMaxAge = 0
+		}, wantErrSub: "position-drift-current-max-age"},
+		{name: "invalid position drift baseline age", mutate: func(req *liveFirstOrderCheckRequest) {
+			req.PositionDriftBaselineMaxAge = 0
+		}, wantErrSub: "position-drift-baseline-max-age"},
+		{name: "position drift symbols reject item whitespace", mutate: func(req *liveFirstOrderCheckRequest) {
+			req.PositionDriftSymbols = "BTCUSDT, ETHUSDT"
+		}, wantErrSub: "position-drift-symbols"},
+		{name: "position drift symbols reject duplicates", mutate: func(req *liveFirstOrderCheckRequest) {
+			req.PositionDriftSymbols = "BTCUSDT,btcusdt"
+		}, wantErrSub: "duplicates"},
 	}
 
 	for _, tt := range tests {
@@ -339,29 +381,31 @@ func TestParseLiveFirstOrderPositiveDecimalFlagTableDriven(t *testing.T) {
 
 func validLiveFirstOrderCheckRequest() liveFirstOrderCheckRequest {
 	return liveFirstOrderCheckRequest{
-		GoBinary:                  "go",
-		ConfigPath:                "configs/live.local.yaml",
-		ArtifactDir:               filepath.Join("artifacts", "live-first-order"),
-		DecisionID:                "risk_decision_live_first_order_001",
-		Symbol:                    "BTCUSDT",
-		RunID:                     "live_loop_first_order_001",
-		OrderType:                 "MARKET",
-		SubaccountConfirmed:       true,
-		Execute:                   true,
-		RequirePending:            true,
-		MaxInitialLiveCapitalUSDT: decimal.RequireFromString("100"),
-		MicroCapitalLimitUSDT:     decimal.RequireFromString("100"),
-		ReadinessPendingLimit:     1,
-		ReadinessAuditLimit:       10,
-		AuditLimit:                10,
-		MaxPlanAge:                10 * time.Minute,
-		MaxReadinessAge:           10 * time.Minute,
-		MaxAuditAge:               10 * time.Minute,
-		MaxDeployCheckAge:         10 * time.Minute,
-		MaxOpsReportAge:           10 * time.Minute,
-		MaxIterations:             1,
-		MaxRuntime:                15 * time.Second,
-		IterationTimeout:          10 * time.Second,
+		GoBinary:                    "go",
+		ConfigPath:                  "configs/live.local.yaml",
+		ArtifactDir:                 filepath.Join("artifacts", "live-first-order"),
+		DecisionID:                  "risk_decision_live_first_order_001",
+		Symbol:                      "BTCUSDT",
+		RunID:                       "live_loop_first_order_001",
+		OrderType:                   "MARKET",
+		SubaccountConfirmed:         true,
+		Execute:                     true,
+		RequirePending:              true,
+		MaxInitialLiveCapitalUSDT:   decimal.RequireFromString("100"),
+		MicroCapitalLimitUSDT:       decimal.RequireFromString("100"),
+		ReadinessPendingLimit:       1,
+		ReadinessAuditLimit:         10,
+		AuditLimit:                  10,
+		MaxPlanAge:                  10 * time.Minute,
+		MaxReadinessAge:             10 * time.Minute,
+		MaxAuditAge:                 10 * time.Minute,
+		MaxDeployCheckAge:           10 * time.Minute,
+		MaxOpsReportAge:             10 * time.Minute,
+		PositionDriftCurrentMaxAge:  5 * time.Second,
+		PositionDriftBaselineMaxAge: 10 * time.Minute,
+		MaxIterations:               1,
+		MaxRuntime:                  15 * time.Second,
+		IterationTimeout:            10 * time.Second,
 	}
 }
 

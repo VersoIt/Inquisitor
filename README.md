@@ -595,10 +595,14 @@ go run ./cmd/live-deploy-check -config configs/live.local.yaml -plan-file artifa
 go run ./cmd/live-loop -config configs/live.local.yaml -plan-file artifacts/live-order-plan.json -readiness-file artifacts/live-readiness.json -audit-file artifacts/live-loop-audit.json -deploy-check-file artifacts/live-deploy-check.json -ops-report-file artifacts/live-ops-report.json -subaccount-confirmed -max-initial-live-capital-usdt 100 -max-iterations 1 -max-runtime 15s -iteration-timeout 10s -execute
 ```
 
-To build and verify the same first-order handoff bundle with one operator command, use `live-first-order-check`. It runs `live-order-plan`, `live-readiness`, `live-loop-audit`, `live-deploy-check`, `live-handoff-verify`, and a hard-gated `live-ops-report -fail-on-non-clear`, writes artifacts under `-artifact-dir`, then prints the exact armed `live-loop` command including `-ops-report-file`. It does not run `live-loop` and cannot place an order by itself:
+To build and verify the same first-order handoff bundle with one operator command, use `live-first-order-check`. It runs `live-order-plan`, `live-readiness`, `live-loop-audit`, `live-deploy-check`, `live-handoff-verify`, and a hard-gated `live-ops-report -fail-on-non-clear`, writes artifacts under `-artifact-dir`, then prints the exact armed `live-loop` command including `-ops-report-file`. It does not run `live-loop` and cannot place an order by itself. Add `-position-drift` only when the generated ops report should also make private exchange position reads before first order handoff:
 
 ```powershell
 go run ./cmd/live-first-order-check -config configs/live.local.yaml -decision-id risk_decision_live_001 -symbol BTCUSDT -artifact-dir artifacts/live-first-order -subaccount-confirmed -execute
+```
+
+```powershell
+go run ./cmd/live-first-order-check -config configs/live.local.yaml -decision-id risk_decision_live_001 -symbol BTCUSDT -artifact-dir artifacts/live-first-order -position-drift -position-drift-symbols BTCUSDT,ETHUSDT -subaccount-confirmed -execute
 ```
 
 For FIFO selection, use the same explicit selector source:
@@ -712,6 +716,7 @@ make live-order-plan CONFIG=configs/live.local.yaml LIVE_SELECT_PENDING=1 LIVE_P
 make live-handoff-verify CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_FILE=artifacts/live-readiness.json LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json LIVE_DEPLOY_ARTIFACT=artifacts/live-deploy-check.json LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-deploy-check CONFIG=configs/live.local.yaml LIVE_PLAN_FILE=artifacts/live-order-plan.json LIVE_READINESS_FILE=artifacts/live-readiness.json LIVE_AUDIT_ARTIFACT=artifacts/live-loop-audit.json LIVE_DEPLOY_ARTIFACT=artifacts/live-deploy-check.json LIVE_DECISION_ID=risk_decision_live_001 LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-first-order-check CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
+make live-first-order-check CONFIG=configs/live.local.yaml LIVE_DECISION_ID=risk_decision_live_001 LIVE_PENDING_SYMBOL=BTCUSDT LIVE_OPS_POSITION_DRIFT=1 LIVE_OPS_POSITION_DRIFT_SYMBOLS=BTCUSDT,ETHUSDT LIVE_SUBACCOUNT_CONFIRMED=1 LIVE_EXECUTE=1
 make live-first-order-review CONFIG=configs/live.local.yaml LIVE_FIRST_ORDER_ARTIFACT_DIR=artifacts/live-first-order
 make live-ops-report CONFIG=configs/live.local.yaml LIVE_OPS_SYMBOL=BTCUSDT LIVE_OPS_FIRST_ORDER_REVIEW_ARTIFACT=artifacts/live-first-order/live-first-order-review.json LIVE_OPS_ARTIFACT=artifacts/live-ops-report.json
 make live-ops-report CONFIG=configs/live.local.yaml LIVE_OPS_SYMBOL=BTCUSDT LIVE_OPS_POSITION_DRIFT=1 LIVE_OPS_POSITION_DRIFT_SYMBOLS=BTCUSDT,ETHUSDT LIVE_OPS_FAIL_ON_BLOCKED=1

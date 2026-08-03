@@ -59,32 +59,36 @@ type liveFirstOrderCheckBundle struct {
 }
 
 type liveFirstOrderCheckRequest struct {
-	GoBinary                  string
-	ConfigPath                string
-	ArtifactDir               string
-	DecisionID                string
-	SelectPending             bool
-	Symbol                    string
-	RunID                     string
-	OrderType                 string
-	TimeInForce               string
-	LimitPrice                string
-	SubaccountConfirmed       bool
-	Execute                   bool
-	RequirePending            bool
-	MaxInitialLiveCapitalUSDT decimal.Decimal
-	MicroCapitalLimitUSDT     decimal.Decimal
-	ReadinessPendingLimit     int
-	ReadinessAuditLimit       int
-	AuditLimit                int
-	MaxPlanAge                time.Duration
-	MaxReadinessAge           time.Duration
-	MaxAuditAge               time.Duration
-	MaxDeployCheckAge         time.Duration
-	MaxOpsReportAge           time.Duration
-	MaxIterations             int
-	MaxRuntime                time.Duration
-	IterationTimeout          time.Duration
+	GoBinary                    string
+	ConfigPath                  string
+	ArtifactDir                 string
+	DecisionID                  string
+	SelectPending               bool
+	Symbol                      string
+	RunID                       string
+	OrderType                   string
+	TimeInForce                 string
+	LimitPrice                  string
+	SubaccountConfirmed         bool
+	Execute                     bool
+	RequirePending              bool
+	MaxInitialLiveCapitalUSDT   decimal.Decimal
+	MicroCapitalLimitUSDT       decimal.Decimal
+	ReadinessPendingLimit       int
+	ReadinessAuditLimit         int
+	AuditLimit                  int
+	MaxPlanAge                  time.Duration
+	MaxReadinessAge             time.Duration
+	MaxAuditAge                 time.Duration
+	MaxDeployCheckAge           time.Duration
+	MaxOpsReportAge             time.Duration
+	PositionDrift               bool
+	PositionDriftSymbols        string
+	PositionDriftCurrentMaxAge  time.Duration
+	PositionDriftBaselineMaxAge time.Duration
+	MaxIterations               int
+	MaxRuntime                  time.Duration
+	IterationTimeout            time.Duration
 }
 
 func main() {
@@ -119,6 +123,10 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum audit artifact age accepted by downstream checks")
 	maxDeployCheckAge := flags.Duration("max-deploy-check-age", domainlive.DefaultLiveDeploymentCheckArtifactMaxAge, "maximum deploy-check artifact age accepted by live-loop")
 	maxOpsReportAge := flags.Duration("max-ops-report-age", domainlive.DefaultLiveOpsReportArtifactMaxAge, "maximum ops-report artifact age accepted by live-loop")
+	positionDrift := flags.Bool("position-drift", false, "include private exchange-vs-DB position drift checks in the generated ops report")
+	positionDriftSymbols := flags.String("position-drift-symbols", "", "optional comma-separated symbols for first-order ops position drift; defaults to exchange.symbols from config")
+	positionDriftCurrentMaxAge := flags.Duration("position-drift-current-max-age", domainlive.DefaultPositionDriftCurrentMaxAge, "maximum accepted age for current exchange position snapshots in first-order ops drift")
+	positionDriftBaselineMaxAge := flags.Duration("position-drift-baseline-max-age", domainlive.DefaultPositionDriftBaselineMaxAge, "maximum age before DB position baselines become ATTENTION in first-order ops drift")
 	maxIterations := flags.Int("max-iterations", defaultLiveFirstOrderMaxIterations, "first-order live-loop iteration bound mirrored into deploy-check/live-loop")
 	maxRuntime := flags.Duration("max-runtime", defaultLiveFirstOrderMaxRuntime, "first-order live-loop runtime bound mirrored into deploy-check/live-loop")
 	iterationTimeout := flags.Duration("iteration-timeout", defaultLiveFirstOrderIterationTimeout, "first-order live-loop per-iteration timeout mirrored into deploy-check/live-loop")
@@ -147,32 +155,36 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 	}
 
 	bundle, err := buildLiveFirstOrderCheckBundle(liveFirstOrderCheckRequest{
-		GoBinary:                  *goBinary,
-		ConfigPath:                *configPath,
-		ArtifactDir:               *artifactDir,
-		DecisionID:                *decisionID,
-		SelectPending:             *selectPending,
-		Symbol:                    *symbol,
-		RunID:                     *runID,
-		OrderType:                 *orderType,
-		TimeInForce:               *timeInForce,
-		LimitPrice:                *limitPrice,
-		SubaccountConfirmed:       *subaccountConfirmed,
-		Execute:                   *execute,
-		RequirePending:            *requirePending,
-		MaxInitialLiveCapitalUSDT: maxInitialCapital,
-		MicroCapitalLimitUSDT:     microCapitalLimit,
-		ReadinessPendingLimit:     *readinessPendingLimit,
-		ReadinessAuditLimit:       *readinessAuditLimit,
-		AuditLimit:                *auditLimit,
-		MaxPlanAge:                *maxPlanAge,
-		MaxReadinessAge:           *maxReadinessAge,
-		MaxAuditAge:               *maxAuditAge,
-		MaxDeployCheckAge:         *maxDeployCheckAge,
-		MaxOpsReportAge:           *maxOpsReportAge,
-		MaxIterations:             *maxIterations,
-		MaxRuntime:                *maxRuntime,
-		IterationTimeout:          *iterationTimeout,
+		GoBinary:                    *goBinary,
+		ConfigPath:                  *configPath,
+		ArtifactDir:                 *artifactDir,
+		DecisionID:                  *decisionID,
+		SelectPending:               *selectPending,
+		Symbol:                      *symbol,
+		RunID:                       *runID,
+		OrderType:                   *orderType,
+		TimeInForce:                 *timeInForce,
+		LimitPrice:                  *limitPrice,
+		SubaccountConfirmed:         *subaccountConfirmed,
+		Execute:                     *execute,
+		RequirePending:              *requirePending,
+		MaxInitialLiveCapitalUSDT:   maxInitialCapital,
+		MicroCapitalLimitUSDT:       microCapitalLimit,
+		ReadinessPendingLimit:       *readinessPendingLimit,
+		ReadinessAuditLimit:         *readinessAuditLimit,
+		AuditLimit:                  *auditLimit,
+		MaxPlanAge:                  *maxPlanAge,
+		MaxReadinessAge:             *maxReadinessAge,
+		MaxAuditAge:                 *maxAuditAge,
+		MaxDeployCheckAge:           *maxDeployCheckAge,
+		MaxOpsReportAge:             *maxOpsReportAge,
+		PositionDrift:               *positionDrift,
+		PositionDriftSymbols:        *positionDriftSymbols,
+		PositionDriftCurrentMaxAge:  *positionDriftCurrentMaxAge,
+		PositionDriftBaselineMaxAge: *positionDriftBaselineMaxAge,
+		MaxIterations:               *maxIterations,
+		MaxRuntime:                  *maxRuntime,
+		IterationTimeout:            *iterationTimeout,
 	})
 	if err != nil {
 		return err
@@ -326,6 +338,14 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		"-fail-on-non-clear",
 	)
 	opsReportArgs = appendOptionalLiveFirstOrderFlag(opsReportArgs, "-symbol", normalized.Symbol)
+	if normalized.PositionDrift {
+		opsReportArgs = append(opsReportArgs,
+			"-position-drift",
+			"-position-drift-current-max-age", normalized.PositionDriftCurrentMaxAge.String(),
+			"-position-drift-baseline-max-age", normalized.PositionDriftBaselineMaxAge.String(),
+		)
+	}
+	opsReportArgs = appendOptionalLiveFirstOrderFlag(opsReportArgs, "-position-drift-symbols", normalized.PositionDriftSymbols)
 
 	liveLoopArgs := normalized.goRunArgs("./cmd/live-loop",
 		"-config", normalized.ConfigPath,
@@ -387,6 +407,10 @@ func normalizeLiveFirstOrderCheckRequest(req liveFirstOrderCheckRequest) (liveFi
 	req.OrderType = strings.ToUpper(trimLiveFirstOrderFlag(&problems, "order-type", req.OrderType))
 	req.TimeInForce = strings.ToUpper(trimLiveFirstOrderFlag(&problems, "time-in-force", req.TimeInForce))
 	req.LimitPrice = trimLiveFirstOrderFlag(&problems, "limit-price", req.LimitPrice)
+	req.PositionDriftSymbols = normalizeLiveFirstOrderSymbolListFlag(&problems, "position-drift-symbols", req.PositionDriftSymbols)
+	if req.PositionDriftSymbols != "" {
+		req.PositionDrift = true
+	}
 	if req.GoBinary == "" {
 		problems = append(problems, "go is required")
 	}
@@ -445,6 +469,12 @@ func normalizeLiveFirstOrderCheckRequest(req liveFirstOrderCheckRequest) (liveFi
 	if req.MaxOpsReportAge <= 0 {
 		problems = append(problems, "max-ops-report-age must be positive")
 	}
+	if req.PositionDriftCurrentMaxAge <= 0 {
+		problems = append(problems, "position-drift-current-max-age must be positive")
+	}
+	if req.PositionDriftBaselineMaxAge <= 0 {
+		problems = append(problems, "position-drift-baseline-max-age must be positive")
+	}
 	if req.MaxIterations != 1 {
 		problems = append(problems, "max-iterations must be 1 for the first live order")
 	}
@@ -470,6 +500,40 @@ func trimLiveFirstOrderFlag(problems *[]string, name string, value string) strin
 		*problems = append(*problems, name+" must be trimmed")
 	}
 	return trimmed
+}
+
+func normalizeLiveFirstOrderSymbolListFlag(problems *[]string, name string, value string) string {
+	trimmed := trimLiveFirstOrderFlag(problems, name, value)
+	if trimmed == "" {
+		return ""
+	}
+	seen := make(map[string]struct{})
+	normalized := make([]string, 0, strings.Count(trimmed, ",")+1)
+	for _, raw := range strings.Split(trimmed, ",") {
+		item := strings.TrimSpace(raw)
+		if item == "" {
+			if problems != nil {
+				*problems = append(*problems, name+" must not contain empty items")
+			}
+			continue
+		}
+		if item != raw {
+			if problems != nil {
+				*problems = append(*problems, name+" must be comma-separated without item whitespace")
+			}
+			continue
+		}
+		symbol := strings.ToUpper(item)
+		if _, ok := seen[symbol]; ok {
+			if problems != nil {
+				*problems = append(*problems, name+" must not contain duplicates: "+symbol)
+			}
+			continue
+		}
+		seen[symbol] = struct{}{}
+		normalized = append(normalized, symbol)
+	}
+	return strings.Join(normalized, ",")
 }
 
 func (req liveFirstOrderCheckRequest) goRunArgs(packagePath string, args ...string) []string {
