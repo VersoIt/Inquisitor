@@ -26,6 +26,7 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 			name: "explicit decision bundle",
 			assert: func(t *testing.T, bundle liveFirstOrderCheckBundle) {
 				assertLiveFirstOrderCommandNames(t, bundle.Commands, []string{
+					"risk-kill-switch-state",
 					"live-order-plan",
 					"live-readiness",
 					"live-loop-audit",
@@ -33,6 +34,11 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 					"live-handoff-verify",
 					"live-ops-report",
 				})
+				killSwitch := liveFirstOrderCommandByName(t, bundle.Commands, "risk-kill-switch-state")
+				assertLiveFirstOrderFlagValue(t, killSwitch.Args, "-config", "configs/live.local.yaml")
+				assertLiveFirstOrderFlagValue(t, killSwitch.Args, "-action", "state")
+				assertLiveFirstOrderFlagValue(t, killSwitch.Args, "-artifact-path", bundle.KillSwitchFile)
+
 				plan := liveFirstOrderCommandByName(t, bundle.Commands, "live-order-plan")
 				assertLiveFirstOrderFlagValue(t, plan.Args, "-decision-id", "risk_decision_live_first_order_001")
 				assertLiveFirstOrderMissingFlag(t, plan.Args, "-select-pending")
@@ -73,7 +79,7 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 			},
 			assert: func(t *testing.T, bundle liveFirstOrderCheckBundle) {
 				for _, command := range append(bundle.Commands, bundle.SuggestedLiveLoop) {
-					if command.Name == "live-readiness" || command.Name == "live-loop-audit" || command.Name == "live-ops-report" {
+					if command.Name == "risk-kill-switch-state" || command.Name == "live-readiness" || command.Name == "live-loop-audit" || command.Name == "live-ops-report" {
 						continue
 					}
 					assertLiveFirstOrderFlag(t, command.Args, "-select-pending")
@@ -165,6 +171,7 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				t.Fatalf("build bundle: %v", err)
 			}
 			if bundle.ArtifactDir != filepath.Clean(req.ArtifactDir) ||
+				bundle.KillSwitchFile != filepath.Join(filepath.Clean(req.ArtifactDir), "risk-kill-switch-state.json") ||
 				bundle.PlanFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-order-plan.json") ||
 				bundle.ReadinessFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-readiness.json") ||
 				bundle.AuditFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-loop-audit.json") ||
@@ -275,6 +282,7 @@ func TestRunLiveFirstOrderCheckPrintOnlyDoesNotCreateArtifactsOrRunCommands(t *t
 	}
 	for _, want := range []string{
 		`"msg":"live first-order check planned"`,
+		`"step":"risk-kill-switch-state"`,
 		`"step":"live-order-plan"`,
 		`"step":"live-deploy-check"`,
 		`"msg":"live first-order check final command"`,
@@ -322,7 +330,7 @@ func TestRunLiveFirstOrderCheckExecutesCommandsInOrder(t *testing.T) {
 	if mkdirPath != filepath.Clean(artifactDir) {
 		t.Fatalf("mkdir path mismatch: got %q want %q", mkdirPath, filepath.Clean(artifactDir))
 	}
-	want := []string{"live-order-plan", "live-readiness", "live-loop-audit", "live-deploy-check", "live-handoff-verify", "live-ops-report"}
+	want := []string{"risk-kill-switch-state", "live-order-plan", "live-readiness", "live-loop-audit", "live-deploy-check", "live-handoff-verify", "live-ops-report"}
 	if !reflect.DeepEqual(ran, want) {
 		t.Fatalf("command order mismatch: got %#v want %#v", ran, want)
 	}
@@ -350,7 +358,7 @@ func TestRunLiveFirstOrderCheckStopsOnChildCommandFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "live-readiness") || !strings.Contains(err.Error(), "database unavailable") {
 		t.Fatalf("expected live-readiness failure, got %v", err)
 	}
-	want := []string{"live-order-plan", "live-readiness"}
+	want := []string{"risk-kill-switch-state", "live-order-plan", "live-readiness"}
 	if !reflect.DeepEqual(ran, want) {
 		t.Fatalf("command order mismatch after failure: got %#v want %#v", ran, want)
 	}

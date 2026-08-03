@@ -47,6 +47,7 @@ type liveFirstOrderCommand struct {
 
 type liveFirstOrderCheckBundle struct {
 	ArtifactDir              string
+	KillSwitchFile           string
 	PlanFile                 string
 	ReadinessFile            string
 	AuditFile                string
@@ -201,6 +202,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 	log.Info(
 		"live first-order check planned",
 		"artifact_dir", bundle.ArtifactDir,
+		"kill_switch_file", bundle.KillSwitchFile,
 		"plan_file", bundle.PlanFile,
 		"readiness_file", bundle.ReadinessFile,
 		"audit_file", bundle.AuditFile,
@@ -259,11 +261,18 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		return liveFirstOrderCheckBundle{}, err
 	}
 	planFile := filepath.Join(normalized.ArtifactDir, "live-order-plan.json")
+	killSwitchFile := filepath.Join(normalized.ArtifactDir, "risk-kill-switch-state.json")
 	readinessFile := filepath.Join(normalized.ArtifactDir, "live-readiness.json")
 	auditFile := filepath.Join(normalized.ArtifactDir, "live-loop-audit.json")
 	deployCheckFile := filepath.Join(normalized.ArtifactDir, "live-deploy-check.json")
 	opsReportFile := filepath.Join(normalized.ArtifactDir, "live-ops-report.json")
 	reviewFile := filepath.Join(normalized.ArtifactDir, "live-first-order-review.json")
+
+	killSwitchArgs := normalized.goRunArgs("./cmd/risk-kill-switch",
+		"-config", normalized.ConfigPath,
+		"-action", "state",
+		"-artifact-path", killSwitchFile,
+	)
 
 	planArgs := normalized.goRunArgs("./cmd/live-order-plan",
 		"-config", normalized.ConfigPath,
@@ -383,6 +392,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 
 	return liveFirstOrderCheckBundle{
 		ArtifactDir:     normalized.ArtifactDir,
+		KillSwitchFile:  killSwitchFile,
 		PlanFile:        planFile,
 		ReadinessFile:   readinessFile,
 		AuditFile:       auditFile,
@@ -390,6 +400,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		OpsReportFile:   opsReportFile,
 		ReviewFile:      reviewFile,
 		Commands: []liveFirstOrderCommand{
+			{Name: "risk-kill-switch-state", Args: killSwitchArgs},
 			{Name: "live-order-plan", Args: planArgs},
 			{Name: "live-readiness", Args: readinessArgs},
 			{Name: "live-loop-audit", Args: auditArgs},
