@@ -345,6 +345,9 @@ func TestBuildAndValidateLiveLoopSmokeHandoffChecksArtifactChain(t *testing.T) {
 	if handoff.PlanArtifact.DecisionID != identity.DecisionID ||
 		handoff.PlanArtifact.SubmissionID != identity.SubmissionID ||
 		handoff.ReadinessArtifact.Pending.NextDecisionID != identity.DecisionID ||
+		handoff.KillSwitchPath != defaultLiveLoopSmokeKillSwitchPath ||
+		handoff.KillSwitchArtifact.State == nil ||
+		handoff.KillSwitchArtifact.State.Active ||
 		handoff.AuditArtifact.Summary.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
 		!handoff.DeploymentReport.Ready ||
 		!handoff.DeploymentArtifact.Ready ||
@@ -421,6 +424,14 @@ func TestBuildAndValidateLiveLoopSmokeHandoffChecksArtifactChain(t *testing.T) {
 		IterationTimeout:          defaultLiveLoopSmokeIterationTimeout,
 	}); err != nil {
 		t.Fatalf("deployment artifact handoff: %v", err)
+	}
+	if err := domainrisk.ValidateKillSwitchArtifactHandoff(handoff.KillSwitchArtifact, domainrisk.KillSwitchArtifactHandoffExecution{
+		ConfigPath: "configs/config.example.yaml",
+	}); err != nil {
+		t.Fatalf("kill switch artifact handoff: %v", err)
+	}
+	if err := domainlive.ValidateKillSwitchReadinessArtifactHandoff(handoff.KillSwitchArtifact, handoff.ReadinessArtifact); err != nil {
+		t.Fatalf("kill switch readiness handoff: %v", err)
 	}
 	if riskReader.calls != 2 || pendingReader.calls != 1 || auditReader.calls != 1 || killSwitch.calls != 1 {
 		t.Fatalf("reader calls mismatch: risk=%d pending=%d audit=%d kill=%d", riskReader.calls, pendingReader.calls, auditReader.calls, killSwitch.calls)

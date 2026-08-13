@@ -36,6 +36,7 @@ const (
 	defaultLiveLoopSmokePositionAge        = 5 * time.Second
 	defaultLiveLoopSmokePlanArtifactPath   = "artifacts/live-loop-smoke-plan.json"
 	defaultLiveLoopSmokeReadinessPath      = "artifacts/live-loop-smoke-readiness.json"
+	defaultLiveLoopSmokeKillSwitchPath     = "artifacts/live-loop-smoke-kill-switch-state.json"
 	defaultLiveLoopSmokeAuditArtifactPath  = "artifacts/live-loop-smoke-audit.json"
 	defaultLiveLoopSmokeDeployCheckPath    = "artifacts/live-loop-smoke-deploy-check.json"
 	defaultLiveLoopSmokeAuditLimit         = 10
@@ -68,6 +69,7 @@ type liveLoopSmokeVerification struct {
 type liveLoopSmokeHandoff struct {
 	PlanPath            string
 	ReadinessPath       string
+	KillSwitchPath      string
 	AuditPath           string
 	DeploymentPath      string
 	PlanFileSHA256      string
@@ -75,6 +77,7 @@ type liveLoopSmokeHandoff struct {
 	AuditFileSHA256     string
 	PlanArtifact        domainlive.LiveOrderPlanArtifact
 	ReadinessArtifact   domainlive.LiveReadinessArtifact
+	KillSwitchArtifact  domainrisk.KillSwitchArtifact
 	AuditArtifact       domainlive.LiveLoopAuditArtifact
 	DeploymentReport    domainlive.LiveDeploymentCheckReport
 	DeploymentArtifact  domainlive.LiveDeploymentCheckArtifact
@@ -205,6 +208,8 @@ func runLiveLoopSmoke(ctx context.Context, args []string, deps liveLoopSmokeDepe
 		"next_decision_id", handoff.ReadinessArtifact.Pending.NextDecisionID,
 		"readiness_path", handoff.ReadinessPath,
 		"readiness_sha256", handoff.ReadinessFileSHA256,
+		"kill_switch_path", handoff.KillSwitchPath,
+		"kill_switch_active", handoff.KillSwitchArtifact.State != nil && handoff.KillSwitchArtifact.State.Active,
 		"audit_path", handoff.AuditPath,
 		"audit_sha256", handoff.AuditFileSHA256,
 		"audit_review_status", handoff.AuditArtifact.Summary.ReviewStatus,
@@ -262,6 +267,8 @@ func runLiveLoopSmoke(ctx context.Context, args []string, deps liveLoopSmokeDepe
 		"handoff_ready", handoff.ReadinessArtifact.Ready,
 		"handoff_plan_sha256", handoff.PlanFileSHA256,
 		"handoff_readiness_sha256", handoff.ReadinessFileSHA256,
+		"handoff_kill_switch_path", handoff.KillSwitchPath,
+		"handoff_kill_switch_active", handoff.KillSwitchArtifact.State != nil && handoff.KillSwitchArtifact.State.Active,
 		"handoff_audit_sha256", handoff.AuditFileSHA256,
 		"handoff_audit_review_status", handoff.AuditArtifact.Summary.ReviewStatus,
 		"deploy_check_path", handoff.DeploymentPath,
@@ -530,6 +537,30 @@ func buildAndValidateLiveLoopSmokeHandoff(
 	); err != nil {
 		return liveLoopSmokeHandoff{}, err
 	}
+	killSwitchArtifact, err := domainrisk.BuildKillSwitchArtifact(domainrisk.BuildKillSwitchArtifactRequest{
+		CreatedAt:  handoffCreatedAt,
+		ConfigPath: strings.TrimSpace(configPath),
+		Action:     domainrisk.KillSwitchArtifactActionState,
+		State:      &readinessReport.KillSwitch,
+	})
+	if err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	if err := domainrisk.ValidateKillSwitchArtifactFreshness(
+		killSwitchArtifact,
+		handoffCreatedAt,
+		domainrisk.DefaultKillSwitchArtifactMaxAge,
+	); err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	if err := domainrisk.ValidateKillSwitchArtifactHandoff(killSwitchArtifact, domainrisk.KillSwitchArtifactHandoffExecution{
+		ConfigPath: strings.TrimSpace(configPath),
+	}); err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	if err := domainlive.ValidateKillSwitchReadinessArtifactHandoff(killSwitchArtifact, readinessArtifact); err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
 	readinessFileSHA256, err := liveLoopSmokeReadinessArtifactSHA256(readinessArtifact)
 	if err != nil {
 		return liveLoopSmokeHandoff{}, err
@@ -635,6 +666,7 @@ func buildAndValidateLiveLoopSmokeHandoff(
 	return liveLoopSmokeHandoff{
 		PlanPath:            defaultLiveLoopSmokePlanArtifactPath,
 		ReadinessPath:       defaultLiveLoopSmokeReadinessPath,
+		KillSwitchPath:      defaultLiveLoopSmokeKillSwitchPath,
 		AuditPath:           defaultLiveLoopSmokeAuditArtifactPath,
 		DeploymentPath:      defaultLiveLoopSmokeDeployCheckPath,
 		PlanFileSHA256:      planFileSHA256,
@@ -642,6 +674,7 @@ func buildAndValidateLiveLoopSmokeHandoff(
 		AuditFileSHA256:     auditFileSHA256,
 		PlanArtifact:        planArtifact,
 		ReadinessArtifact:   readinessArtifact,
+		KillSwitchArtifact:  killSwitchArtifact,
 		AuditArtifact:       auditArtifact,
 		DeploymentReport:    deployReport,
 		DeploymentArtifact:  deployArtifact,
