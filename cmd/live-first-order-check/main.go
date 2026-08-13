@@ -16,6 +16,7 @@ import (
 
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	"github.com/VersoIt/Inquisitor/internal/logger"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
 
 const (
@@ -80,6 +81,7 @@ type liveFirstOrderCheckRequest struct {
 	AuditLimit                  int
 	MaxPlanAge                  time.Duration
 	MaxReadinessAge             time.Duration
+	MaxKillSwitchAge            time.Duration
 	MaxAuditAge                 time.Duration
 	MaxDeployCheckAge           time.Duration
 	MaxOpsReportAge             time.Duration
@@ -122,6 +124,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 	auditLimit := flags.Int("audit-limit", defaultLiveFirstOrderAuditLimit, "recent live-loop runs written to live-loop-audit artifact")
 	maxPlanAge := flags.Duration("max-plan-age", domainlive.DefaultLiveOrderPlanArtifactMaxAge, "maximum plan artifact age accepted by downstream checks")
 	maxReadinessAge := flags.Duration("max-readiness-age", domainlive.DefaultLiveReadinessArtifactMaxAge, "maximum readiness artifact age accepted by downstream checks")
+	maxKillSwitchAge := flags.Duration("max-kill-switch-age", domainrisk.DefaultKillSwitchArtifactMaxAge, "maximum Kill Switch artifact age accepted by downstream checks")
 	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum audit artifact age accepted by downstream checks")
 	maxDeployCheckAge := flags.Duration("max-deploy-check-age", domainlive.DefaultLiveDeploymentCheckArtifactMaxAge, "maximum deploy-check artifact age accepted by live-loop")
 	maxOpsReportAge := flags.Duration("max-ops-report-age", domainlive.DefaultLiveOpsReportArtifactMaxAge, "maximum ops-report artifact age accepted by live-loop")
@@ -178,6 +181,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 		AuditLimit:                  *auditLimit,
 		MaxPlanAge:                  *maxPlanAge,
 		MaxReadinessAge:             *maxReadinessAge,
+		MaxKillSwitchAge:            *maxKillSwitchAge,
 		MaxAuditAge:                 *maxAuditAge,
 		MaxDeployCheckAge:           *maxDeployCheckAge,
 		MaxOpsReportAge:             *maxOpsReportAge,
@@ -332,6 +336,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		"-deploy-check-file", deployCheckFile,
 		"-max-plan-age", normalized.MaxPlanAge.String(),
 		"-max-readiness-age", normalized.MaxReadinessAge.String(),
+		"-max-kill-switch-age", normalized.MaxKillSwitchAge.String(),
 		"-max-audit-age", normalized.MaxAuditAge.String(),
 		"-max-deploy-check-age", normalized.MaxDeployCheckAge.String(),
 		"-max-initial-live-capital-usdt", normalized.MaxInitialLiveCapitalUSDT.String(),
@@ -367,10 +372,12 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		"-config", normalized.ConfigPath,
 		"-plan-file", planFile,
 		"-readiness-file", readinessFile,
+		"-kill-switch-file", killSwitchFile,
 		"-audit-file", auditFile,
 		"-deploy-check-file", deployCheckFile,
 		"-max-plan-age", normalized.MaxPlanAge.String(),
 		"-max-readiness-age", normalized.MaxReadinessAge.String(),
+		"-max-kill-switch-age", normalized.MaxKillSwitchAge.String(),
 		"-max-audit-age", normalized.MaxAuditAge.String(),
 		"-max-deploy-check-age", normalized.MaxDeployCheckAge.String(),
 		"-ops-report-file", opsReportFile,
@@ -480,6 +487,9 @@ func normalizeLiveFirstOrderCheckRequest(req liveFirstOrderCheckRequest) (liveFi
 	}
 	if req.MaxReadinessAge <= 0 {
 		problems = append(problems, "max-readiness-age must be positive")
+	}
+	if req.MaxKillSwitchAge <= 0 {
+		problems = append(problems, "max-kill-switch-age must be positive")
 	}
 	if req.MaxAuditAge <= 0 {
 		problems = append(problems, "max-audit-age must be positive")

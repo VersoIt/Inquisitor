@@ -58,11 +58,14 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-deploy-check-file", bundle.DeployCheckFile)
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-ops-report-file", bundle.OpsReportFile)
+				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-kill-switch-file", bundle.KillSwitchFile)
+				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-max-kill-switch-age", "10m0s")
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedLiveLoop.Args, "-run-id", "live_loop_first_order_001")
 				assertLiveFirstOrderFlag(t, bundle.SuggestedLiveLoop.Args, "-execute")
 
 				verify := liveFirstOrderCommandByName(t, bundle.Commands, "live-handoff-verify")
 				assertLiveFirstOrderFlagValue(t, verify.Args, "-kill-switch-file", bundle.KillSwitchFile)
+				assertLiveFirstOrderFlagValue(t, verify.Args, "-max-kill-switch-age", "10m0s")
 
 				ops := liveFirstOrderCommandByName(t, bundle.Commands, "live-ops-report")
 				assertLiveFirstOrderFlagValue(t, ops.Args, "-artifact-path", bundle.OpsReportFile)
@@ -230,6 +233,9 @@ func TestBuildLiveFirstOrderCheckBundleRejectsUnsafeFlagsTableDriven(t *testing.
 		{name: "invalid ops report age", mutate: func(req *liveFirstOrderCheckRequest) {
 			req.MaxOpsReportAge = 0
 		}, wantErrSub: "max-ops-report-age"},
+		{name: "invalid kill switch age", mutate: func(req *liveFirstOrderCheckRequest) {
+			req.MaxKillSwitchAge = 0
+		}, wantErrSub: "max-kill-switch-age"},
 		{name: "invalid position drift current age", mutate: func(req *liveFirstOrderCheckRequest) {
 			req.PositionDriftCurrentMaxAge = 0
 		}, wantErrSub: "position-drift-current-max-age"},
@@ -421,6 +427,7 @@ func validLiveFirstOrderCheckRequest() liveFirstOrderCheckRequest {
 		AuditLimit:                  10,
 		MaxPlanAge:                  10 * time.Minute,
 		MaxReadinessAge:             10 * time.Minute,
+		MaxKillSwitchAge:            10 * time.Minute,
 		MaxAuditAge:                 10 * time.Minute,
 		MaxDeployCheckAge:           10 * time.Minute,
 		MaxOpsReportAge:             10 * time.Minute,

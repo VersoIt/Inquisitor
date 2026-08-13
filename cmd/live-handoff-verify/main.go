@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -177,7 +176,7 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 		}); err != nil {
 			return err
 		}
-		if err := validateLiveHandoffKillSwitchReadiness(killSwitch.Artifact, readiness.Artifact); err != nil {
+		if err := domainlive.ValidateKillSwitchReadinessArtifactHandoff(killSwitch.Artifact, readiness.Artifact); err != nil {
 			return err
 		}
 	}
@@ -397,49 +396,6 @@ func parseLiveHandoffPositiveDecimalFlag(name string, value string) (decimal.Dec
 		return decimal.Zero, fmt.Errorf("%s must be positive", name)
 	}
 	return parsed, nil
-}
-
-func validateLiveHandoffKillSwitchReadiness(
-	artifact domainrisk.KillSwitchArtifact,
-	readiness domainlive.LiveReadinessArtifact,
-) error {
-	if err := domainrisk.ValidateKillSwitchArtifact(artifact); err != nil {
-		return err
-	}
-	if err := domainlive.ValidateLiveReadinessArtifact(readiness); err != nil {
-		return err
-	}
-	var problems []string
-	if artifact.State == nil {
-		problems = append(problems, "kill_switch_file.state is required")
-	} else {
-		if artifact.State.Active != readiness.KillSwitch.Active {
-			problems = append(problems, fmt.Sprintf("kill_switch.active %t does not match readiness kill_switch.active %t", artifact.State.Active, readiness.KillSwitch.Active))
-		}
-		if artifact.State.Reason != readiness.KillSwitch.Reason {
-			problems = append(problems, fmt.Sprintf("kill_switch.reason %q does not match readiness kill_switch.reason %q", artifact.State.Reason, readiness.KillSwitch.Reason))
-		}
-		if artifact.State.Source != readiness.KillSwitch.Source {
-			problems = append(problems, fmt.Sprintf("kill_switch.source %q does not match readiness kill_switch.source %q", artifact.State.Source, readiness.KillSwitch.Source))
-		}
-		if !sameLiveHandoffOptionalTime(artifact.State.UpdatedAt, readiness.KillSwitch.UpdatedAt) {
-			problems = append(problems, "kill_switch.updated_at does not match readiness kill_switch.updated_at")
-		}
-	}
-	if len(problems) > 0 {
-		return errors.New("live handoff kill switch readiness validation failed: " + strings.Join(problems, "; "))
-	}
-	return nil
-}
-
-func sameLiveHandoffOptionalTime(left *time.Time, right *time.Time) bool {
-	if left == nil && right == nil {
-		return true
-	}
-	if left == nil || right == nil {
-		return false
-	}
-	return left.UTC().Equal(right.UTC())
 }
 
 func liveHandoffAuditArtifactCreatedAtLogValue(artifact domainlive.LiveLoopAuditArtifact, ok bool) string {

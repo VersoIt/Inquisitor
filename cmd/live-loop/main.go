@@ -23,6 +23,7 @@ import (
 	bybitrest "github.com/VersoIt/Inquisitor/internal/exchanges/bybit/rest"
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
 	"github.com/VersoIt/Inquisitor/internal/logger"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
@@ -71,6 +72,8 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	maxPlanAge := flags.Duration("max-plan-age", domainlive.DefaultLiveOrderPlanArtifactMaxAge, "maximum accepted age for -plan-file based on submission_created_at")
 	readinessFile := flags.String("readiness-file", "", "optional JSON artifact written by live-readiness; requires a fresh PASS checklist before execution")
 	maxReadinessAge := flags.Duration("max-readiness-age", domainlive.DefaultLiveReadinessArtifactMaxAge, "maximum accepted age for -readiness-file based on created_at")
+	killSwitchFile := flags.String("kill-switch-file", "", "optional JSON artifact written by risk-kill-switch -action state; validates inactive Kill Switch snapshot before execution")
+	maxKillSwitchAge := flags.Duration("max-kill-switch-age", domainrisk.DefaultKillSwitchArtifactMaxAge, "maximum accepted age for -kill-switch-file based on created_at")
 	auditFile := flags.String("audit-file", "", "optional JSON artifact written by live-loop-audit; validates readiness audit verdict before execution")
 	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum accepted age for -audit-file based on created_at")
 	deployCheckFile := flags.String("deploy-check-file", "", "optional JSON artifact written by live-deploy-check; requires a fresh PASS deployment gate before execution")
@@ -106,6 +109,9 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	if *maxReadinessAge <= 0 {
 		return fmt.Errorf("max-readiness-age must be positive")
 	}
+	if *maxKillSwitchAge <= 0 {
+		return fmt.Errorf("max-kill-switch-age must be positive")
+	}
 	if *maxAuditAge <= 0 {
 		return fmt.Errorf("max-audit-age must be positive")
 	}
@@ -121,6 +127,10 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 		return err
 	}
 	readinessArtifact, hasReadinessArtifact, readinessArtifactSHA256, err := loadLiveLoopReadinessArtifact(*readinessFile)
+	if err != nil {
+		return err
+	}
+	killSwitchArtifact, hasKillSwitchArtifact, err := loadLiveLoopKillSwitchArtifact(*killSwitchFile)
 	if err != nil {
 		return err
 	}
@@ -173,6 +183,16 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 	}
 	if hasReadinessArtifact {
 		if err := domainlive.ValidateLiveReadinessArtifactFreshness(readinessArtifact, artifactNow, *maxReadinessAge); err != nil {
+			return err
+		}
+	}
+	if hasKillSwitchArtifact {
+		if err := validateLiveLoopKillSwitchArtifactForExecution(
+			killSwitchArtifact,
+			artifactNow,
+			*maxKillSwitchAge,
+			strings.TrimSpace(*configPath),
+		); err != nil {
 			return err
 		}
 	}
@@ -281,6 +301,11 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 			return err
 		}
 	}
+	if hasReadinessArtifact && hasKillSwitchArtifact {
+		if err := domainlive.ValidateKillSwitchReadinessArtifactHandoff(killSwitchArtifact, readinessArtifact); err != nil {
+			return err
+		}
+	}
 	if hasDeployCheckArtifact && !*selectPending {
 		if err := domainlive.ValidateLiveDeploymentCheckArtifactHandoff(deployCheckArtifact, deployCheckHandoffExecution(selectedDecisionID)); err != nil {
 			return err
@@ -379,6 +404,11 @@ func runLiveLoop(ctx context.Context, args []string, deps liveLoopDependencies) 
 				PendingQuery:       pendingQuery,
 				SelectedDecisionID: selectedDecisionID,
 			}); err != nil {
+				return err
+			}
+		}
+		if hasReadinessArtifact && hasKillSwitchArtifact {
+			if err := domainlive.ValidateKillSwitchReadinessArtifactHandoff(killSwitchArtifact, readinessArtifact); err != nil {
 				return err
 			}
 		}
@@ -583,6 +613,28 @@ func loadLiveLoopReadinessArtifact(path string) (domainlive.LiveReadinessArtifac
 	return artifact, true, hex.EncodeToString(sum[:]), nil
 }
 
+func loadLiveLoopKillSwitchArtifact(path string) (domainrisk.KillSwitchArtifact, bool, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return domainrisk.KillSwitchArtifact{}, false, nil
+	}
+	if path != trimmedPath {
+		return domainrisk.KillSwitchArtifact{}, false, fmt.Errorf("kill-switch-file must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return domainrisk.KillSwitchArtifact{}, false, fmt.Errorf("read kill switch artifact %q: %w", trimmedPath, err)
+	}
+	var artifact domainrisk.KillSwitchArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		return domainrisk.KillSwitchArtifact{}, false, fmt.Errorf("decode kill switch artifact %q: %w", trimmedPath, err)
+	}
+	if err := domainrisk.ValidateKillSwitchArtifact(artifact); err != nil {
+		return domainrisk.KillSwitchArtifact{}, false, err
+	}
+	return artifact, true, nil
+}
+
 func loadLiveLoopAuditArtifact(path string) (domainlive.LiveLoopAuditArtifact, bool, string, error) {
 	trimmedPath := strings.TrimSpace(path)
 	if trimmedPath == "" {
@@ -648,6 +700,23 @@ func loadLiveLoopOpsReportArtifact(path string) (domainlive.LiveOpsReportArtifac
 		return domainlive.LiveOpsReportArtifact{}, false, err
 	}
 	return artifact, true, nil
+}
+
+func validateLiveLoopKillSwitchArtifactForExecution(
+	artifact domainrisk.KillSwitchArtifact,
+	now time.Time,
+	maxAge time.Duration,
+	configPath string,
+) error {
+	if err := domainrisk.ValidateKillSwitchArtifactFreshness(artifact, now, maxAge); err != nil {
+		return err
+	}
+	if err := domainrisk.ValidateKillSwitchArtifactHandoff(artifact, domainrisk.KillSwitchArtifactHandoffExecution{
+		ConfigPath: strings.TrimSpace(configPath),
+	}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func validateLiveLoopOpsReportArtifactForExecution(

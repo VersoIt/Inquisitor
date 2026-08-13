@@ -18,6 +18,7 @@ import (
 
 	"github.com/VersoIt/Inquisitor/internal/config"
 	domainlive "github.com/VersoIt/Inquisitor/internal/live"
+	domainrisk "github.com/VersoIt/Inquisitor/internal/risk"
 )
 
 func TestDeterministicLiveLoopIdentityIsStableAndBybitSafe(t *testing.T) {
@@ -133,6 +134,7 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 	readinessArtifact := liveLoopReadinessArtifact(t, configPath, planFile, planArtifact, now)
 	readinessArtifact.Audit = liveLoopReadinessAuditFromAuditArtifact(auditArtifact)
 	readinessFile := writeLiveLoopReadinessArtifact(t, readinessArtifact)
+	killSwitchFile := writeLiveLoopKillSwitchArtifact(t, liveLoopKillSwitchArtifact(t, now.Add(-time.Second), configPath))
 	deployCheckArtifact := liveLoopDeploymentCheckArtifact(
 		t,
 		now,
@@ -156,6 +158,7 @@ func TestRunLiveLoopProcessesPersistedDecisionThroughBoundedLoop(t *testing.T) {
 		"-config", configPath,
 		"-plan-file", planFile,
 		"-readiness-file", readinessFile,
+		"-kill-switch-file", killSwitchFile,
 		"-audit-file", auditFile,
 		"-deploy-check-file", deployCheckFile,
 		"-subaccount-confirmed",
@@ -546,6 +549,123 @@ func TestRunLiveLoopAuditFileStopsBeforeSideEffects(t *testing.T) {
 			}
 			if opened {
 				t.Fatal("database must not be opened when audit artifact fails before execution")
+			}
+		})
+	}
+}
+
+func TestRunLiveLoopKillSwitchFileGate(t *testing.T) {
+	configPath := writeLiveLoopConfig(t)
+	now := time.Now().UTC()
+	decisionTime := now.Add(-2 * time.Second)
+	validArtifact := liveLoopKillSwitchArtifact(t, now.Add(-time.Second), configPath)
+	activeArtifact := liveLoopKillSwitchArtifactWithState(t, now.Add(-time.Second), configPath, domainrisk.KillSwitchState{
+		Active:    true,
+		Reason:    "operator emergency stop",
+		Source:    "operator",
+		UpdatedAt: now.Add(-time.Second),
+	})
+	staleArtifact := liveLoopKillSwitchArtifact(t, now.Add(-time.Hour), configPath)
+	configMismatch := liveLoopKillSwitchArtifact(t, now.Add(-time.Second), "configs/other-live.yaml")
+	planArtifact := liveLoopPlanArtifact(t, "risk_decision_live_cli_0001", "live_loop_cli_0001", decisionTime)
+	planFile := writeLiveLoopPlanArtifact(t, planArtifact)
+	readinessMismatch := liveLoopReadinessArtifact(t, configPath, planFile, planArtifact, now)
+	releasedAt := now.Add(-time.Minute)
+	readinessMismatch.KillSwitch = domainlive.LiveReadinessArtifactKillSwitch{
+		Reason:    "operator verified recovery",
+		Source:    "operator",
+		UpdatedAt: &releasedAt,
+	}
+	readinessMismatchFile := writeLiveLoopReadinessArtifact(t, readinessMismatch)
+
+	tests := []struct {
+		name       string
+		args       func(string) []string
+		artifact   domainrisk.KillSwitchArtifact
+		wantErrSub string
+		wantOpened bool
+	}{
+		{
+			name: "inactive snapshot passes artifact gate",
+			args: func(killSwitchFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-kill-switch-file", killSwitchFile, "-execute"}
+			},
+			artifact:   validArtifact,
+			wantErrSub: "stop after kill switch artifact validation",
+			wantOpened: true,
+		},
+		{
+			name: "active snapshot stops before db",
+			args: func(killSwitchFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-kill-switch-file", killSwitchFile, "-execute"}
+			},
+			artifact:   activeArtifact,
+			wantErrSub: "inactive",
+		},
+		{
+			name: "stale snapshot stops before db",
+			args: func(killSwitchFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-kill-switch-file", killSwitchFile, "-max-kill-switch-age", "10m", "-execute"}
+			},
+			artifact:   staleArtifact,
+			wantErrSub: "stale",
+		},
+		{
+			name: "config mismatch stops before db",
+			args: func(killSwitchFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-kill-switch-file", killSwitchFile, "-execute"}
+			},
+			artifact:   configMismatch,
+			wantErrSub: "config_path",
+		},
+		{
+			name: "readiness mismatch stops before db",
+			args: func(killSwitchFile string) []string {
+				return []string{
+					"-config", configPath,
+					"-plan-file", planFile,
+					"-readiness-file", readinessMismatchFile,
+					"-kill-switch-file", killSwitchFile,
+					"-execute",
+				}
+			},
+			artifact:   validArtifact,
+			wantErrSub: "kill switch readiness",
+		},
+		{
+			name: "nonpositive max kill switch age stops before db",
+			args: func(killSwitchFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-kill-switch-file", killSwitchFile, "-max-kill-switch-age", "0s", "-execute"}
+			},
+			artifact:   validArtifact,
+			wantErrSub: "max-kill-switch-age",
+		},
+		{
+			name: "untrimmed kill switch path stops before db",
+			args: func(killSwitchFile string) []string {
+				return []string{"-config", configPath, "-decision-id", "risk_decision_live_cli_0001", "-kill-switch-file", " " + killSwitchFile + " ", "-execute"}
+			},
+			artifact:   validArtifact,
+			wantErrSub: "kill-switch-file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opened bool
+			killSwitchFile := writeLiveLoopKillSwitchArtifact(t, tt.artifact)
+			err := runLiveLoop(context.Background(), tt.args(killSwitchFile), liveLoopDependencies{
+				openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+					opened = true
+					return nil, errors.New("stop after kill switch artifact validation")
+				},
+				output: &bytes.Buffer{},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected kill-switch error containing %q, got %v", tt.wantErrSub, err)
+			}
+			if opened != tt.wantOpened {
+				t.Fatalf("database side effect mismatch: opened=%t want=%t", opened, tt.wantOpened)
 			}
 		})
 	}
@@ -1879,6 +1999,23 @@ func writeLiveLoopReadinessArtifact(t *testing.T, artifact domainlive.LiveReadin
 	return path
 }
 
+func writeLiveLoopKillSwitchArtifact(t *testing.T, artifact domainrisk.KillSwitchArtifact) string {
+	t.Helper()
+
+	if err := domainrisk.ValidateKillSwitchArtifact(artifact); err != nil {
+		t.Fatalf("validate kill switch artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal kill switch artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "risk-kill-switch-state.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write kill switch artifact: %v", err)
+	}
+	return path
+}
+
 func writeLiveLoopAuditArtifact(t *testing.T, artifact domainlive.LiveLoopAuditArtifact) string {
 	t.Helper()
 
@@ -1981,6 +2118,32 @@ func liveLoopOpsReportArtifact(
 			Source:    "operator",
 			UpdatedAt: &updatedAt,
 		}
+	}
+	return artifact
+}
+
+func liveLoopKillSwitchArtifact(t *testing.T, createdAt time.Time, configPath string) domainrisk.KillSwitchArtifact {
+	t.Helper()
+
+	return liveLoopKillSwitchArtifactWithState(t, createdAt, configPath, domainrisk.KillSwitchState{})
+}
+
+func liveLoopKillSwitchArtifactWithState(
+	t *testing.T,
+	createdAt time.Time,
+	configPath string,
+	state domainrisk.KillSwitchState,
+) domainrisk.KillSwitchArtifact {
+	t.Helper()
+
+	artifact, err := domainrisk.BuildKillSwitchArtifact(domainrisk.BuildKillSwitchArtifactRequest{
+		CreatedAt:  createdAt.UTC(),
+		ConfigPath: configPath,
+		Action:     domainrisk.KillSwitchArtifactActionState,
+		State:      &state,
+	})
+	if err != nil {
+		t.Fatalf("build kill switch artifact: %v", err)
 	}
 	return artifact
 }
