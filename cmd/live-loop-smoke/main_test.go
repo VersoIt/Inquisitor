@@ -351,7 +351,8 @@ func TestBuildAndValidateLiveLoopSmokeHandoffChecksArtifactChain(t *testing.T) {
 		handoff.AuditArtifact.Summary.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
 		!handoff.DeploymentReport.Ready ||
 		!handoff.DeploymentArtifact.Ready ||
-		handoff.DeploymentArtifact.SchemaVersion != domainlive.LiveDeploymentCheckArtifactSchemaVersion {
+		handoff.DeploymentArtifact.SchemaVersion != domainlive.LiveDeploymentCheckArtifactSchemaVersion ||
+		handoff.OpsReportArtifact.Status != domainlive.LiveOpsStatusClear {
 		t.Fatalf("handoff summary mismatch: %#v", handoff)
 	}
 	for _, tt := range []struct {
@@ -400,8 +401,25 @@ func TestBuildAndValidateLiveLoopSmokeHandoffChecksArtifactChain(t *testing.T) {
 		handoff.ReadinessArtifact.PlanFile.SHA256 != handoff.PlanFileSHA256 ||
 		handoff.DeploymentPath != defaultLiveLoopSmokeDeployCheckPath ||
 		handoff.DeploymentArtifact.Execution.SelectedDecisionID != identity.DecisionID ||
-		handoff.DeploymentArtifact.Execution.MaxInitialLiveCapitalUSDT != "100" {
+		handoff.DeploymentArtifact.Execution.MaxInitialLiveCapitalUSDT != "100" ||
+		handoff.OpsReportPath != defaultLiveLoopSmokeOpsReportPath ||
+		len(handoff.OpsReportFileSHA256) != 64 {
 		t.Fatalf("artifact linkage mismatch: %#v", handoff)
+	}
+	if handoff.OpsReportArtifact.SchemaVersion != domainlive.LiveOpsReportArtifactSchemaVersion ||
+		handoff.OpsReportArtifact.ConfigPath != "configs/config.example.yaml" ||
+		handoff.OpsReportArtifact.Pending.Limit != 1 ||
+		handoff.OpsReportArtifact.Pending.NextDecisionID != identity.DecisionID ||
+		handoff.OpsReportArtifact.Audit.ReviewStatus != domainlive.LiveLoopAuditReviewStatusClear ||
+		handoff.OpsReportArtifact.KillSwitch.Active {
+		t.Fatalf("ops report artifact mismatch: %#v", handoff.OpsReportArtifact)
+	}
+	if err := domainlive.ValidateLiveOpsReportArtifactFreshness(
+		handoff.OpsReportArtifact,
+		handoff.OpsReportArtifact.CreatedAt,
+		domainlive.DefaultLiveOpsReportArtifactMaxAge,
+	); err != nil {
+		t.Fatalf("ops report freshness: %v", err)
 	}
 	if err := domainlive.ValidateLiveDeploymentCheckArtifactHandoff(handoff.DeploymentArtifact, domainlive.LiveDeploymentCheckArtifactHandoffExecution{
 		ConfigPath:                "configs/config.example.yaml",
@@ -433,8 +451,78 @@ func TestBuildAndValidateLiveLoopSmokeHandoffChecksArtifactChain(t *testing.T) {
 	if err := domainlive.ValidateKillSwitchReadinessArtifactHandoff(handoff.KillSwitchArtifact, handoff.ReadinessArtifact); err != nil {
 		t.Fatalf("kill switch readiness handoff: %v", err)
 	}
-	if riskReader.calls != 2 || pendingReader.calls != 1 || auditReader.calls != 1 || killSwitch.calls != 1 {
+	if riskReader.calls != 2 || pendingReader.calls != 2 || auditReader.calls != 2 || killSwitch.calls != 2 {
 		t.Fatalf("reader calls mismatch: risk=%d pending=%d audit=%d kill=%d", riskReader.calls, pendingReader.calls, auditReader.calls, killSwitch.calls)
+	}
+}
+
+func TestBuildAndValidateLiveLoopSmokeOpsReportTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	cfg := liveLoopSmokeTestConfig()
+	decision := liveLoopSmokeDecision(defaultLiveLoopSmokeDecisionID, &cfg, now)
+
+	tests := []struct {
+		name       string
+		pending    []domainlive.PendingLiveDecision
+		killSwitch domainrisk.KillSwitchState
+		wantStatus domainlive.LiveOpsStatus
+		wantErrSub string
+	}{
+		{
+			name:       "clear when pending decision audit and kill switch are healthy",
+			pending:    []domainlive.PendingLiveDecision{{Decision: decision}},
+			wantStatus: domainlive.LiveOpsStatusClear,
+		},
+		{
+			name:       "attention is rejected when no pending decision is visible",
+			wantStatus: domainlive.LiveOpsStatusAttention,
+			wantErrSub: string(domainlive.LiveOpsStatusAttention),
+		},
+		{
+			name:    "blocked is rejected when kill switch is active",
+			pending: []domainlive.PendingLiveDecision{{Decision: decision}},
+			killSwitch: domainrisk.KillSwitchState{
+				Active:    true,
+				Reason:    "operator pause",
+				Source:    "operator",
+				UpdatedAt: now.Add(-time.Minute),
+			},
+			wantStatus: domainlive.LiveOpsStatusBlocked,
+			wantErrSub: string(domainlive.LiveOpsStatusBlocked),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := applive.NewService(
+				applive.WithPendingLiveDecisionReader(&fakeLiveLoopSmokePendingReader{candidates: tt.pending}),
+				applive.WithLiveLoopAuditReader(&fakeLiveLoopSmokeAuditReader{}),
+				applive.WithKillSwitchRepository(&fakeLiveLoopSmokeKillSwitch{state: tt.killSwitch}),
+			)
+
+			artifact, err := buildAndValidateLiveLoopSmokeOpsReport(
+				context.Background(),
+				service,
+				"configs/config.example.yaml",
+				"btcusdt",
+				now,
+			)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("build ops report: %v", err)
+			}
+			if artifact.Status != tt.wantStatus ||
+				artifact.Pending.Symbol != "BTCUSDT" ||
+				artifact.Pending.Limit != 1 ||
+				artifact.Audit.Limit != defaultLiveLoopSmokeAuditLimit {
+				t.Fatalf("ops artifact mismatch: %#v", artifact)
+			}
+		})
 	}
 }
 

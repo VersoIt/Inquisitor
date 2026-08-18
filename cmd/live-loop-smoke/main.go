@@ -39,6 +39,7 @@ const (
 	defaultLiveLoopSmokeKillSwitchPath     = "artifacts/live-loop-smoke-kill-switch-state.json"
 	defaultLiveLoopSmokeAuditArtifactPath  = "artifacts/live-loop-smoke-audit.json"
 	defaultLiveLoopSmokeDeployCheckPath    = "artifacts/live-loop-smoke-deploy-check.json"
+	defaultLiveLoopSmokeOpsReportPath      = "artifacts/live-loop-smoke-ops-report.json"
 	defaultLiveLoopSmokeAuditLimit         = 10
 )
 
@@ -72,15 +73,18 @@ type liveLoopSmokeHandoff struct {
 	KillSwitchPath      string
 	AuditPath           string
 	DeploymentPath      string
+	OpsReportPath       string
 	PlanFileSHA256      string
 	ReadinessFileSHA256 string
 	AuditFileSHA256     string
+	OpsReportFileSHA256 string
 	PlanArtifact        domainlive.LiveOrderPlanArtifact
 	ReadinessArtifact   domainlive.LiveReadinessArtifact
 	KillSwitchArtifact  domainrisk.KillSwitchArtifact
 	AuditArtifact       domainlive.LiveLoopAuditArtifact
 	DeploymentReport    domainlive.LiveDeploymentCheckReport
 	DeploymentArtifact  domainlive.LiveDeploymentCheckArtifact
+	OpsReportArtifact   domainlive.LiveOpsReportArtifact
 }
 
 func main() {
@@ -217,6 +221,10 @@ func runLiveLoopSmoke(ctx context.Context, args []string, deps liveLoopSmokeDepe
 		"deploy_check_schema_version", handoff.DeploymentArtifact.SchemaVersion,
 		"deploy_check_ready", handoff.DeploymentArtifact.Ready,
 		"deploy_check_failed", handoff.DeploymentArtifact.Summary.Failed,
+		"ops_report_path", handoff.OpsReportPath,
+		"ops_report_sha256", handoff.OpsReportFileSHA256,
+		"ops_report_status", handoff.OpsReportArtifact.Status,
+		"ops_report_failed", handoff.OpsReportArtifact.Summary.Failed,
 	)
 	applive.WithLiveLoopIterationRunner(applive.NewPersistedDecisionLiveLoopIterationRunner(service, applive.PersistedDecisionLiveLoopOrder{
 		DecisionID:    identity.DecisionID,
@@ -275,6 +283,9 @@ func runLiveLoopSmoke(ctx context.Context, args []string, deps liveLoopSmokeDepe
 		"deploy_check_schema_version", handoff.DeploymentArtifact.SchemaVersion,
 		"deploy_check_ready", handoff.DeploymentArtifact.Ready,
 		"deploy_check_failed", handoff.DeploymentArtifact.Summary.Failed,
+		"handoff_ops_report_sha256", handoff.OpsReportFileSHA256,
+		"handoff_ops_report_status", handoff.OpsReportArtifact.Status,
+		"handoff_ops_report_failed", handoff.OpsReportArtifact.Summary.Failed,
 		"uses_fake_exchange", true,
 		"require_live_config", *requireLiveConfig,
 	)
@@ -660,6 +671,20 @@ func buildAndValidateLiveLoopSmokeHandoff(
 	}); err != nil {
 		return liveLoopSmokeHandoff{}, err
 	}
+	opsReportArtifact, err := buildAndValidateLiveLoopSmokeOpsReport(
+		ctx,
+		service,
+		configPath,
+		planArtifact.Symbol,
+		handoffCreatedAt,
+	)
+	if err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
+	opsReportFileSHA256, err := liveLoopSmokeOpsReportArtifactSHA256(opsReportArtifact)
+	if err != nil {
+		return liveLoopSmokeHandoff{}, err
+	}
 	if !readinessReport.Ready {
 		return liveLoopSmokeHandoff{}, fmt.Errorf("live-loop smoke readiness handoff is not ready")
 	}
@@ -669,16 +694,62 @@ func buildAndValidateLiveLoopSmokeHandoff(
 		KillSwitchPath:      defaultLiveLoopSmokeKillSwitchPath,
 		AuditPath:           defaultLiveLoopSmokeAuditArtifactPath,
 		DeploymentPath:      defaultLiveLoopSmokeDeployCheckPath,
+		OpsReportPath:       defaultLiveLoopSmokeOpsReportPath,
 		PlanFileSHA256:      planFileSHA256,
 		ReadinessFileSHA256: readinessFileSHA256,
 		AuditFileSHA256:     auditFileSHA256,
+		OpsReportFileSHA256: opsReportFileSHA256,
 		PlanArtifact:        planArtifact,
 		ReadinessArtifact:   readinessArtifact,
 		KillSwitchArtifact:  killSwitchArtifact,
 		AuditArtifact:       auditArtifact,
 		DeploymentReport:    deployReport,
 		DeploymentArtifact:  deployArtifact,
+		OpsReportArtifact:   opsReportArtifact,
 	}, nil
+}
+
+func buildAndValidateLiveLoopSmokeOpsReport(
+	ctx context.Context,
+	service *applive.Service,
+	configPath string,
+	pendingSymbol string,
+	createdAt time.Time,
+) (domainlive.LiveOpsReportArtifact, error) {
+	if service == nil {
+		return domainlive.LiveOpsReportArtifact{}, fmt.Errorf("live-loop smoke ops report requires service")
+	}
+	report, err := service.BuildLiveOpsReport(ctx, applive.LiveOpsReportRequest{
+		PendingSymbol: strings.ToUpper(strings.TrimSpace(pendingSymbol)),
+		PendingLimit:  1,
+		AuditLimit:    defaultLiveLoopSmokeAuditLimit,
+	})
+	if err != nil {
+		return domainlive.LiveOpsReportArtifact{}, fmt.Errorf("build live-loop smoke ops report: %w", err)
+	}
+	artifact, err := applive.BuildLiveOpsReportArtifact(applive.BuildLiveOpsReportArtifactRequest{
+		Report:     report,
+		CreatedAt:  createdAt,
+		ConfigPath: strings.TrimSpace(configPath),
+	})
+	if err != nil {
+		return domainlive.LiveOpsReportArtifact{}, err
+	}
+	if err := domainlive.ValidateLiveOpsReportArtifactFreshness(
+		artifact,
+		createdAt,
+		domainlive.DefaultLiveOpsReportArtifactMaxAge,
+	); err != nil {
+		return domainlive.LiveOpsReportArtifact{}, err
+	}
+	if artifact.Status != domainlive.LiveOpsStatusClear {
+		return domainlive.LiveOpsReportArtifact{}, fmt.Errorf(
+			"live-loop smoke ops report must be CLEAR before bounded loop: status=%s failed_checks=%s",
+			artifact.Status,
+			strings.Join(artifact.FailedChecks, ", "),
+		)
+	}
+	return artifact, nil
 }
 
 func liveLoopSmokeReadinessRequestFromConfig(
@@ -750,6 +821,13 @@ func liveLoopSmokeAuditArtifactSHA256(artifact domainlive.LiveLoopAuditArtifact)
 		return "", err
 	}
 	return liveLoopSmokeArtifactSHA256("audit", artifact)
+}
+
+func liveLoopSmokeOpsReportArtifactSHA256(artifact domainlive.LiveOpsReportArtifact) (string, error) {
+	if err := domainlive.ValidateLiveOpsReportArtifact(artifact); err != nil {
+		return "", err
+	}
+	return liveLoopSmokeArtifactSHA256("ops report", artifact)
 }
 
 func liveLoopSmokeArtifactSHA256(kind string, artifact any) (string, error) {
