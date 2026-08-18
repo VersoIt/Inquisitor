@@ -45,6 +45,11 @@ type liveHandoffKillSwitchArtifactFile struct {
 	SHA256   string
 }
 
+type liveHandoffOpsReportArtifactFile struct {
+	Artifact domainlive.LiveOpsReportArtifact
+	SHA256   string
+}
+
 func main() {
 	if err := runLiveHandoffVerify(context.Background(), os.Args[1:], liveHandoffVerifyDependencies{}); err != nil {
 		slog.Error("live handoff verify failed", "error", err)
@@ -63,11 +68,13 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 	killSwitchFile := flags.String("kill-switch-file", "", "optional JSON artifact written by risk-kill-switch -action state; validates inactive Kill Switch snapshot")
 	auditFile := flags.String("audit-file", "", "optional JSON artifact written by live-loop-audit; validates readiness audit verdict")
 	deployCheckFile := flags.String("deploy-check-file", "", "optional JSON artifact written by live-deploy-check; validates final go/no-go report")
+	opsReportFile := flags.String("ops-report-file", "", "optional JSON artifact written by live-ops-report; validates final CLEAR operational report")
 	maxPlanAge := flags.Duration("max-plan-age", domainlive.DefaultLiveOrderPlanArtifactMaxAge, "maximum accepted age for -plan-file based on submission_created_at")
 	maxReadinessAge := flags.Duration("max-readiness-age", domainlive.DefaultLiveReadinessArtifactMaxAge, "maximum accepted age for -readiness-file based on created_at")
 	maxKillSwitchAge := flags.Duration("max-kill-switch-age", domainrisk.DefaultKillSwitchArtifactMaxAge, "maximum accepted age for -kill-switch-file based on created_at")
 	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum accepted age for -audit-file based on created_at")
 	maxDeployCheckAge := flags.Duration("max-deploy-check-age", domainlive.DefaultLiveDeploymentCheckArtifactMaxAge, "maximum accepted age for -deploy-check-file based on created_at")
+	maxOpsReportAge := flags.Duration("max-ops-report-age", domainlive.DefaultLiveOpsReportArtifactMaxAge, "maximum accepted age for -ops-report-file based on created_at")
 	decisionID := flags.String("decision-id", "", "optional explicit selected decision id; defaults to the plan artifact decision_id")
 	selectPending := flags.Bool("select-pending", false, "verify the handoff for live-loop -select-pending mode")
 	pendingSymbol := flags.String("pending-symbol", "", "optional symbol filter used with -select-pending; defaults from the plan artifact pending_symbol")
@@ -99,6 +106,9 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 	if *maxDeployCheckAge <= 0 {
 		return fmt.Errorf("max-deploy-check-age must be positive")
 	}
+	if *maxOpsReportAge <= 0 {
+		return fmt.Errorf("max-ops-report-age must be positive")
+	}
 	maxInitialCapital, err := parseLiveHandoffPositiveDecimalFlag("max-initial-live-capital-usdt", *maxInitialCapitalValue)
 	if err != nil {
 		return err
@@ -120,6 +130,10 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 		return err
 	}
 	deployCheckArtifact, hasDeployCheckArtifact, err := loadLiveHandoffDeploymentCheckArtifact(*deployCheckFile)
+	if err != nil {
+		return err
+	}
+	opsReport, hasOpsReportArtifact, err := loadLiveHandoffOpsReportArtifactFile(*opsReportFile)
 	if err != nil {
 		return err
 	}
@@ -145,6 +159,11 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 	}
 	if hasDeployCheckArtifact {
 		if err := domainlive.ValidateLiveDeploymentCheckArtifactFreshness(deployCheckArtifact, now, *maxDeployCheckAge); err != nil {
+			return err
+		}
+	}
+	if hasOpsReportArtifact {
+		if err := domainlive.ValidateLiveOpsReportArtifactFreshness(opsReport.Artifact, now, *maxOpsReportAge); err != nil {
 			return err
 		}
 	}
@@ -206,6 +225,13 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 			return err
 		}
 	}
+	if hasOpsReportArtifact {
+		if err := domainlive.ValidateLiveOpsReportArtifactHandoff(opsReport.Artifact, domainlive.LiveOpsReportArtifactHandoffExecution{
+			ConfigPath: strings.TrimSpace(*configPath),
+		}); err != nil {
+			return err
+		}
+	}
 
 	effectiveLogLevel := strings.TrimSpace(*logLevel)
 	if effectiveLogLevel == "" {
@@ -223,6 +249,9 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 		"audit_file", strings.TrimSpace(*auditFile),
 		"deploy_check_file", strings.TrimSpace(*deployCheckFile),
 		"deploy_check_ready", hasDeployCheckArtifact && deployCheckArtifact.Ready,
+		"ops_report_file", strings.TrimSpace(*opsReportFile),
+		"ops_report_verified", hasOpsReportArtifact,
+		"ops_report_status", liveHandoffOpsReportArtifactStatusLogValue(opsReport, hasOpsReportArtifact),
 		"source", plan.Artifact.Source,
 		"select_pending", *selectPending,
 		"pending_symbol", pendingQuery.Symbol,
@@ -237,6 +266,8 @@ func runLiveHandoffVerify(ctx context.Context, args []string, deps liveHandoffVe
 		"kill_switch_created_at", liveHandoffKillSwitchArtifactCreatedAtLogValue(killSwitch, hasKillSwitchArtifact),
 		"audit_created_at", liveHandoffAuditArtifactCreatedAtLogValue(audit.Artifact, hasAuditArtifact),
 		"deploy_check_created_at", liveHandoffDeploymentCheckArtifactCreatedAtLogValue(deployCheckArtifact, hasDeployCheckArtifact),
+		"ops_report_created_at", liveHandoffOpsReportArtifactCreatedAtLogValue(opsReport, hasOpsReportArtifact),
+		"ops_report_sha256", liveHandoffOpsReportArtifactSHA256LogValue(opsReport, hasOpsReportArtifact),
 		"plan_submission_created_at", plan.Artifact.SubmissionCreatedAt.Format(time.RFC3339Nano),
 	)
 	return nil
@@ -380,6 +411,32 @@ func loadLiveHandoffDeploymentCheckArtifact(path string) (domainlive.LiveDeploym
 	return artifact, true, nil
 }
 
+func loadLiveHandoffOpsReportArtifactFile(path string) (liveHandoffOpsReportArtifactFile, bool, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return liveHandoffOpsReportArtifactFile{}, false, nil
+	}
+	if path != trimmedPath {
+		return liveHandoffOpsReportArtifactFile{}, false, fmt.Errorf("ops-report-file must be trimmed")
+	}
+	payload, err := os.ReadFile(trimmedPath)
+	if err != nil {
+		return liveHandoffOpsReportArtifactFile{}, false, fmt.Errorf("read live ops report artifact %q: %w", trimmedPath, err)
+	}
+	var artifact domainlive.LiveOpsReportArtifact
+	if err := json.Unmarshal(payload, &artifact); err != nil {
+		return liveHandoffOpsReportArtifactFile{}, false, fmt.Errorf("decode live ops report artifact %q: %w", trimmedPath, err)
+	}
+	if err := domainlive.ValidateLiveOpsReportArtifact(artifact); err != nil {
+		return liveHandoffOpsReportArtifactFile{}, false, err
+	}
+	sum := sha256.Sum256(payload)
+	return liveHandoffOpsReportArtifactFile{
+		Artifact: artifact,
+		SHA256:   hex.EncodeToString(sum[:]),
+	}, true, nil
+}
+
 func parseLiveHandoffPositiveDecimalFlag(name string, value string) (decimal.Decimal, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -424,4 +481,25 @@ func liveHandoffDeploymentCheckArtifactCreatedAtLogValue(artifact domainlive.Liv
 		return ""
 	}
 	return artifact.CreatedAt.Format(time.RFC3339Nano)
+}
+
+func liveHandoffOpsReportArtifactStatusLogValue(file liveHandoffOpsReportArtifactFile, ok bool) string {
+	if !ok {
+		return ""
+	}
+	return string(file.Artifact.Status)
+}
+
+func liveHandoffOpsReportArtifactCreatedAtLogValue(file liveHandoffOpsReportArtifactFile, ok bool) string {
+	if !ok {
+		return ""
+	}
+	return file.Artifact.CreatedAt.Format(time.RFC3339Nano)
+}
+
+func liveHandoffOpsReportArtifactSHA256LogValue(file liveHandoffOpsReportArtifactFile, ok bool) string {
+	if !ok {
+		return ""
+	}
+	return file.SHA256
 }

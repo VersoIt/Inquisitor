@@ -728,18 +728,9 @@ func validateLiveLoopOpsReportArtifactForExecution(
 	if err := domainlive.ValidateLiveOpsReportArtifactFreshness(artifact, now, maxAge); err != nil {
 		return err
 	}
-	trimmedConfigPath := strings.TrimSpace(configPath)
-	if artifact.ConfigPath != trimmedConfigPath {
-		return fmt.Errorf("ops-report-file config_path %q does not match -config %q", artifact.ConfigPath, trimmedConfigPath)
-	}
-	if artifact.Status != domainlive.LiveOpsStatusClear {
-		return fmt.Errorf(
-			"ops-report-file must be CLEAR before live loop execution: status=%s failed_checks=%s",
-			artifact.Status,
-			strings.Join(artifact.FailedChecks, ","),
-		)
-	}
-	return nil
+	return domainlive.ValidateLiveOpsReportArtifactHandoff(artifact, domainlive.LiveOpsReportArtifactHandoffExecution{
+		ConfigPath: strings.TrimSpace(configPath),
+	})
 }
 
 func applyLiveLoopPlanArtifact(

@@ -119,6 +119,10 @@ type LiveOpsReportArtifactFirstOrderReview struct {
 	LatestPositionSize string                              `json:"latest_position_size,omitempty"`
 }
 
+type LiveOpsReportArtifactHandoffExecution struct {
+	ConfigPath string
+}
+
 func ValidateLiveOpsReportArtifact(artifact LiveOpsReportArtifact) error {
 	var problems []string
 	if artifact.SchemaVersion != LiveOpsReportArtifactSchemaVersion {
@@ -194,6 +198,41 @@ func ValidateLiveOpsReportArtifact(artifact LiveOpsReportArtifact) error {
 	}
 	if len(problems) > 0 {
 		return errors.New("live ops report artifact validation failed: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+func ValidateLiveOpsReportArtifactHandoff(
+	artifact LiveOpsReportArtifact,
+	execution LiveOpsReportArtifactHandoffExecution,
+) error {
+	if err := ValidateLiveOpsReportArtifact(artifact); err != nil {
+		return err
+	}
+	var problems []string
+	if strings.TrimSpace(execution.ConfigPath) == "" {
+		problems = append(problems, "execution config_path is required")
+	} else if !sameLiveReadinessHandoffPath(artifact.ConfigPath, execution.ConfigPath) {
+		problems = append(problems, fmt.Sprintf(
+			"config_path %q does not match execution config %q",
+			artifact.ConfigPath,
+			strings.TrimSpace(execution.ConfigPath),
+		))
+	}
+	if artifact.Status != LiveOpsStatusClear {
+		problems = append(problems, fmt.Sprintf(
+			"status must be CLEAR before live handoff, got %s",
+			artifact.Status,
+		))
+	}
+	if artifact.Summary.Warned != 0 {
+		problems = append(problems, fmt.Sprintf("warnings must be zero, got %d", artifact.Summary.Warned))
+	}
+	if artifact.Summary.Failed != 0 {
+		problems = append(problems, fmt.Sprintf("failed checks must be zero, got %d", artifact.Summary.Failed))
+	}
+	if len(problems) > 0 {
+		return errors.New("live ops report artifact handoff validation failed: " + strings.Join(problems, "; "))
 	}
 	return nil
 }

@@ -139,6 +139,91 @@ func TestValidateLiveOpsReportArtifactFreshnessTableDriven(t *testing.T) {
 	}
 }
 
+func TestValidateLiveOpsReportArtifactHandoffTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	valid := validLiveOpsReportArtifact(now)
+
+	tests := []struct {
+		name       string
+		artifact   domainlive.LiveOpsReportArtifact
+		execution  domainlive.LiveOpsReportArtifactHandoffExecution
+		wantErrSub string
+	}{
+		{
+			name:      "valid clear ops report handoff",
+			artifact:  valid,
+			execution: domainlive.LiveOpsReportArtifactHandoffExecution{ConfigPath: "configs/live.local.yaml"},
+		},
+		{
+			name: "config mismatch",
+			artifact: mutateLiveOpsReportArtifact(valid, func(a *domainlive.LiveOpsReportArtifact) {
+				a.ConfigPath = "configs/other-live.yaml"
+			}),
+			execution:  domainlive.LiveOpsReportArtifactHandoffExecution{ConfigPath: "configs/live.local.yaml"},
+			wantErrSub: "config_path",
+		},
+		{
+			name:       "missing execution config",
+			artifact:   valid,
+			execution:  domainlive.LiveOpsReportArtifactHandoffExecution{},
+			wantErrSub: "execution config_path",
+		},
+		{
+			name: "attention is not executable",
+			artifact: mutateLiveOpsReportArtifact(valid, func(a *domainlive.LiveOpsReportArtifact) {
+				a.Checks[1].Status = domainlive.ReadinessCheckStatusWarn
+				a.Checks[1].Details = "no pending approved LIVE decisions without submissions"
+				a.Status = domainlive.LiveOpsStatusAttention
+				a.Summary.Passed--
+				a.Summary.Warned++
+			}),
+			execution:  domainlive.LiveOpsReportArtifactHandoffExecution{ConfigPath: "configs/live.local.yaml"},
+			wantErrSub: "CLEAR",
+		},
+		{
+			name: "blocked is not executable",
+			artifact: mutateLiveOpsReportArtifact(valid, func(a *domainlive.LiveOpsReportArtifact) {
+				a.Checks[0].Status = domainlive.ReadinessCheckStatusFail
+				a.Checks[0].Details = "kill switch active"
+				a.FailedChecks = []string{a.Checks[0].Name}
+				a.Status = domainlive.LiveOpsStatusBlocked
+				a.Summary.Passed--
+				a.Summary.Failed++
+				a.KillSwitch.Active = true
+				a.KillSwitch.Reason = "operator pause"
+				a.KillSwitch.Source = "operator"
+				updatedAt := now.Add(-time.Minute)
+				a.KillSwitch.UpdatedAt = &updatedAt
+			}),
+			execution:  domainlive.LiveOpsReportArtifactHandoffExecution{ConfigPath: "configs/live.local.yaml"},
+			wantErrSub: "CLEAR",
+		},
+		{
+			name: "invalid artifact is rejected first",
+			artifact: mutateLiveOpsReportArtifact(valid, func(a *domainlive.LiveOpsReportArtifact) {
+				a.Checks = nil
+			}),
+			execution:  domainlive.LiveOpsReportArtifactHandoffExecution{ConfigPath: "configs/live.local.yaml"},
+			wantErrSub: "checks",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := domainlive.ValidateLiveOpsReportArtifactHandoff(tt.artifact, tt.execution)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate ops report handoff: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateLiveOpsReportArtifactPositionDriftTableDriven(t *testing.T) {
 	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 	valid := validLiveOpsReportArtifactWithPositionDrift(now)

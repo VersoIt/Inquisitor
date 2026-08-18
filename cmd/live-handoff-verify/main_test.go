@@ -554,6 +554,108 @@ func TestRunLiveHandoffVerifyDeployCheckArtifactTableDriven(t *testing.T) {
 	}
 }
 
+func TestRunLiveHandoffVerifyOpsReportArtifactTableDriven(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	plan := validLiveHandoffPlanArtifact(now.Add(-time.Minute), domainlive.LiveOrderPlanArtifactSourceDecisionID)
+	planFile := writeLiveHandoffPlanArtifact(t, plan)
+	readiness := validLiveHandoffReadinessArtifact(t, now.Add(-20*time.Second), "configs/live.local.yaml", planFile, plan)
+	readinessFile := writeLiveHandoffReadinessArtifact(t, readiness)
+	validOpsReport := validLiveHandoffOpsReportArtifact(now.Add(-10*time.Second), "configs/live.local.yaml", plan)
+
+	validArgs := func(opsReportFile string) []string {
+		return []string{
+			"-config", "configs/live.local.yaml",
+			"-plan-file", planFile,
+			"-readiness-file", readinessFile,
+			"-ops-report-file", opsReportFile,
+			"-decision-id", plan.DecisionID,
+		}
+	}
+
+	tests := []struct {
+		name       string
+		artifact   domainlive.LiveOpsReportArtifact
+		args       func(string) []string
+		wantErrSub string
+		wantLogSub string
+	}{
+		{
+			name:       "valid clear ops report handoff",
+			artifact:   validOpsReport,
+			args:       validArgs,
+			wantLogSub: `"ops_report_status":"CLEAR"`,
+		},
+		{
+			name: "stale ops report artifact",
+			artifact: mutateLiveHandoffOpsReportArtifact(validOpsReport, func(a *domainlive.LiveOpsReportArtifact) {
+				a.CreatedAt = now.Add(-time.Hour)
+			}),
+			args: func(opsReportFile string) []string {
+				return append(validArgs(opsReportFile), "-max-ops-report-age", "10m")
+			},
+			wantErrSub: "stale",
+		},
+		{
+			name: "attention ops report artifact",
+			artifact: mutateLiveHandoffOpsReportArtifact(validOpsReport, func(a *domainlive.LiveOpsReportArtifact) {
+				a.Checks[1].Status = domainlive.ReadinessCheckStatusWarn
+				a.Checks[1].Details = "no pending approved LIVE decisions without submissions"
+				a.Status = domainlive.LiveOpsStatusAttention
+				a.Summary.Passed--
+				a.Summary.Warned++
+			}),
+			args:       validArgs,
+			wantErrSub: "CLEAR",
+		},
+		{
+			name: "ops report config mismatch",
+			artifact: mutateLiveHandoffOpsReportArtifact(validOpsReport, func(a *domainlive.LiveOpsReportArtifact) {
+				a.ConfigPath = "configs/other-live.yaml"
+			}),
+			args:       validArgs,
+			wantErrSub: "config_path",
+		},
+		{
+			name:       "untrimmed ops report path",
+			artifact:   validOpsReport,
+			args:       func(opsReportFile string) []string { return validArgs(" " + opsReportFile + " ") },
+			wantErrSub: "ops-report-file",
+		},
+		{
+			name:     "nonpositive max ops report age",
+			artifact: validOpsReport,
+			args: func(opsReportFile string) []string {
+				return append(validArgs(opsReportFile), "-max-ops-report-age", "0s")
+			},
+			wantErrSub: "max-ops-report-age",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opsReportFile := writeLiveHandoffOpsReportArtifact(t, tt.artifact)
+
+			var output bytes.Buffer
+			err := runLiveHandoffVerify(context.Background(), tt.args(opsReportFile), liveHandoffVerifyDependencies{
+				now:    func() time.Time { return now },
+				output: &output,
+			})
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v\nlogs:\n%s", tt.wantErrSub, err, output.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verify ops report handoff: %v\nlogs:\n%s", err, output.String())
+			}
+			if !strings.Contains(output.String(), tt.wantLogSub) {
+				t.Fatalf("expected logs to contain %s, got\n%s", tt.wantLogSub, output.String())
+			}
+		})
+	}
+}
+
 func validLiveHandoffPlanArtifact(createdAt time.Time, source string) domainlive.LiveOrderPlanArtifact {
 	artifact := domainlive.LiveOrderPlanArtifact{
 		SchemaVersion:       domainlive.LiveOrderPlanArtifactSchemaVersion,
@@ -737,6 +839,87 @@ func writeLiveHandoffDeploymentCheckArtifact(t *testing.T, artifact domainlive.L
 		t.Fatalf("write deployment check artifact: %v", err)
 	}
 	return path
+}
+
+func validLiveHandoffOpsReportArtifact(
+	createdAt time.Time,
+	configPath string,
+	plan domainlive.LiveOrderPlanArtifact,
+) domainlive.LiveOpsReportArtifact {
+	oldestAt := createdAt.Add(-2 * time.Minute)
+	newestAt := createdAt.Add(-time.Minute)
+	return domainlive.LiveOpsReportArtifact{
+		SchemaVersion: domainlive.LiveOpsReportArtifactSchemaVersion,
+		CreatedAt:     createdAt,
+		ConfigPath:    configPath,
+		Status:        domainlive.LiveOpsStatusClear,
+		Summary: domainlive.LiveOpsReportArtifactSummary{
+			Total:  3,
+			Passed: 3,
+		},
+		Checks: []domainlive.LiveOpsReportArtifactCheck{
+			{Name: "kill_switch", Status: domainlive.ReadinessCheckStatusPass, Details: "kill switch is inactive"},
+			{Name: "pending_live_decision", Status: domainlive.ReadinessCheckStatusPass, Details: "next decision " + plan.DecisionID + " for " + plan.Symbol + " is pending"},
+			{Name: "recent_live_loop_audit", Status: domainlive.ReadinessCheckStatusPass, Details: "recent live-loop audit has no running or failed runs"},
+		},
+		Pending: domainlive.LiveOpsReportArtifactPending{
+			Symbol:         plan.Symbol,
+			Limit:          10,
+			Total:          1,
+			NextDecisionID: plan.DecisionID,
+			NextSymbol:     plan.Symbol,
+			OldestAt:       &oldestAt,
+			NewestAt:       &newestAt,
+		},
+		Audit: domainlive.LiveOpsReportArtifactAudit{
+			Limit:                  10,
+			ReviewStatus:           domainlive.LiveLoopAuditReviewStatusClear,
+			ReviewReason:           "recent live-loop audit has no running or failed runs",
+			OperatorActionRequired: false,
+		},
+		KillSwitch: domainlive.LiveOpsReportArtifactKillSwitch{},
+	}
+}
+
+func writeLiveHandoffOpsReportArtifact(t *testing.T, artifact domainlive.LiveOpsReportArtifact) string {
+	t.Helper()
+
+	if err := domainlive.ValidateLiveOpsReportArtifact(artifact); err != nil {
+		t.Fatalf("validate ops report artifact: %v", err)
+	}
+	payload, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal ops report artifact: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "live-ops-report.json")
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write ops report artifact: %v", err)
+	}
+	return path
+}
+
+func mutateLiveHandoffOpsReportArtifact(
+	artifact domainlive.LiveOpsReportArtifact,
+	mutate func(*domainlive.LiveOpsReportArtifact),
+) domainlive.LiveOpsReportArtifact {
+	artifact.Checks = append([]domainlive.LiveOpsReportArtifactCheck(nil), artifact.Checks...)
+	artifact.FailedChecks = append([]string(nil), artifact.FailedChecks...)
+	if artifact.PositionDrift != nil {
+		drift := *artifact.PositionDrift
+		drift.FailedChecks = append([]string(nil), drift.FailedChecks...)
+		drift.Checks = append([]domainlive.LiveOpsReportArtifactCheck(nil), drift.Checks...)
+		drift.Comparisons = append([]domainlive.LiveOpsReportArtifactPositionDriftItem(nil), drift.Comparisons...)
+		artifact.PositionDrift = &drift
+	}
+	if artifact.FirstOrderReview != nil {
+		review := *artifact.FirstOrderReview
+		review.FailedChecks = append([]string(nil), review.FailedChecks...)
+		artifact.FirstOrderReview = &review
+	}
+	if mutate != nil {
+		mutate(&artifact)
+	}
+	return artifact
 }
 
 func validLiveHandoffDeploymentCheckArtifact(
