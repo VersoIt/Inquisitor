@@ -48,6 +48,7 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	configPath := flags.String("config", "configs/config.example.yaml", "path to YAML config")
 	symbolValue := flags.String("symbol", "", "optional symbol filter for pending LIVE decision visibility")
 	pendingLimit := flags.Int("pending-limit", 10, "maximum pending LIVE decisions to inspect, from 1 to 100")
+	allowNoPending := flags.Bool("allow-no-pending", false, "treat an empty pending LIVE decision queue as healthy when a fresh first-order review artifact is present")
 	auditLimit := flags.Int("audit-limit", 10, "maximum recent live-loop audit runs to inspect, from 1 to 100")
 	firstOrderReviewFile := flags.String("first-order-review-file", "", "optional JSON artifact written by live-first-order-review after the first armed order")
 	requireFirstOrderReview := flags.Bool("require-first-order-review", false, "mark the ops report BLOCKED when no first-order review artifact is provided")
@@ -161,6 +162,7 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	report, err := service.BuildLiveOpsReport(reportCtx, applive.LiveOpsReportRequest{
 		PendingSymbol:                   pendingQuery.Symbol,
 		PendingLimit:                    pendingQuery.Limit,
+		AllowNoPendingDecision:          *allowNoPending,
 		AuditLimit:                      auditQueryLimit,
 		HasFirstOrderReviewArtifact:     hasFirstOrderReview,
 		FirstOrderReviewArtifact:        firstOrderReview.Artifact,
@@ -173,7 +175,14 @@ func runLiveOpsReport(ctx context.Context, args []string, deps liveOpsReportDepe
 	if err != nil {
 		return err
 	}
-	logLiveOpsReport(log, strings.TrimSpace(*configPath), strings.TrimSpace(*firstOrderReviewFile), firstOrderReview.SHA256, report)
+	logLiveOpsReport(
+		log,
+		strings.TrimSpace(*configPath),
+		*allowNoPending,
+		strings.TrimSpace(*firstOrderReviewFile),
+		firstOrderReview.SHA256,
+		report,
+	)
 
 	if reportArtifactPath != "" {
 		artifact, err := applive.BuildLiveOpsReportArtifact(applive.BuildLiveOpsReportArtifactRequest{
@@ -385,6 +394,7 @@ func liveOpsPositionDriftQueriesFromConfig(
 func logLiveOpsReport(
 	log *slog.Logger,
 	configPath string,
+	allowNoPendingDecision bool,
 	firstOrderReviewFile string,
 	firstOrderReviewSHA256 string,
 	report applive.LiveOpsReport,
@@ -397,6 +407,7 @@ func logLiveOpsReport(
 		"warned", report.Summary.Warned,
 		"failed", report.Summary.Failed,
 		"config", configPath,
+		"allow_no_pending", allowNoPendingDecision,
 		"pending_candidates", report.Pending.Summary.Total,
 		"next_decision_id", report.Pending.Summary.NextID,
 		"next_symbol", report.Pending.Summary.NextSymbol,

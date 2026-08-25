@@ -13,6 +13,7 @@ import (
 type LiveOpsReportRequest struct {
 	PendingSymbol                   string
 	PendingLimit                    int
+	AllowNoPendingDecision          bool
 	AuditLimit                      int
 	HasFirstOrderReviewArtifact     bool
 	FirstOrderReviewArtifact        domainlive.LiveFirstOrderReviewArtifact
@@ -72,7 +73,7 @@ func (s *Service) BuildLiveOpsReport(ctx context.Context, req LiveOpsReportReque
 		return report, err
 	}
 	report.Pending = pending
-	report.Checks = append(report.Checks, liveReadinessPendingDecisionCheck(BuildLiveReadinessReportRequest{}, pending))
+	report.Checks = append(report.Checks, liveOpsPendingDecisionCheck(req, pending))
 
 	audit, err := s.BuildLiveLoopAuditReport(ctx, LiveLoopAuditReportRequest{
 		Limit:             auditLimit,
@@ -98,7 +99,7 @@ func (s *Service) BuildLiveOpsReport(ctx context.Context, req LiveOpsReportReque
 		report.Checks = append(report.Checks, drift.Checks...)
 	}
 
-	if req.HasFirstOrderReviewArtifact || req.RequireFirstOrderReviewArtifact {
+	if req.HasFirstOrderReviewArtifact || req.RequireFirstOrderReviewArtifact || req.AllowNoPendingDecision {
 		report.HasFirstOrderReview = req.HasFirstOrderReviewArtifact
 		report.FirstOrderReview = req.FirstOrderReviewArtifact
 		report.Checks = append(report.Checks, s.liveOpsFirstOrderReviewCheck(req))
@@ -134,6 +135,20 @@ func (s *Service) requireLiveOpsDependencies() error {
 		return fmt.Errorf("live ops report requires %s", strings.Join(problems, ", "))
 	}
 	return nil
+}
+
+func liveOpsPendingDecisionCheck(
+	req LiveOpsReportRequest,
+	pending PendingLiveDecisionReport,
+) domainlive.ReadinessCheck {
+	if pending.Summary.Total == 0 && req.AllowNoPendingDecision {
+		return domainlive.NewReadinessCheck(
+			"pending_live_decision",
+			domainlive.ReadinessCheckStatusPass,
+			"no pending approved LIVE decisions without submissions; first-order review policy allows an idle queue",
+		)
+	}
+	return liveReadinessPendingDecisionCheck(BuildLiveReadinessReportRequest{}, pending)
 }
 
 func (s *Service) liveOpsFirstOrderReviewCheck(req LiveOpsReportRequest) domainlive.ReadinessCheck {

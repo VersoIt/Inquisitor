@@ -17,13 +17,14 @@ func TestServiceBuildLiveOpsReportTableDriven(t *testing.T) {
 	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name       string
-		req        applive.LiveOpsReportRequest
-		killSwitch domainrisk.KillSwitchState
-		pending    []domainlive.PendingLiveDecision
-		audit      []domainlive.LiveLoopRunAudit
-		wantStatus domainlive.LiveOpsStatus
-		wantCheck  string
+		name            string
+		req             applive.LiveOpsReportRequest
+		killSwitch      domainrisk.KillSwitchState
+		pending         []domainlive.PendingLiveDecision
+		audit           []domainlive.LiveLoopRunAudit
+		wantStatus      domainlive.LiveOpsStatus
+		wantCheck       string
+		wantCheckStatus domainlive.ReadinessCheckStatus
 	}{
 		{
 			name:       "clear without first-order review requirement",
@@ -32,10 +33,33 @@ func TestServiceBuildLiveOpsReportTableDriven(t *testing.T) {
 			wantStatus: domainlive.LiveOpsStatusClear,
 		},
 		{
-			name:       "no pending decisions needs attention but does not block ops report",
-			audit:      []domainlive.LiveLoopRunAudit{liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted)},
-			wantStatus: domainlive.LiveOpsStatusAttention,
-			wantCheck:  "pending_live_decision",
+			name:            "no pending decisions needs attention but does not block ops report",
+			audit:           []domainlive.LiveLoopRunAudit{liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted)},
+			wantStatus:      domainlive.LiveOpsStatusAttention,
+			wantCheck:       "pending_live_decision",
+			wantCheckStatus: domainlive.ReadinessCheckStatusWarn,
+		},
+		{
+			name: "empty pending queue is clear after first-order review when explicitly allowed",
+			req: applive.LiveOpsReportRequest{
+				AllowNoPendingDecision:      true,
+				HasFirstOrderReviewArtifact: true,
+				FirstOrderReviewArtifact:    validAppLiveOpsFirstOrderReviewArtifact(t, now),
+			},
+			audit:           []domainlive.LiveLoopRunAudit{liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted)},
+			wantStatus:      domainlive.LiveOpsStatusClear,
+			wantCheck:       "pending_live_decision",
+			wantCheckStatus: domainlive.ReadinessCheckStatusPass,
+		},
+		{
+			name: "empty pending allow mode requires first-order review evidence",
+			req: applive.LiveOpsReportRequest{
+				AllowNoPendingDecision: true,
+			},
+			audit:           []domainlive.LiveLoopRunAudit{liveLoopAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted)},
+			wantStatus:      domainlive.LiveOpsStatusBlocked,
+			wantCheck:       "first_order_review",
+			wantCheckStatus: domainlive.ReadinessCheckStatusFail,
 		},
 		{
 			name: "active kill switch blocks",
@@ -132,8 +156,14 @@ func TestServiceBuildLiveOpsReportTableDriven(t *testing.T) {
 			if got.Summary.Total != len(got.Checks) {
 				t.Fatalf("summary mismatch: %#v checks=%#v", got.Summary, got.Checks)
 			}
-			if tt.wantCheck != "" && !appLiveOpsHasCheck(got.Checks, tt.wantCheck) {
-				t.Fatalf("expected check %q, got %#v", tt.wantCheck, got.Checks)
+			if tt.wantCheck != "" {
+				check, ok := appLiveOpsCheckByName(got.Checks, tt.wantCheck)
+				if !ok {
+					t.Fatalf("expected check %q, got %#v", tt.wantCheck, got.Checks)
+				}
+				if tt.wantCheckStatus != "" && check.Status != tt.wantCheckStatus {
+					t.Fatalf("check %q status mismatch: got %s want %s", tt.wantCheck, check.Status, tt.wantCheckStatus)
+				}
 			}
 		})
 	}
@@ -316,10 +346,15 @@ func mutateAppLiveOpsFirstOrderReviewArtifact(
 }
 
 func appLiveOpsHasCheck(checks []domainlive.ReadinessCheck, name string) bool {
+	_, ok := appLiveOpsCheckByName(checks, name)
+	return ok
+}
+
+func appLiveOpsCheckByName(checks []domainlive.ReadinessCheck, name string) (domainlive.ReadinessCheck, bool) {
 	for _, check := range checks {
 		if check.Name == name {
-			return true
+			return check, true
 		}
 	}
-	return false
+	return domainlive.ReadinessCheck{}, false
 }

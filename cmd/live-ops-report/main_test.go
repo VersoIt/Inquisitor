@@ -735,6 +735,128 @@ func TestRunLiveOpsReportCanFailOnAttentionStatus(t *testing.T) {
 	}
 }
 
+func TestRunLiveOpsReportAllowsEmptyPendingQueueAfterFirstOrderReview(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	reviewPath := writeLiveOpsFirstOrderReviewArtifact(t, validLiveOpsFirstOrderReviewArtifact(now.Add(-time.Minute)))
+	artifactPath := filepath.Join(t.TempDir(), "artifacts", "live-ops-report.json")
+	var output bytes.Buffer
+	err = runLiveOpsReport(context.Background(), []string{
+		"-symbol", "BTCUSDT",
+		"-first-order-review-file", reviewPath,
+		"-allow-no-pending",
+		"-fail-on-non-clear",
+		"-artifact-path", artifactPath,
+	}, liveOpsReportDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			return validLiveOpsConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newPendingReader: func(*sql.DB) domainlive.PendingLiveDecisionReader {
+			return &fakeLiveOpsPendingReader{}
+		},
+		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
+			return &fakeLiveOpsAuditReader{runs: []domainlive.LiveLoopRunAudit{
+				liveOpsAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
+			}}
+		},
+		newKillSwitch: func(*sql.DB) domainrisk.KillSwitchRepository {
+			return &fakeLiveOpsKillSwitchRepository{}
+		},
+		now: func() time.Time {
+			return now
+		},
+		output: &output,
+	})
+	if err != nil {
+		t.Fatalf("run live ops report: %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+
+	logs := output.String()
+	for _, want := range []string{
+		`"status":"CLEAR"`,
+		`"allow_no_pending":true`,
+		`"pending_candidates":0`,
+		`"name":"pending_live_decision"`,
+		`"status":"PASS"`,
+		`"first_order_review":true`,
+		`"msg":"live ops report completed"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected logs to contain %s, got\n%s", want, logs)
+		}
+	}
+
+	artifact := readLiveOpsReportArtifact(t, artifactPath)
+	if artifact.Status != domainlive.LiveOpsStatusClear ||
+		artifact.Summary.Warned != 0 ||
+		artifact.Summary.Failed != 0 ||
+		artifact.Pending.Total != 0 ||
+		artifact.FirstOrderReview == nil ||
+		!artifact.FirstOrderReview.Ready {
+		t.Fatalf("ops artifact mismatch: %#v", artifact)
+	}
+}
+
+func TestRunLiveOpsReportAllowNoPendingRequiresFirstOrderReviewEvidence(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	var output bytes.Buffer
+	err = runLiveOpsReport(context.Background(), []string{
+		"-symbol", "BTCUSDT",
+		"-allow-no-pending",
+		"-fail-on-non-clear",
+	}, liveOpsReportDependencies{
+		loadConfig: func(string) (*config.Config, error) {
+			return validLiveOpsConfig(), nil
+		},
+		openDB: func(context.Context, config.DatabaseConfig) (*sql.DB, error) {
+			return db, nil
+		},
+		newPendingReader: func(*sql.DB) domainlive.PendingLiveDecisionReader {
+			return &fakeLiveOpsPendingReader{}
+		},
+		newAuditReader: func(*sql.DB) domainlive.LiveLoopAuditReader {
+			return &fakeLiveOpsAuditReader{runs: []domainlive.LiveLoopRunAudit{
+				liveOpsAuditRun(now.Add(-time.Minute), domainlive.LiveLoopRunStatusCompleted),
+			}}
+		},
+		newKillSwitch: func(*sql.DB) domainrisk.KillSwitchRepository {
+			return &fakeLiveOpsKillSwitchRepository{}
+		},
+		now: func() time.Time {
+			return now
+		},
+		output: &output,
+	})
+	if err == nil || !strings.Contains(err.Error(), "BLOCKED") || !strings.Contains(err.Error(), "first_order_review") {
+		t.Fatalf("expected missing first-order review to block, got %v\nlogs:\n%s", err, output.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+	if !strings.Contains(output.String(), `"allow_no_pending":true`) ||
+		!strings.Contains(output.String(), `"name":"first_order_review"`) ||
+		!strings.Contains(output.String(), `"status":"FAIL"`) {
+		t.Fatalf("expected first-order review failure logs, got\n%s", output.String())
+	}
+}
+
 type fakeLiveOpsPendingReader struct {
 	query      domainlive.PendingLiveDecisionQuery
 	candidates []domainlive.PendingLiveDecision
