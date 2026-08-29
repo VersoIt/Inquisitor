@@ -76,6 +76,13 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderReview.Args, "-plan-file", bundle.PlanFile)
 				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderReview.Args, "-artifact-path", bundle.ReviewFile)
+
+				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderOps.Args, "-first-order-review-file", bundle.ReviewFile)
+				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderOps.Args, "-max-first-order-review-age", "24h0m0s")
+				assertLiveFirstOrderFlag(t, bundle.SuggestedPostOrderOps.Args, "-allow-no-pending")
+				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderOps.Args, "-artifact-path", bundle.PostOrderOpsReportFile)
+				assertLiveFirstOrderFlagValue(t, bundle.SuggestedPostOrderOps.Args, "-symbol", "BTCUSDT")
+				assertLiveFirstOrderFlag(t, bundle.SuggestedPostOrderOps.Args, "-fail-on-non-clear")
 			},
 		},
 		{
@@ -139,6 +146,13 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				assertLiveFirstOrderFlagValue(t, ops.Args, "-position-drift-current-max-age", "3s")
 				assertLiveFirstOrderFlagValue(t, ops.Args, "-position-drift-baseline-max-age", "7m0s")
 				assertLiveFirstOrderFlag(t, ops.Args, "-fail-on-non-clear")
+
+				postOps := bundle.SuggestedPostOrderOps
+				assertLiveFirstOrderFlag(t, postOps.Args, "-position-drift")
+				assertLiveFirstOrderFlagValue(t, postOps.Args, "-position-drift-symbols", "BTCUSDT,ETHUSDT")
+				assertLiveFirstOrderFlagValue(t, postOps.Args, "-position-drift-current-max-age", "3s")
+				assertLiveFirstOrderFlagValue(t, postOps.Args, "-position-drift-baseline-max-age", "7m0s")
+				assertLiveFirstOrderFlag(t, postOps.Args, "-allow-no-pending")
 			},
 		},
 		{
@@ -164,6 +178,11 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				assertLiveFirstOrderFlag(t, ops.Args, "-position-drift")
 				assertLiveFirstOrderFlag(t, ops.Args, "-activate-kill-switch-on-position-drift-blocked")
 				assertLiveFirstOrderFlag(t, ops.Args, "-fail-on-non-clear")
+
+				postOps := bundle.SuggestedPostOrderOps
+				assertLiveFirstOrderFlag(t, postOps.Args, "-position-drift")
+				assertLiveFirstOrderFlag(t, postOps.Args, "-activate-kill-switch-on-position-drift-blocked")
+				assertLiveFirstOrderFlag(t, postOps.Args, "-fail-on-non-clear")
 			},
 		},
 	}
@@ -185,7 +204,8 @@ func TestBuildLiveFirstOrderCheckBundleTableDriven(t *testing.T) {
 				bundle.AuditFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-loop-audit.json") ||
 				bundle.DeployCheckFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-deploy-check.json") ||
 				bundle.OpsReportFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-ops-report.json") ||
-				bundle.ReviewFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-first-order-review.json") {
+				bundle.ReviewFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-first-order-review.json") ||
+				bundle.PostOrderOpsReportFile != filepath.Join(filepath.Clean(req.ArtifactDir), "live-post-order-ops-report.json") {
 				t.Fatalf("artifact path mismatch: %#v", bundle)
 			}
 			tt.assert(t, bundle)
@@ -235,6 +255,9 @@ func TestBuildLiveFirstOrderCheckBundleRejectsUnsafeFlagsTableDriven(t *testing.
 		{name: "invalid ops report age", mutate: func(req *liveFirstOrderCheckRequest) {
 			req.MaxOpsReportAge = 0
 		}, wantErrSub: "max-ops-report-age"},
+		{name: "invalid first-order review age", mutate: func(req *liveFirstOrderCheckRequest) {
+			req.MaxFirstOrderReviewAge = 0
+		}, wantErrSub: "max-first-order-review-age"},
 		{name: "invalid kill switch age", mutate: func(req *liveFirstOrderCheckRequest) {
 			req.MaxKillSwitchAge = 0
 		}, wantErrSub: "max-kill-switch-age"},
@@ -297,9 +320,11 @@ func TestRunLiveFirstOrderCheckPrintOnlyDoesNotCreateArtifactsOrRunCommands(t *t
 		`"step":"live-order-plan"`,
 		`"step":"live-deploy-check"`,
 		`"msg":"live first-order check final command"`,
-		`"msg":"live first-order check post-order command"`,
+		`"msg":"live first-order check post-order review command"`,
+		`"msg":"live first-order check post-order ops command"`,
 		`./cmd/live-loop`,
 		`./cmd/live-first-order-review`,
+		`-allow-no-pending`,
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("expected output to contain %s, got\n%s", want, output.String())
@@ -433,6 +458,7 @@ func validLiveFirstOrderCheckRequest() liveFirstOrderCheckRequest {
 		MaxAuditAge:                 10 * time.Minute,
 		MaxDeployCheckAge:           10 * time.Minute,
 		MaxOpsReportAge:             10 * time.Minute,
+		MaxFirstOrderReviewAge:      24 * time.Hour,
 		PositionDriftCurrentMaxAge:  5 * time.Second,
 		PositionDriftBaselineMaxAge: 10 * time.Minute,
 		MaxIterations:               1,

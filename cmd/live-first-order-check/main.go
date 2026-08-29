@@ -55,9 +55,11 @@ type liveFirstOrderCheckBundle struct {
 	DeployCheckFile          string
 	OpsReportFile            string
 	ReviewFile               string
+	PostOrderOpsReportFile   string
 	Commands                 []liveFirstOrderCommand
 	SuggestedLiveLoop        liveFirstOrderCommand
 	SuggestedPostOrderReview liveFirstOrderCommand
+	SuggestedPostOrderOps    liveFirstOrderCommand
 }
 
 type liveFirstOrderCheckRequest struct {
@@ -85,6 +87,7 @@ type liveFirstOrderCheckRequest struct {
 	MaxAuditAge                 time.Duration
 	MaxDeployCheckAge           time.Duration
 	MaxOpsReportAge             time.Duration
+	MaxFirstOrderReviewAge      time.Duration
 	PositionDrift               bool
 	PositionDriftSymbols        string
 	PositionDriftCurrentMaxAge  time.Duration
@@ -128,6 +131,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 	maxAuditAge := flags.Duration("max-audit-age", domainlive.DefaultLiveLoopAuditArtifactMaxAge, "maximum audit artifact age accepted by downstream checks")
 	maxDeployCheckAge := flags.Duration("max-deploy-check-age", domainlive.DefaultLiveDeploymentCheckArtifactMaxAge, "maximum deploy-check artifact age accepted by live-loop")
 	maxOpsReportAge := flags.Duration("max-ops-report-age", domainlive.DefaultLiveOpsReportArtifactMaxAge, "maximum ops-report artifact age accepted by live-loop")
+	maxFirstOrderReviewAge := flags.Duration("max-first-order-review-age", domainlive.DefaultLiveFirstOrderReviewArtifactMaxAge, "maximum first-order review artifact age accepted by the generated post-order ops report")
 	positionDrift := flags.Bool("position-drift", false, "include private exchange-vs-DB position drift checks in the generated ops report")
 	positionDriftSymbols := flags.String("position-drift-symbols", "", "optional comma-separated symbols for first-order ops position drift; defaults to exchange.symbols from config")
 	positionDriftCurrentMaxAge := flags.Duration("position-drift-current-max-age", domainlive.DefaultPositionDriftCurrentMaxAge, "maximum accepted age for current exchange position snapshots in first-order ops drift")
@@ -185,6 +189,7 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 		MaxAuditAge:                 *maxAuditAge,
 		MaxDeployCheckAge:           *maxDeployCheckAge,
 		MaxOpsReportAge:             *maxOpsReportAge,
+		MaxFirstOrderReviewAge:      *maxFirstOrderReviewAge,
 		PositionDrift:               *positionDrift,
 		PositionDriftSymbols:        *positionDriftSymbols,
 		PositionDriftCurrentMaxAge:  *positionDriftCurrentMaxAge,
@@ -213,13 +218,15 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 		"deploy_check_file", bundle.DeployCheckFile,
 		"ops_report_file", bundle.OpsReportFile,
 		"review_file", bundle.ReviewFile,
+		"post_order_ops_report_file", bundle.PostOrderOpsReportFile,
 		"commands", len(bundle.Commands),
 	)
 	for _, command := range bundle.Commands {
 		log.Info("live first-order check step", "step", command.Name, "command", liveFirstOrderCommandLine(command.Args))
 	}
 	log.Info("live first-order check final command", "command", liveFirstOrderCommandLine(bundle.SuggestedLiveLoop.Args))
-	log.Info("live first-order check post-order command", "command", liveFirstOrderCommandLine(bundle.SuggestedPostOrderReview.Args))
+	log.Info("live first-order check post-order review command", "command", liveFirstOrderCommandLine(bundle.SuggestedPostOrderReview.Args))
+	log.Info("live first-order check post-order ops command", "command", liveFirstOrderCommandLine(bundle.SuggestedPostOrderOps.Args))
 	if *printOnly {
 		return nil
 	}
@@ -240,8 +247,10 @@ func runLiveFirstOrderCheck(ctx context.Context, args []string, deps liveFirstOr
 		"artifact_dir", bundle.ArtifactDir,
 		"deploy_check_file", bundle.DeployCheckFile,
 		"review_file", bundle.ReviewFile,
+		"post_order_ops_report_file", bundle.PostOrderOpsReportFile,
 		"live_loop_command", liveFirstOrderCommandLine(bundle.SuggestedLiveLoop.Args),
 		"post_order_review_command", liveFirstOrderCommandLine(bundle.SuggestedPostOrderReview.Args),
+		"post_order_ops_command", liveFirstOrderCommandLine(bundle.SuggestedPostOrderOps.Args),
 	)
 	return nil
 }
@@ -271,6 +280,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 	deployCheckFile := filepath.Join(normalized.ArtifactDir, "live-deploy-check.json")
 	opsReportFile := filepath.Join(normalized.ArtifactDir, "live-ops-report.json")
 	reviewFile := filepath.Join(normalized.ArtifactDir, "live-first-order-review.json")
+	postOrderOpsReportFile := filepath.Join(normalized.ArtifactDir, "live-post-order-ops-report.json")
 
 	killSwitchArgs := normalized.goRunArgs("./cmd/risk-kill-switch",
 		"-config", normalized.ConfigPath,
@@ -358,17 +368,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		"-fail-on-non-clear",
 	)
 	opsReportArgs = appendOptionalLiveFirstOrderFlag(opsReportArgs, "-symbol", normalized.Symbol)
-	if normalized.PositionDrift {
-		opsReportArgs = append(opsReportArgs,
-			"-position-drift",
-			"-position-drift-current-max-age", normalized.PositionDriftCurrentMaxAge.String(),
-			"-position-drift-baseline-max-age", normalized.PositionDriftBaselineMaxAge.String(),
-		)
-	}
-	if normalized.PositionDriftKillSwitch {
-		opsReportArgs = append(opsReportArgs, "-activate-kill-switch-on-position-drift-blocked")
-	}
-	opsReportArgs = appendOptionalLiveFirstOrderFlag(opsReportArgs, "-position-drift-symbols", normalized.PositionDriftSymbols)
+	opsReportArgs = appendLiveFirstOrderOpsPositionDriftFlags(opsReportArgs, normalized)
 
 	liveLoopArgs := normalized.goRunArgs("./cmd/live-loop",
 		"-config", normalized.ConfigPath,
@@ -399,16 +399,29 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		"-plan-file", planFile,
 		"-artifact-path", reviewFile,
 	)
+	postOrderOpsArgs := normalized.goRunArgs("./cmd/live-ops-report",
+		"-config", normalized.ConfigPath,
+		"-pending-limit", fmt.Sprintf("%d", normalized.ReadinessPendingLimit),
+		"-audit-limit", fmt.Sprintf("%d", normalized.ReadinessAuditLimit),
+		"-first-order-review-file", reviewFile,
+		"-max-first-order-review-age", normalized.MaxFirstOrderReviewAge.String(),
+		"-allow-no-pending",
+		"-artifact-path", postOrderOpsReportFile,
+		"-fail-on-non-clear",
+	)
+	postOrderOpsArgs = appendOptionalLiveFirstOrderFlag(postOrderOpsArgs, "-symbol", normalized.Symbol)
+	postOrderOpsArgs = appendLiveFirstOrderOpsPositionDriftFlags(postOrderOpsArgs, normalized)
 
 	return liveFirstOrderCheckBundle{
-		ArtifactDir:     normalized.ArtifactDir,
-		KillSwitchFile:  killSwitchFile,
-		PlanFile:        planFile,
-		ReadinessFile:   readinessFile,
-		AuditFile:       auditFile,
-		DeployCheckFile: deployCheckFile,
-		OpsReportFile:   opsReportFile,
-		ReviewFile:      reviewFile,
+		ArtifactDir:            normalized.ArtifactDir,
+		KillSwitchFile:         killSwitchFile,
+		PlanFile:               planFile,
+		ReadinessFile:          readinessFile,
+		AuditFile:              auditFile,
+		DeployCheckFile:        deployCheckFile,
+		OpsReportFile:          opsReportFile,
+		ReviewFile:             reviewFile,
+		PostOrderOpsReportFile: postOrderOpsReportFile,
 		Commands: []liveFirstOrderCommand{
 			{Name: "risk-kill-switch-state", Args: killSwitchArgs},
 			{Name: "live-order-plan", Args: planArgs},
@@ -420,6 +433,7 @@ func buildLiveFirstOrderCheckBundle(req liveFirstOrderCheckRequest) (liveFirstOr
 		},
 		SuggestedLiveLoop:        liveFirstOrderCommand{Name: "live-loop", Args: liveLoopArgs},
 		SuggestedPostOrderReview: liveFirstOrderCommand{Name: "live-first-order-review", Args: reviewArgs},
+		SuggestedPostOrderOps:    liveFirstOrderCommand{Name: "live-ops-report", Args: postOrderOpsArgs},
 	}, nil
 }
 
@@ -502,6 +516,9 @@ func normalizeLiveFirstOrderCheckRequest(req liveFirstOrderCheckRequest) (liveFi
 	if req.MaxOpsReportAge <= 0 {
 		problems = append(problems, "max-ops-report-age must be positive")
 	}
+	if req.MaxFirstOrderReviewAge <= 0 {
+		problems = append(problems, "max-first-order-review-age must be positive")
+	}
 	if req.PositionDriftCurrentMaxAge <= 0 {
 		problems = append(problems, "position-drift-current-max-age must be positive")
 	}
@@ -581,6 +598,20 @@ func appendLiveFirstOrderSourceFlags(args []string, req liveFirstOrderCheckReque
 		return appendOptionalLiveFirstOrderFlag(args, "-pending-symbol", req.Symbol)
 	}
 	return append(args, "-decision-id", req.DecisionID)
+}
+
+func appendLiveFirstOrderOpsPositionDriftFlags(args []string, req liveFirstOrderCheckRequest) []string {
+	if req.PositionDrift {
+		args = append(args,
+			"-position-drift",
+			"-position-drift-current-max-age", req.PositionDriftCurrentMaxAge.String(),
+			"-position-drift-baseline-max-age", req.PositionDriftBaselineMaxAge.String(),
+		)
+	}
+	if req.PositionDriftKillSwitch {
+		args = append(args, "-activate-kill-switch-on-position-drift-blocked")
+	}
+	return appendOptionalLiveFirstOrderFlag(args, "-position-drift-symbols", req.PositionDriftSymbols)
 }
 
 func appendOptionalLiveFirstOrderFlag(args []string, name string, value string) []string {
