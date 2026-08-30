@@ -122,7 +122,8 @@ LIVE_DRIFT_KILL_SWITCH_EVENT_ID ?=
 LIVE_DEPLOY_ARTIFACT ?=
 LIVE_DEPLOY_MAX_AGE ?= 10m
 LIVE_FIRST_ORDER_ARTIFACT_DIR ?= artifacts/live-first-order
-LIVE_FIRST_ORDER_REVIEW_ARTIFACT ?= artifacts/live-first-order/live-first-order-review.json
+LIVE_FIRST_ORDER_REVIEW_ARTIFACT ?= $(LIVE_FIRST_ORDER_ARTIFACT_DIR)/live-first-order-review.json
+LIVE_POST_ORDER_OPS_ARTIFACT ?= $(LIVE_FIRST_ORDER_ARTIFACT_DIR)/live-post-order-ops-report.json
 LIVE_FIRST_ORDER_REVIEW_STATUS_LIMIT ?= 5
 LIVE_FIRST_ORDER_REVIEW_POSITION_LIMIT ?= 5
 LIVE_FIRST_ORDER_RUN_ID ?= live_loop_first_order_001
@@ -131,6 +132,7 @@ LIVE_FIRST_ORDER_READINESS_PENDING_LIMIT ?= 1
 LIVE_FIRST_ORDER_READINESS_AUDIT_LIMIT ?= 10
 LIVE_FIRST_ORDER_AUDIT_LIMIT ?= 10
 LIVE_FIRST_ORDER_PRINT_ONLY ?=
+LIVE_POST_ORDER_PRINT_ONLY ?=
 RISK_KILL_SWITCH_ACTION ?= state
 RISK_KILL_SWITCH_EVENT_ID ?=
 RISK_KILL_SWITCH_REASON ?=
@@ -139,7 +141,7 @@ RISK_KILL_SWITCH_ACTIVE ?=
 RISK_KILL_SWITCH_LIMIT ?= 20
 RISK_KILL_SWITCH_ARTIFACT ?=
 
-.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-loop-audit live-decision-scan live-readiness live-ops-report live-position-drift live-handoff-verify live-deploy-check live-first-order-check live-first-order-review live-order-plan live-submit risk-kill-switch docker-up docker-down
+.PHONY: tidy test vet quality migrate backfill regime regime-backfill hypothesis-validate hypothesis-import research-schedule research-dry-run research-evaluate-rules research-backtest research-record-not-executed paper-validate paper-simulate paper-report paper-equity-report paper-start paper-complete paper-cancel paper-quote paper-pending paper-auto-enter paper-auto-exit paper-cycle-preflight paper-auto-cycle paper-cycle-smoke paper-cycle-smoke-sh paper-enter paper-fill paper-settle live-preflight live-health live-loop live-loop-smoke live-loop-audit live-decision-scan live-readiness live-ops-report live-position-drift live-handoff-verify live-deploy-check live-first-order-check live-first-order-review live-post-order-check live-order-plan live-submit risk-kill-switch docker-up docker-down
 
 tidy:
 	$(GO) mod tidy
@@ -280,6 +282,9 @@ live-first-order-check:
 
 live-first-order-review:
 	$(GO) run ./cmd/live-first-order-review -config $(CONFIG) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE),-plan-file $(LIVE_FIRST_ORDER_ARTIFACT_DIR)/live-order-plan.json) -status-limit $(LIVE_FIRST_ORDER_REVIEW_STATUS_LIMIT) -position-limit $(LIVE_FIRST_ORDER_REVIEW_POSITION_LIMIT) $(if $(LIVE_FIRST_ORDER_REVIEW_ARTIFACT),-artifact-path $(LIVE_FIRST_ORDER_REVIEW_ARTIFACT),)
+
+live-post-order-check:
+	$(GO) run ./cmd/live-post-order-check -config $(CONFIG) -artifact-dir $(LIVE_FIRST_ORDER_ARTIFACT_DIR) $(if $(LIVE_PLAN_FILE),-plan-file $(LIVE_PLAN_FILE),) $(if $(LIVE_FIRST_ORDER_REVIEW_ARTIFACT),-review-artifact $(LIVE_FIRST_ORDER_REVIEW_ARTIFACT),) $(if $(LIVE_POST_ORDER_OPS_ARTIFACT),-ops-artifact $(LIVE_POST_ORDER_OPS_ARTIFACT),) $(if $(LIVE_OPS_SYMBOL),-symbol $(LIVE_OPS_SYMBOL),) -status-limit $(LIVE_FIRST_ORDER_REVIEW_STATUS_LIMIT) -position-limit $(LIVE_FIRST_ORDER_REVIEW_POSITION_LIMIT) -pending-limit $(LIVE_OPS_PENDING_LIMIT) -audit-limit $(LIVE_OPS_AUDIT_LIMIT) -max-first-order-review-age $(LIVE_OPS_FIRST_ORDER_REVIEW_MAX_AGE) $(if $(LIVE_OPS_POSITION_DRIFT),-position-drift -position-drift-current-max-age $(LIVE_OPS_POSITION_DRIFT_CURRENT_MAX_AGE) -position-drift-baseline-max-age $(LIVE_OPS_POSITION_DRIFT_BASELINE_MAX_AGE),) $(if $(LIVE_OPS_POSITION_DRIFT_SYMBOLS),-position-drift-symbols $(LIVE_OPS_POSITION_DRIFT_SYMBOLS),) $(if $(LIVE_OPS_ACTIVATE_KILL_SWITCH_ON_POSITION_DRIFT_BLOCKED),-activate-kill-switch-on-position-drift-blocked,) $(if $(LIVE_POST_ORDER_PRINT_ONLY),-print-only,)
 
 live-order-plan:
 	$(GO) run ./cmd/live-order-plan -config $(CONFIG) $(if $(LIVE_DECISION_ID),-decision-id $(LIVE_DECISION_ID),) $(if $(LIVE_SELECT_PENDING),-select-pending,) $(if $(LIVE_PENDING_SYMBOL),-pending-symbol $(LIVE_PENDING_SYMBOL),) -order-type $(LIVE_ORDER_TYPE) $(if $(LIVE_LOOP_RUN_ID),-run-id $(LIVE_LOOP_RUN_ID),) $(if $(LIVE_TIME_IN_FORCE),-time-in-force $(LIVE_TIME_IN_FORCE),) $(if $(LIVE_LIMIT_PRICE),-limit-price $(LIVE_LIMIT_PRICE),) $(if $(LIVE_PLAN_FILE),-artifact-path $(LIVE_PLAN_FILE),)
