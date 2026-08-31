@@ -71,6 +71,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Initial Phase 7 paper position settlement use case that safely chains position close recording and equity accounting, allowing retries to continue after a close was already persisted.
 - Initial Phase 7 conservative paper market execution helpers that derive simulated entry/exit fills from mid price plus fee/spread/slippage assumptions before recording fills or settlements.
 - Initial Phase 7 automated paper entry/exit reconciliation, bounded execution-cycle CLI, app-layer explicit-scope guard, locked preflight guard, active Kill Switch entry guard, and Docker-backed smoke script that selects pending tickets/open positions, derives fresh orderbook mid prices, records conservative entry fills, opens paper positions, verifies duplicate-entry prevention, and settles triggered stop-loss/take-profit exits without sending exchange orders.
+- Initial Phase 7 strategy trade-signal boundary that canonicalizes hypothesis-backed strategy signals, validates side-specific stop/take-profit geometry, snapshots hypothesis risk limits, and converts valid signals into `risk.TradeIntent` values without sizing or placing orders.
 - Initial Phase 7 live order submission boundary for approved LIVE risk decisions only, with deterministic client order IDs, durable pre-exchange journaling, exchange acknowledgement journaling, and duplicate-decision prevention.
 - Bybit V5 private order-create adapter with HMAC signing, config-driven REST base URL, internal live-domain mapping, and tests that never place real orders.
 - Live startup preflight use case and CLI that checks explicit live config, env confirmation, API credential presence, dedicated subaccount confirmation, withdrawal-disabled policy, initial-capital cap, inactive Kill Switch, fresh `UNIFIED` wallet-balance readiness, and fresh flat live positions for configured symbols before live startup, while persisting account and position readiness snapshots for audit.
@@ -98,7 +99,7 @@ This repository has progressed from the Phase 1 market-data foundation through r
 - Read-only-by-default live position drift CLI that compares fresh exchange position snapshots with the latest persisted DB baselines, ignores market-noise fields such as mark price/PnL, blocks on exposure drift or abnormal exchange position status, and can explicitly persist an active Kill Switch event on blocked drift.
 - Table-driven tests for WebSocket topics, subscription payloads, parser mappings, client behavior, realtime topic orchestration, realtime quality checks, and realtime repositories.
 
-The next Phase 7 slices should continue operational observability before any always-on worker is considered.
+The next Phase 7 slices should connect approved strategy signals into explicit paper/live risk evaluation flows, still behind operator-visible gates, before any always-on worker is considered.
 
 ## What This Is Not
 
@@ -755,4 +756,4 @@ make paper-settle PAPER_EVENT_ID=paper_equity_001 PAPER_CLOSE_ID=paper_close_001
 
 Exchange-specific code must stay under `internal/exchanges/bybit` when it is added. Business logic should consume internal domain models from `internal/marketdata`, not raw Bybit responses.
 
-Strategies, live execution, ML, dashboard, Telegram, portfolio risk, and edge-decay logic are intentionally not implemented in this slice.
+Autonomous strategy execution, ML, dashboard, Telegram, advanced portfolio risk, and edge-decay logic are intentionally not implemented yet. The current strategy layer only validates trade signals and converts them into risk intents; it cannot size, submit, or discover live orders by itself.
