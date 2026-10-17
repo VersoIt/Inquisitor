@@ -37,19 +37,20 @@ type Strategy interface {
 // ApprovalSnapshot must come from persisted validation in the application layer.
 // Strategies consume this snapshot; they cannot grant or change approval.
 type ApprovalSnapshot struct {
-	HypothesisID  string
-	Version       string
-	StrategyName  string
-	Mode          risk.Mode
-	Direction     hypothesis.Direction
-	Exchange      string
-	Category      string
-	Symbol        string
-	Interval      string
-	MaxRiskPct    decimal.Decimal
-	MinConfidence int
-	Enabled       bool
-	EdgeDecayed   bool
+	ApprovalID, ValidationID, RunID, HypothesisSHA256 string
+	HypothesisID                                      string
+	Version                                           string
+	StrategyName                                      string
+	Mode                                              risk.Mode
+	Direction                                         hypothesis.Direction
+	Exchange                                          string
+	Category                                          string
+	Symbol                                            string
+	Interval                                          string
+	MaxRiskPct                                        decimal.Decimal
+	MinConfidence                                     int
+	Enabled                                           bool
+	EdgeDecayed                                       bool
 }
 
 type MarketContext struct {

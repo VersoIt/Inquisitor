@@ -9,6 +9,7 @@ import (
 // Evidence uses strings so even rejected NaN/Inf statistical inputs remain auditable.
 func SignalEvidence(m MarketContext) map[string]string {
 	e := map[string]string{
+		"approval.id": m.Approval.ApprovalID, "approval.validation_id": m.Approval.ValidationID, "approval.run_id": m.Approval.RunID, "approval.hypothesis_sha256": m.Approval.HypothesisSHA256,
 		"entry_price": m.EntryPrice.String(), "regime.name": string(m.Regime.Regime),
 		"regime.confidence": strconv.Itoa(m.Regime.Confidence), "regime.no_trade": strconv.FormatBool(m.Regime.NoTrade),
 		"regime.candidate": string(m.Regime.CandidateRegime), "regime.reasons": strings.Join(m.Regime.Reasons, ","),

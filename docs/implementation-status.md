@@ -11,7 +11,7 @@ Passing unit tests does not establish deployment readiness or strategy profitabi
 | 3: Features/regime | Price/trend/volatility/volume/microstructure/quality features, regime detection and storage | Full feature inventory against specification, derivative inputs, operational acceptance |
 | 4: Research/backtest | Hypothesis import, experiments, rule evaluation, cost-aware fixed-horizon backtests, OOS, reports | Full metrics/report inventory and execution-model acceptance beyond fixed horizons |
 | 5: Validation | Chronological walk-forward, regime analysis, candidate/rejection gates | Parameter-stability report and full approval lifecycle alignment |
-| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal/abstention audit use case and PostgreSQL repository | Loading verified approvals, connecting journaled signals to risk/paper execution |
+| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings and source-backed authorization | Operator commands, connecting authorized journaled signals to risk/paper execution, exact strategy/config validation provenance |
 | 7: Risk/Kill Switch | Decimal sizing, trade limits, market filters, persistent decisions and manual Kill Switch | Audit all automatic Kill Switch triggers and recovery paths against specification |
 | 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, reports | Connect market-to-signal-to-risk-to-paper cycle and complete sustained paper acceptance |
 | 9: Live micro | Explicit startup gates, submission journals, Bybit private adapters, reconciliation, operator commands | Complete live lifecycle including partial fills/exits/balance synchronization and acceptance after paper validation |
@@ -22,8 +22,9 @@ Passing unit tests does not establish deployment readiness or strategy profitabi
 ## Strategy Contract
 
 The selector accepts one scoped approval snapshot and chooses a registered strategy
-by regime. The application must load and verify that snapshot from persisted
-research/paper validation; a caller-provided snapshot is not proof of approval.
+by regime. AuthorizedGenerationService now loads and verifies that snapshot from a
+reviewed PAPER binding and current persisted research/paper evidence; it replaces
+the caller's snapshot. A caller-provided snapshot is not proof of approval.
 Paper approval cannot authorize live mode, and direction, symbol, timeframe,
 exchange and category must match. Missing implementations return `NO_TRADE`.
 
@@ -66,7 +67,8 @@ strategy path is intended for evaluation immediately after a candle closes.
 
 Domain strategies have no storage, order submission or worker loop. The application
 generation service now persists trade signals and `NO_TRADE` reasons before returning
-a usable result. Approval loading and risk/paper orchestration remain to be connected.
+a usable result. The authorized wrapper now loads PAPER approval; risk/paper
+execution orchestration remains to be connected.
 Strategy parameters and technical triggers are implementation choices to research;
 they do not establish an edge and cannot replace validation.
 
@@ -76,8 +78,8 @@ Migration 026 adds `strategy_signals`. `GenerationService.GenerateAndRecord` own
 the audit path: generate, verify envelope/context consistency, build an owned
 snapshot, persist, then return the signal. Missing dependencies, cancellation,
 invalid metadata, storage errors, conflicting IDs or invalid write acknowledgements
-return an error with no usable signal. The service does not grant approval; callers
-still supply the scoped snapshot until persisted approval loading is implemented.
+return an error with no usable signal. The lower-level generation service does not
+grant approval; the authorized wrapper supplies its verified database snapshot.
 
 Each record contains mode, market scope, hypothesis version, reason, evaluation
 time, observation time, persistence time, exact decimal trade fields (if any),
@@ -99,3 +101,36 @@ first-write time, conflict detection, concurrency, selector-to-journal orchestra
 query boundaries, and rejection of malformed raw rows by database constraints.
 This journal does not yet enforce that every existing risk-intent caller uses a
 stored signal, and it does not establish approval or authorize execution.
+
+## Paper Authorization
+
+Migration 027 stores an explicit operator-reviewed binding between a strategy
+family, hypothesis name/version/content hash, research run, RUNNING paper validation,
+symbol and interval. The original review and grant time remain immutable; revocation
+records reviewer, reason and time. Repeating the original grant cannot undo revocation.
+The grant repository accepts exact retries; a grant with changed content conflicts.
+The application stamps grants with its clock, so a later grant attempt with the same
+ID is a new payload, not a replacement. Revocation retries preserve the first time
+when reviewer/reason are unchanged; a conflicting revocation is rejected.
+
+Evidence reads use one read-only REPEATABLE READ transaction. Every resolution
+reloads all four sources: hypothesis, run, result and paper validation. Checks include
+raw-YAML/parsed-spec agreement, exact hash and identity linkage, market scope,
+strategy-family compatibility, chronology, completed CANDIDATE status, current
+conservative research gates, all walk-forward folds passing, positive out-of-sample
+PnL, sufficient out-of-sample profit factor, and bounded out-of-sample drawdown.
+The hypothesis minimum trade count can tighten the configured policy. Revocation,
+changed source content/results, or a stopped paper validation deny authorization.
+
+Authorized generation ignores the caller's ApprovalSnapshot. It records the grant,
+validation and run IDs plus the hypothesis hash in signal evidence. A source failure
+or unavailable approval returns an error before invoking the generator or writing
+a signal. No LIVE authorization is implemented in this path. Hypothesis YAML remains
+a DRAFT research specification; the separate reviewed binding is the PAPER authority.
+
+This binding permits controlled paper validation of a named implementation. Existing
+research runs do not yet identify the precise strategy code/configuration, so the
+binding does not establish that those exact implementations were backtested. Exact
+strategy/config provenance remains necessary before broader automation/live approval.
+Authorization is a snapshot, not an order reservation; eventual risk/execution
+orchestration must recheck current authorization and runtime state at its boundary.
