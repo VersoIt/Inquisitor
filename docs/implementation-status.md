@@ -11,7 +11,7 @@ Passing unit tests does not establish deployment readiness or strategy profitabi
 | 3: Features/regime | Price/trend/volatility/volume/microstructure/quality features, regime detection and storage | Full feature inventory against specification, derivative inputs, operational acceptance |
 | 4: Research/backtest | Hypothesis import, experiments, rule evaluation, cost-aware fixed-horizon backtests, OOS, reports | Full metrics/report inventory and execution-model acceptance beyond fixed horizons |
 | 5: Validation | Chronological walk-forward, regime analysis, candidate/rejection gates | Parameter-stability report and full approval lifecycle alignment |
-| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy | Durable signal audit, loading verified approvals, pipeline integration |
+| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal/abstention audit use case and PostgreSQL repository | Loading verified approvals, connecting journaled signals to risk/paper execution |
 | 7: Risk/Kill Switch | Decimal sizing, trade limits, market filters, persistent decisions and manual Kill Switch | Audit all automatic Kill Switch triggers and recovery paths against specification |
 | 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, reports | Connect market-to-signal-to-risk-to-paper cycle and complete sustained paper acceptance |
 | 9: Live micro | Explicit startup gates, submission journals, Bybit private adapters, reconciliation, operator commands | Complete live lifecycle including partial fills/exits/balance synchronization and acceptance after paper validation |
@@ -64,7 +64,38 @@ Freshness uses both observation time and regime candle close, with an inclusive
 maximum-age boundary. Recalculating old data cannot make it fresh. This initial
 strategy path is intended for evaluation immediately after a candle closes.
 
-The strategy module has no storage, order submission or worker loop. Integration
-must persist trade signals and `NO_TRADE` reasons before enabling autonomous use.
+Domain strategies have no storage, order submission or worker loop. The application
+generation service now persists trade signals and `NO_TRADE` reasons before returning
+a usable result. Approval loading and risk/paper orchestration remain to be connected.
 Strategy parameters and technical triggers are implementation choices to research;
 they do not establish an edge and cannot replace validation.
+
+## Signal Journal
+
+Migration 026 adds `strategy_signals`. `GenerationService.GenerateAndRecord` owns
+the audit path: generate, verify envelope/context consistency, build an owned
+snapshot, persist, then return the signal. Missing dependencies, cancellation,
+invalid metadata, storage errors, conflicting IDs or invalid write acknowledgements
+return an error with no usable signal. The service does not grant approval; callers
+still supply the scoped snapshot until persisted approval loading is implemented.
+
+Each record contains mode, market scope, hypothesis version, reason, evaluation
+time, observation time, persistence time, exact decimal trade fields (if any),
+and the feature evidence consumed by the strategies. Evidence uses string values
+so a rejected NaN/Inf input can be logged. Invalid observation times may be retained
+for NO_TRADE; trade proposals require consistent, valid observation timestamps.
+Invalid envelope identity or mode is an invocation error rather than a stored signal.
+
+An evaluation ID and its input/time must stay stable on retry. Identical content
+returns Skipped; changed content returns ErrSignalConflict. Only the persistence
+time may differ on a retry, and the first stored time remains unchanged. Audit
+timestamps use UTC at PostgreSQL microsecond precision; monetary values remain
+exact. Concurrent identical writes produce one row; concurrent conflicting writes
+cannot overwrite it. Repository methods expose inserts and bounded filtered reads,
+with no update method.
+
+PostgreSQL integration tests cover migrations, decimal/JSON round trips, unchanged
+first-write time, conflict detection, concurrency, selector-to-journal orchestration,
+query boundaries, and rejection of malformed raw rows by database constraints.
+This journal does not yet enforce that every existing risk-intent caller uses a
+stored signal, and it does not establish approval or authorize execution.
