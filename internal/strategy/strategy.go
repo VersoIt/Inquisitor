@@ -65,6 +65,9 @@ type MarketContext struct {
 	Regime           regime.State
 	Current          marketdata.Candle
 	Previous         marketdata.Candle
+	PriorPrice       features.PriceFeatures
+	PriorVolatility  features.VolatilityFeatures
+	PriorVolume      features.VolumeFeatures
 	Trend            features.TrendFeatures
 	Volatility       features.VolatilityFeatures
 }

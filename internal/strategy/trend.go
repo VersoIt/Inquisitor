@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/VersoIt/Inquisitor/internal/marketdata/validator"
 	"github.com/VersoIt/Inquisitor/internal/regime"
 	"github.com/shopspring/decimal"
 )
@@ -92,37 +91,14 @@ func (s *TrendStrategy) GenerateSignal(ctx context.Context, m MarketContext) (Si
 	if !stop.IsPositive() || !target.IsPositive() {
 		return abstain(m, NameTrend, "trend_price_geometry_invalid"), nil
 	}
-	trade, err := NewTradeSignal(TradeSignalInput{
-		SignalID: m.SignalID, HypothesisID: m.Approval.HypothesisID,
-		HypothesisVersion: m.Approval.Version, StrategyName: NameTrend,
-		Symbol: m.Regime.Symbol, Side: side, Confidence: m.Regime.Confidence,
-		EntryPrice: m.EntryPrice, StopLoss: stop, TakeProfit: target, Leverage: decimal.NewFromInt(1),
-		HypothesisApprovedForMode: true, HypothesisMaxRiskPct: m.Approval.MaxRiskPct,
-		HypothesisMinConfidence: m.Approval.MinConfidence, Reason: reason,
-		ObservedAt: m.ObservedAt, CreatedAt: m.Now,
-	})
-	if err != nil {
-		return Signal{}, err
-	}
-	result := abstain(m, NameTrend, reason)
-	result.SignalID, result.Symbol = trade.SignalID, trade.Symbol
-	result.Type, result.Trade = SignalBuy, &trade
-	if side == SideShort {
-		result.Type = SignalSell
-	}
-	return result, nil
+	return buildSignal(m, NameTrend, side, stop, target, reason)
 }
 
 func trendInputBlock(m MarketContext) string {
-	if validator.ValidateCandle(m.Current) != nil || validator.ValidateCandle(m.Previous) != nil || !m.Current.IsClosed || !m.Previous.IsClosed {
-		return "candles_invalid"
+	if reason := candleInputBlock(m); reason != "" {
+		return reason
 	}
-	c, p, r := m.Current, m.Previous, m.Regime
-	if c.Exchange != r.Exchange || c.Category != r.Category || c.Symbol != r.Symbol || c.Interval != r.Interval ||
-		p.Exchange != c.Exchange || p.Category != c.Category || p.Symbol != c.Symbol || p.Interval != c.Interval ||
-		!c.OpenTime.Equal(p.CloseTime) || !c.OpenTime.Equal(r.OpenTime) || !c.CloseTime.Equal(r.CloseTime) {
-		return "candle_scope_or_time_mismatch"
-	}
+	c := m.Current
 	t, v := m.Trend, m.Volatility
 	if !t.Complete || !v.Complete || len(t.MissingReasons) > 0 || len(v.MissingReasons) > 0 {
 		return "features_incomplete"
