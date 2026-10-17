@@ -47,6 +47,7 @@ func TestServiceBuildRiskIntentRejectsInvalidInputsTableDriven(t *testing.T) {
 		ctx        context.Context
 		req        appstrategy.BuildRiskIntentRequest
 		wantErrSub string
+		wantErr    error
 	}{
 		{
 			name:       "cancelled context",
@@ -54,6 +55,7 @@ func TestServiceBuildRiskIntentRejectsInvalidInputsTableDriven(t *testing.T) {
 			ctx:        canceled,
 			req:        validBuildRiskIntentRequest(),
 			wantErrSub: context.Canceled.Error(),
+			wantErr:    context.Canceled,
 		},
 		{
 			name:       "nil service",
@@ -92,8 +94,11 @@ func TestServiceBuildRiskIntentRejectsInvalidInputsTableDriven(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error")
 			}
-			if !strings.Contains(err.Error(), tt.wantErrSub) && !errors.Is(err, context.Canceled) {
+			if !strings.Contains(err.Error(), tt.wantErrSub) {
 				t.Fatalf("expected error containing %q, got %v", tt.wantErrSub, err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("expected error wrapping %v, got %v", tt.wantErr, err)
 			}
 		})
 	}
