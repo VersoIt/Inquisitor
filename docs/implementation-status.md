@@ -4,6 +4,13 @@ Scope: the full original Master Technical Specification v2.0, including phases 1
 This is a code inventory, not a claim that all phase acceptance checks have passed.
 Passing unit tests does not establish deployment readiness or strategy profitability.
 
+Immediate priority: one pre-registered economic experiment rather than more
+platform expansion. `cmd/trend-experiment` replays existing trend entry logic on
+spot OHLC candles with modeled protective exits and cost-aware cash sizing.
+The fixed plan, limitations and acceptance gates are in
+`docs/experiments/trend-spot-btc-1h-v1-plan.md`. Its output is research evidence,
+not a persisted PAPER/LIVE approval. The complete specification remains backlog.
+
 | Phase | Existing implementation | Outstanding work |
 | --- | --- | --- |
 | 1: Foundation/data | Configuration, Compose PostgreSQL, migrations, Bybit instruments/klines, backfill, validation, gaps, repositories | Recheck acceptance against a clean deployment |

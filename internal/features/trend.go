@@ -232,7 +232,9 @@ func exponentialMovingAverageSeries(candles []marketdata.Candle, window int) ([]
 		case index+1 == window:
 			values[index], ready[index] = simpleMovingAverage(candles, index, window)
 		default:
-			values[index] = candle.Close.Mul(alpha).Add(values[index-1].Mul(oneMinusAlpha))
+			// Bound recursive scale: otherwise each candle adds alpha's decimal
+			// places and a multi-year EMA accumulates enormous coefficients.
+			values[index] = candle.Close.Mul(alpha).Add(values[index-1].Mul(oneMinusAlpha)).Round(16)
 			ready[index] = true
 		}
 	}

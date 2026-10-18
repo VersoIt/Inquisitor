@@ -140,6 +140,46 @@ func TestComputeTrendFeaturesTableDriven(t *testing.T) {
 	}
 }
 
+func TestTrendEMAScaleStaysBoundedAndDoesNotUseFutureCandles(t *testing.T) {
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	var candles []marketdata.Candle
+	for i := 0; i < 2000; i++ {
+		price := decimal.NewFromInt(100 + int64(i%17))
+		candles = append(candles, testCandle(start.Add(time.Duration(i)*time.Minute), price.String(), price.Add(decimal.NewFromInt(2)).String(), price.Sub(decimal.NewFromInt(2)).String(), price.String()))
+	}
+	full, err := features.ComputeTrendFeatures(candles, features.DefaultTrendFeatureConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := features.ComputeTrendFeatures(candles[:500], features.DefaultTrendFeatureConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, row := range full {
+		if row.EMA20.Exponent() < -16 || row.EMA50.Exponent() < -16 {
+			t.Fatalf("EMA recursive scale grew at candle %d", i)
+		}
+	}
+	for i, row := range prefix {
+		if !row.EMA20.Equal(full[i].EMA20) || !row.EMA50.Equal(full[i].EMA50) || !row.ADX.Equal(full[i].ADX) {
+			t.Fatalf("future data changed feature at %d", i)
+		}
+	}
+	fullVol, err := features.ComputeVolatilityFeatures(candles, features.DefaultVolatilityFeatureConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixVol, err := features.ComputeVolatilityFeatures(candles[:500], features.DefaultVolatilityFeatureConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, row := range prefixVol {
+		if !row.ATR.Equal(fullVol[i].ATR) || row.VolatilityCompression != fullVol[i].VolatilityCompression || row.Complete != fullVol[i].Complete {
+			t.Fatalf("future data changed volatility at %d", i)
+		}
+	}
+}
+
 func TestComputeTrendFeaturesRejectsInvalidConfigTableDriven(t *testing.T) {
 	now := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
 

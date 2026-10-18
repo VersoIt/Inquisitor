@@ -2,6 +2,24 @@
 
 Inquisitor is being built as a research-first crypto quant platform, not as a money-printing bot. The system should collect clean market data, test hypotheses honestly, reject weak ideas, and keep live trading disabled unless strict validation gates have been passed.
 
+## Immediate Priority
+
+Validate one economic hypothesis before expanding the platform. The first frozen
+[experiment plan](docs/experiments/trend-spot-btc-1h-v1-plan.md) runs the existing
+trend entry logic against public BTCUSDT spot hourly candles with next-open
+execution, modeled stops, fees/spread/slippage, untouched-by-tuning 2025 validation,
+four chronological blocks and doubled-cost stress. This is an OHLC-only research
+model, not the full production regime/risk pipeline or live-trading approval.
+
+```powershell
+go run ./cmd/trend-experiment -download
+```
+
+No exchange keys, account access or database are required. Immutable candles and
+the full report are written under `tmp/experiments/`; reports must never be
+overwritten to hide an unsuccessful run. The full specification remains backlog,
+not a claim that a profitable strategy already exists.
+
 ## Current Scope
 
 This repository has progressed from the Phase 1 market-data foundation through research and paper-validation lifecycle slices, and has started the Phase 7 risk boundary:

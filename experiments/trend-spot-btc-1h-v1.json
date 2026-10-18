@@ -1,0 +1,34 @@
+{
+  "ID": "trend-spot-btc-1h-v1",
+  "SchemaVersion": 1,
+  "Exchange": "bybit",
+  "Category": "spot",
+  "Symbol": "BTCUSDT",
+  "Interval": "60",
+  "DataStart": "2023-12-01T00:00:00Z",
+  "DevelopmentStart": "2024-01-01T00:00:00Z",
+  "ValidationStart": "2025-01-01T00:00:00Z",
+  "ValidationEnd": "2026-01-01T00:00:00Z",
+  "InitialEquity": "1000",
+  "RiskPerTradePct": "0.25",
+  "QuantityStep": "0.000001",
+  "MinNotional": "5",
+  "MinADX": "25",
+  "StopATRMultiple": "2",
+  "TakeProfitR": "2",
+  "MaxHoldingCandles": 48,
+  "Costs": {
+    "MakerFeeBPS": "10",
+    "TakerFeeBPS": "10",
+    "SpreadBPS": "5",
+    "SlippageBPS": "3",
+    "SlippageConservativeFactor": "1.5"
+  },
+  "Criteria": {
+    "MinValidationTrades": 100,
+    "MinBlockTrades": 20,
+    "MinProfitableBlocks": 3,
+    "MinProfitFactor": "1.15",
+    "MaxMarkedDrawdownPct": "15"
+  }
+}
