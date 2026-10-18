@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	appresearch "github.com/VersoIt/Inquisitor/internal/app/research"
+	"github.com/VersoIt/Inquisitor/internal/backtest"
 	"github.com/VersoIt/Inquisitor/internal/exchanges"
 	"github.com/VersoIt/Inquisitor/internal/marketdata"
 	"github.com/VersoIt/Inquisitor/internal/research"
@@ -145,6 +147,68 @@ func TestEvidenceJSONRejectsUnknownFieldsAndTrailingPayloads(t *testing.T) {
 			var p research.TrendExperimentPlan
 			if err := readJSON(path, &p); err == nil {
 				t.Fatal("invalid JSON accepted")
+			}
+		})
+	}
+}
+
+func TestFrozenFirstResultHasAReconciledImmutableLedger(t *testing.T) {
+	var artifact struct {
+		GeneratedAt  time.Time
+		PublicSource string
+		Report       appresearch.TrendExperimentReport
+	}
+	if err := readJSON(filepath.Join("..", "..", "docs", "experiments", "trend-spot-btc-1h-v1-result.json"), &artifact); err != nil {
+		t.Fatal(err)
+	}
+	r := artifact.Report
+	planHash, err := research.ExperimentHash(r.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Verdict != "REJECTED" || r.Validation.Summary.Trades != 108 || r.CandleCount != 18288 || r.PlanSHA256 != planHash || r.SourceSHA256 == "" || r.CandlesSHA256 == "" {
+		t.Fatal("frozen first result metadata changed")
+	}
+	periods := append([]appresearch.TrendExperimentPeriod{r.Development, r.Validation, r.Stress}, r.ValidationBlocks...)
+	for index, period := range periods {
+		t.Run(period.Start.Format(time.RFC3339)+"/"+string(rune('A'+index)), func(t *testing.T) {
+			costs := r.Plan.Costs
+			if index == 2 {
+				two := decimal.NewFromInt(2)
+				costs.MakerFeeBPS = costs.MakerFeeBPS.Mul(two)
+				costs.TakerFeeBPS = costs.TakerFeeBPS.Mul(two)
+				costs.SpreadBPS = costs.SpreadBPS.Mul(two)
+				costs.SlippageBPS = costs.SlippageBPS.Mul(two)
+			}
+			equity := r.Plan.InitialEquity
+			lastExit := period.Start
+			var trades []backtest.RoundTrip
+			for _, row := range period.Trades {
+				trade := row.Trade
+				if trade.Entry.Time.Before(lastExit) || trade.Entry.Time.Before(period.Start) || trade.Exit.Time.After(period.End) || !row.SignalTime.Equal(trade.Entry.Time) || trade.Entry.Notional.Add(trade.Entry.Fee).GreaterThan(equity) || !trade.Entry.Quantity.Mod(r.Plan.QuantityStep).IsZero() {
+					t.Fatal("overlap, future signal, invalid window or spot borrowing")
+				}
+				expected, err := backtest.EvaluateRoundTrip(backtest.RoundTripInput{Direction: trade.Direction, EntryTime: trade.Entry.Time, ExitTime: trade.Exit.Time, EntryMidPrice: trade.Entry.MidPrice, ExitMidPrice: trade.Exit.MidPrice, Quantity: trade.Entry.Quantity, Costs: costs})
+				if err != nil {
+					t.Fatal(err)
+				}
+				actualHash, _ := research.ExperimentHash(trade)
+				expectedHash, _ := research.ExperimentHash(expected)
+				if actualHash != expectedHash {
+					t.Fatal("frozen trade does not match modeled fills/costs")
+				}
+				equity = equity.Add(trade.NetPnL)
+				lastExit = trade.Exit.Time
+				trades = append(trades, trade)
+			}
+			summary, err := backtest.SummarizeRoundTrips(r.Plan.InitialEquity, trades)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actualHash, _ := research.ExperimentHash(period.Summary)
+			expectedHash, _ := research.ExperimentHash(summary)
+			if actualHash != expectedHash || !equity.Equal(period.Summary.FinalEquity) {
+				t.Fatal("frozen equity/summary does not reconcile")
 			}
 		})
 	}

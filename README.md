@@ -20,6 +20,10 @@ the full report are written under `tmp/experiments/`; reports must never be
 overwritten to hide an unsuccessful run. The full specification remains backlog,
 not a claim that a profitable strategy already exists.
 
+First measured result: [the frozen v1 candidate was rejected](docs/experiments/trend-spot-btc-1h-v1-result.md).
+Its 2025 validation returned -7.11% in the model after costs; no trading approval
+was issued and the thresholds were not loosened.
+
 ## Current Scope
 
 This repository has progressed from the Phase 1 market-data foundation through research and paper-validation lifecycle slices, and has started the Phase 7 risk boundary:

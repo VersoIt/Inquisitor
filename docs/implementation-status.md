@@ -10,6 +10,9 @@ spot OHLC candles with modeled protective exits and cost-aware cash sizing.
 The fixed plan, limitations and acceptance gates are in
 `docs/experiments/trend-spot-btc-1h-v1-plan.md`. Its output is research evidence,
 not a persisted PAPER/LIVE approval. The complete specification remains backlog.
+The first real-history run is complete: `trend-spot-btc-1h-v1` was REJECTED
+(2025 validation: 108 trades, net -71.12 on simulated initial equity 1000).
+See `docs/experiments/trend-spot-btc-1h-v1-result.md`; no approval was granted.
 
 | Phase | Existing implementation | Outstanding work |
 | --- | --- | --- |
