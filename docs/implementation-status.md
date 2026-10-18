@@ -11,7 +11,7 @@ Passing unit tests does not establish deployment readiness or strategy profitabi
 | 3: Features/regime | Price/trend/volatility/volume/microstructure/quality features, regime detection and storage | Full feature inventory against specification, derivative inputs, operational acceptance |
 | 4: Research/backtest | Hypothesis import, experiments, rule evaluation, cost-aware fixed-horizon backtests, OOS, reports | Full metrics/report inventory and execution-model acceptance beyond fixed horizons |
 | 5: Validation | Chronological walk-forward, regime analysis, candidate/rejection gates | Parameter-stability report and full approval lifecycle alignment |
-| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings and source-backed authorization | Operator commands, connecting authorized journaled signals to risk/paper execution, exact strategy/config validation provenance |
+| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings, source-backed authorization and linked risk evaluation | Operator commands, connecting evaluated signals to guarded paper execution, exact strategy/config validation provenance |
 | 7: Risk/Kill Switch | Decimal sizing, trade limits, market filters, persistent decisions and manual Kill Switch | Audit all automatic Kill Switch triggers and recovery paths against specification |
 | 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, reports | Connect market-to-signal-to-risk-to-paper cycle and complete sustained paper acceptance |
 | 9: Live micro | Explicit startup gates, submission journals, Bybit private adapters, reconciliation, operator commands | Complete live lifecycle including partial fills/exits/balance synchronization and acceptance after paper validation |
@@ -67,8 +67,8 @@ strategy path is intended for evaluation immediately after a candle closes.
 
 Domain strategies have no storage, order submission or worker loop. The application
 generation service now persists trade signals and `NO_TRADE` reasons before returning
-a usable result. The authorized wrapper now loads PAPER approval; risk/paper
-execution orchestration remains to be connected.
+a usable result. The authorized wrapper loads PAPER approval, and the stored-signal
+use case now records linked risk evaluations. Paper execution remains to be connected.
 Strategy parameters and technical triggers are implementation choices to research;
 they do not establish an edge and cannot replace validation.
 
@@ -134,3 +134,47 @@ binding does not establish that those exact implementations were backtested. Exa
 strategy/config provenance remains necessary before broader automation/live approval.
 Authorization is a snapshot, not an order reservation; eventual risk/execution
 orchestration must recheck current authorization and runtime state at its boundary.
+
+## Stored-Signal Risk Evaluation
+
+Migration 028 links one stored PAPER trade signal to one risk decision and the
+reviewed approval used for evaluation. Intent/decision IDs are deterministic from
+the signal ID, independent of the grant, so rebinding cannot create another risk
+decision for the same signal. The source link and central `risk_decisions` audit
+are written in one transaction. Foreign-key failure rolls back both; a per-signal
+transaction advisory lock serializes concurrent persistence. No ticket is created.
+
+`PaperRiskService.EvaluateStoredSignal` loads the journaled signal and resolves
+approval again against current persisted evidence. Hypothesis/version, strategy,
+market, regime, grant/validation/run IDs and content hash must agree. NO_TRADE,
+LIVE, missing provenance, changed regimes, future records and unavailable approval
+fail closed. Hypothesis approval flags and risk/confidence caps are replaced from
+the resolved approval, never trusted from the old signal. The persistent kill
+switch is mandatory and cannot clear a caller's active stop. A lower current
+regime confidence also lowers the risk intent's confidence; it cannot retain an
+obsolete higher score from signal generation.
+
+The pure Risk Engine sizes the proposal against supplied account, instrument,
+liquidity, spread/slippage and runtime snapshots. Both approvals and risk rejections
+are journaled, including their input context, exact risk-policy snapshot and
+individual checks. The stored outcome must be reproducible by the pure Risk Engine
+from that context and policy, not merely syntactically valid. Effective data
+time cannot be newer than the signal observation or regime candle close. Missing
+and future quote times remain invalid rather than being hidden by that bound.
+Audit timestamps use UTC microsecond precision and monetary values stay decimal.
+
+An equivalent retry returns the original timestamps with `Replayed=true`, without
+recomputing risk. A changed request or concurrent changed outcome conflicts;
+neither overwrites the first result. Approval and kill-switch availability are
+checked even before replay. Read/write errors, corrupt rows or inconsistent write
+acknowledgements return no usable evaluation. SQL mocks cover failure boundaries;
+PostgreSQL tests cover authorized selector/trend generation through linked risk
+evaluation, round trips, rollback, concurrency, conflicts and revocation.
+
+This is historical evaluation evidence, not an execution permit, reservation,
+autonomous trading loop or portfolio-state calculation. Account/market/regime
+snapshots still come from the caller; the numeric policy is recorded, but an exact
+strategy/Risk Engine code version is not. The next execution boundary must source current state,
+revalidate freshness/authorization, prevent overcommitted exposure, and atomically
+link any paper ticket. In particular, an old approved replay must not be treated
+as a fresh permission to trade. No LIVE path is enabled by this use case.

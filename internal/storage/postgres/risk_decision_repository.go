@@ -21,6 +21,15 @@ func NewRiskDecisionRepository(db *sql.DB) *RiskDecisionRepository {
 }
 
 func (r *RiskDecisionRepository) RecordDecision(ctx context.Context, record domainrisk.DecisionAuditRecord) (domainrisk.DecisionAuditStats, error) {
+	return recordRiskDecision(ctx, r.db, record)
+}
+
+type riskDecisionWriter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func recordRiskDecision(ctx context.Context, writer riskDecisionWriter, record domainrisk.DecisionAuditRecord) (domainrisk.DecisionAuditStats, error) {
 	if err := domainrisk.ValidateDecisionAuditRecord(record); err != nil {
 		return domainrisk.DecisionAuditStats{}, err
 	}
@@ -28,7 +37,7 @@ func (r *RiskDecisionRepository) RecordDecision(ctx context.Context, record doma
 	if err != nil {
 		return domainrisk.DecisionAuditStats{}, err
 	}
-	result, err := r.db.ExecContext(ctx, `
+	result, err := writer.ExecContext(ctx, `
 		INSERT INTO risk_decisions (
 			decision_id, intent_id, mode, hypothesis_id, strategy_name, symbol, side,
 			entry_price, leverage, confidence, intent_reason, intent_created_at,
@@ -52,7 +61,7 @@ func (r *RiskDecisionRepository) RecordDecision(ctx context.Context, record doma
 	if inserted == 1 {
 		return domainrisk.DecisionAuditStats{Inserted: 1}, nil
 	}
-	if err := r.assertExistingDecisionMatches(ctx, args); err != nil {
+	if err := assertExistingDecisionMatches(ctx, writer, args); err != nil {
 		return domainrisk.DecisionAuditStats{}, err
 	}
 	return domainrisk.DecisionAuditStats{Skipped: 1}, nil
@@ -155,9 +164,9 @@ func (r *RiskDecisionRepository) ListPendingLiveDecisions(
 	return candidates, nil
 }
 
-func (r *RiskDecisionRepository) assertExistingDecisionMatches(ctx context.Context, args []any) error {
+func assertExistingDecisionMatches(ctx context.Context, writer riskDecisionWriter, args []any) error {
 	var exists int
-	if err := r.db.QueryRowContext(ctx, `
+	if err := writer.QueryRowContext(ctx, `
 		SELECT 1
 		FROM risk_decisions
 		WHERE decision_id = $1

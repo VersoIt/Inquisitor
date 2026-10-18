@@ -19,6 +19,13 @@ func NewTradeRiskEngine(policy Policy) (*TradeRiskEngine, error) {
 	return &TradeRiskEngine{policy: policy}, nil
 }
 
+// PolicySnapshot returns an owned copy for reproducible risk audits.
+func (e *TradeRiskEngine) PolicySnapshot() Policy {
+	policy := e.policy
+	policy.AllowedSymbols = append([]string(nil), policy.AllowedSymbols...)
+	return policy
+}
+
 func (e *TradeRiskEngine) Evaluate(input EvaluationInput) (Decision, error) {
 	if e == nil {
 		return Decision{}, errors.New("risk engine is required")

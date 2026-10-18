@@ -10,6 +10,23 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/risk"
 )
 
+func TestTradeRiskEnginePolicySnapshotOwnsItsSymbolList(t *testing.T) {
+	policy := validPolicy()
+	engine := mustEngine(t, policy)
+	snapshot := engine.PolicySnapshot()
+	policy.AllowedSymbols[0] = "OTHER"
+	snapshot.AllowedSymbols[0] = "FORGED"
+	snapshot.RiskPerTradePct = decimal.NewFromInt(1)
+	again := engine.PolicySnapshot()
+	if again.AllowedSymbols[0] != "BTCUSDT" || !again.RiskPerTradePct.Equal(validPolicy().RiskPerTradePct) {
+		t.Fatal("snapshot or constructor exposed mutable engine configuration")
+	}
+	decision, err := engine.Evaluate(validInput())
+	if err != nil || !decision.Approved {
+		t.Fatalf("snapshot mutation changed engine behavior: %+v %v", decision, err)
+	}
+}
+
 func TestTradeRiskEngineApprovesAndSizesConservativeLong(t *testing.T) {
 	engine := mustEngine(t, validPolicy())
 	input := validInput()
