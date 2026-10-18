@@ -20,24 +20,27 @@ const (
 )
 
 type OrderTicket struct {
-	TicketID     string
-	ValidationID string
-	DecisionID   string
-	IntentID     string
-	Exchange     string
-	Category     string
-	Symbol       string
-	Interval     string
-	Side         OrderSide
-	Quantity     decimal.Decimal
-	EntryPrice   decimal.Decimal
-	StopLoss     decimal.Decimal
-	TakeProfit   decimal.Decimal
-	Leverage     decimal.Decimal
-	MaxLoss      decimal.Decimal
-	Confidence   int
-	Reason       string
-	CreatedAt    time.Time
+	// Source IDs are a read projection of the immutable decision-to-signal linkage.
+	SourceSignalID   string
+	SourceApprovalID string
+	TicketID         string
+	ValidationID     string
+	DecisionID       string
+	IntentID         string
+	Exchange         string
+	Category         string
+	Symbol           string
+	Interval         string
+	Side             OrderSide
+	Quantity         decimal.Decimal
+	EntryPrice       decimal.Decimal
+	StopLoss         decimal.Decimal
+	TakeProfit       decimal.Decimal
+	Leverage         decimal.Decimal
+	MaxLoss          decimal.Decimal
+	Confidence       int
+	Reason           string
+	CreatedAt        time.Time
 }
 
 type OrderTicketInput struct {
@@ -116,6 +119,9 @@ func (s OrderTicketStats) Total() int {
 
 func ValidateOrderTicket(ticket OrderTicket) error {
 	var problems []string
+	if (ticket.SourceSignalID == "") != (ticket.SourceApprovalID == "") || ticket.SourceSignalID != strings.TrimSpace(ticket.SourceSignalID) || ticket.SourceApprovalID != strings.TrimSpace(ticket.SourceApprovalID) {
+		problems = append(problems, "source signal and approval IDs must be paired and trimmed")
+	}
 	addRequired := func(field, value string) {
 		if strings.TrimSpace(value) == "" {
 			problems = append(problems, field+" is required")

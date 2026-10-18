@@ -86,8 +86,8 @@ func TestPaperOrderTicketRepositorySQLMockTableDriven(t *testing.T) {
 				rows := sqlmock.NewRows([]string{
 					"ticket_id", "validation_id", "decision_id", "intent_id", "exchange", "category", "symbol", "interval",
 					"side", "quantity", "entry_price", "stop_loss", "take_profit", "leverage", "max_loss", "confidence",
-					"reason", "created_at",
-				}).AddRow(paperOrderTicketRowValues(ticket)...)
+					"reason", "created_at", "source_signal_id", "source_approval_id",
+				}).AddRow(append(paperOrderTicketRowValues(ticket), ticket.SourceSignalID, ticket.SourceApprovalID)...)
 				mock.ExpectQuery("SELECT ticket_id, validation_id, decision_id").
 					WithArgs(ticket.TicketID, ticket.ValidationID, ticket.DecisionID, ticket.IntentID, ticket.Symbol, ticket.Interval, now.Add(-time.Hour), now.Add(time.Hour), 20).
 					WillReturnRows(rows)

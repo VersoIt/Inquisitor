@@ -25,16 +25,32 @@ func (r *PaperOrderFillRepository) RecordOrderFill(ctx context.Context, fill dom
 		return domainpaper.OrderFillStats{}, err
 	}
 	args := paperOrderFillSQLArgs(fill)
+	// Hold the source grant/validation locks through INSERT. An earlier application
+	// check alone cannot prevent revocation between authorization and persistence.
 	result, err := r.db.ExecContext(ctx, `
+		WITH eligible_signal_source AS MATERIALIZED (
+			SELECT e.decision_id
+			FROM paper_signal_risk_evaluations e
+			JOIN paper_order_tickets t ON t.decision_id=e.decision_id AND t.ticket_id=$2
+			JOIN paper_strategy_approvals a ON a.approval_id=e.approval_id
+			JOIN paper_validation_records v ON v.validation_id=a.validation_id
+			WHERE e.decision_id=$4 AND a.revoked_at IS NULL
+			  AND v.status='RUNNING' AND v.validation_id=$3 AND t.validation_id=$3
+			FOR SHARE OF a, v
+		)
 		INSERT INTO paper_order_fills (
 			fill_id, ticket_id, validation_id, decision_id, intent_id, exchange, category, symbol, interval,
 			side, liquidity, mid_price, executed_price, quantity, notional, fee, fee_bps, spread_bps,
 			slippage_bps, filled_at, recorded_at
-		) VALUES (
+		) SELECT
 			$1, $2, $3, $4, $5, $6, $7, $8, $9,
 			$10, $11, $12, $13, $14, $15, $16, $17, $18,
 			$19, $20, $21
+		WHERE NOT EXISTS (
+			SELECT 1 FROM paper_signal_risk_evaluations e
+			JOIN paper_order_tickets t ON t.decision_id=e.decision_id WHERE t.ticket_id=$2
 		)
+		   OR EXISTS (SELECT 1 FROM eligible_signal_source)
 		ON CONFLICT (fill_id) DO NOTHING
 	`, args...)
 	if err != nil {

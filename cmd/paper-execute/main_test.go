@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,40 @@ import (
 
 	"github.com/VersoIt/Inquisitor/internal/config"
 )
+
+func TestPaperSignalEntryAuthorizationBuildsFromValidatedConfiguration(t *testing.T) {
+	t.Setenv("DATABASE_DSN", "postgres://inquisitor:unused@localhost:5432/test?sslmode=disable")
+	for _, scenario := range []string{"valid", "invalid risk", "weakened research gates"} {
+		t.Run(scenario, func(t *testing.T) {
+			cfg, err := config.Load(filepath.Join("..", "..", "configs", "config.example.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "invalid risk" {
+				cfg.Risk.RiskPerTradePct = -1
+			}
+			if scenario == "weakened research gates" {
+				cfg.Research.RequireWalkForward = false
+			}
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			guard, err := paperSignalEntryAuthorization(cfg, db)
+			if scenario == "valid" {
+				if err != nil || guard == nil {
+					t.Fatalf("guard=%v err=%v", guard, err)
+				}
+			} else if err == nil || guard != nil {
+				t.Fatal("unsafe configuration enabled entries")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func TestPaperExecutionCostModelUsesDefaultsAndOverrides(t *testing.T) {
 	cfg := safePaperExecutionConfig()

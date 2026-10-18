@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	apppaper "github.com/VersoIt/Inquisitor/internal/app/paper"
 	appstrategy "github.com/VersoIt/Inquisitor/internal/app/strategy"
+	"github.com/VersoIt/Inquisitor/internal/backtest"
 	"github.com/VersoIt/Inquisitor/internal/clock"
 	"github.com/VersoIt/Inquisitor/internal/features"
 	"github.com/VersoIt/Inquisitor/internal/hypothesis"
@@ -203,6 +205,11 @@ func TestPaperSignalRiskRepositoryIntegration(t *testing.T) {
 	f := testutil.PaperRisk(t)
 	cleanup := func() {
 		for _, q := range []struct{ sql, id string }{
+			{"DELETE FROM paper_equity_events WHERE validation_id=$1", f.Approval.Grant.ValidationID},
+			{"DELETE FROM paper_position_closes WHERE validation_id=$1", f.Approval.Grant.ValidationID},
+			{"DELETE FROM paper_open_positions WHERE validation_id=$1", f.Approval.Grant.ValidationID},
+			{"DELETE FROM paper_order_fills WHERE validation_id=$1", f.Approval.Grant.ValidationID},
+			{"DELETE FROM paper_order_tickets WHERE validation_id=$1", f.Approval.Grant.ValidationID},
 			{"DELETE FROM paper_signal_risk_evaluations WHERE approval_id IN (SELECT approval_id FROM paper_strategy_approvals WHERE validation_id=$1)", f.Approval.Grant.ValidationID},
 			{"DELETE FROM risk_decisions WHERE decision_id LIKE 'paper_signal_risk_%' AND hypothesis_id=$1", f.Approval.Grant.HypothesisName},
 			{"DELETE FROM strategy_signals WHERE hypothesis_id=$1", f.Approval.Grant.HypothesisName},
@@ -260,6 +267,10 @@ func TestPaperSignalRiskRepositoryIntegration(t *testing.T) {
 	t.Run("application persists linked approval and risk inputs", func(t *testing.T) {
 		f := testutil.PaperRisk(t)
 		f.Signal.Signal.SignalID += "_generated"
+		f.Approval.Grant.ApprovalID += "_lifecycle"
+		if _, err := grants.RecordPaperApproval(ctx, f.Approval.Grant); err != nil {
+			t.Fatal(err)
+		}
 		c := clock.FixedClock{Time: f.Approval.Now}
 		approvals, err := appstrategy.NewApprovalService(grants, c, f.Approval.Policy)
 		if err != nil {
@@ -318,6 +329,120 @@ func TestPaperSignalRiskRepositoryIntegration(t *testing.T) {
 		req.Account.OpenPositions++
 		if _, err := s.EvaluateStoredSignal(ctx, req); !errors.Is(err, strategy.ErrPaperRiskConflict) {
 			t.Fatalf("changed input: %v", err)
+		}
+		req.Account.OpenPositions--
+		ticketRepo := postgres.NewPaperOrderTicketRepository(db)
+		submissions := appstrategy.NewPaperSignalSubmissionService(s, approvals, ticketRepo, c)
+		submitted, err := submissions.Submit(ctx, req)
+		if err != nil || submitted.Ticket.SourceSignalID != req.SignalID {
+			t.Fatalf("submit ticket %+v %v", submitted, err)
+		}
+		repeated, err := submissions.Submit(ctx, req)
+		if err != nil || !repeated.Replayed || repeated.Ticket.TicketID != submitted.Ticket.TicketID {
+			t.Fatalf("submit retry %+v %v", repeated, err)
+		}
+		guard := appstrategy.NewPaperEntryAuthorization(approvals, repo, c, f.Policy, true)
+		newPaperService := func(at time.Time, authorization apppaper.EntryAuthorization) *apppaper.Service {
+			return apppaper.NewService(runs, runs, apppaper.WithClock(clock.FixedClock{Time: at}), apppaper.WithValidationRecordRepository(validations), apppaper.WithOrderTicketRepository(ticketRepo),
+				apppaper.WithOrderFillRepository(postgres.NewPaperOrderFillRepository(db)), apppaper.WithOpenPositionRepository(postgres.NewPaperOpenPositionRepository(db)),
+				apppaper.WithPositionCloseRepository(postgres.NewPaperPositionCloseRepository(db)), apppaper.WithEquityEventRepository(postgres.NewPaperEquityEventRepository(db)),
+				apppaper.WithKillSwitchRepository(postgres.NewRiskKillSwitchRepository(db)), apppaper.WithEntryAuthorization(authorization))
+		}
+		costs := backtest.CostModel{MakerFeeBPS: decimal.NewFromInt(1), TakerFeeBPS: decimal.NewFromInt(1), SpreadBPS: decimal.NewFromInt(1), SlippageBPS: decimal.NewFromInt(1), SlippageConservativeFactor: decimal.NewFromInt(1)}
+		entryReq := apppaper.ReconcileTicketFillAtMarketRequest{FillID: "signal_lifecycle_fill", PositionID: "signal_lifecycle_position", TicketID: submitted.Ticket.TicketID, ValidationID: f.Approval.Grant.ValidationID,
+			Liquidity: backtest.LiquidityTaker, MidPrice: decimal.NewFromInt(100), Costs: costs, FilledAt: c.Now()}
+		if _, err := newPaperService(c.Now(), nil).ReconcileTicketFillAtMarket(ctx, entryReq); err == nil {
+			t.Fatal("source-backed fill succeeded without authorization")
+		}
+		tooCostly := entryReq
+		tooCostly.Costs.TakerFeeBPS = decimal.NewFromInt(6)
+		if _, err := newPaperService(c.Now(), guard).ReconcileTicketFillAtMarket(ctx, tooCostly); err == nil {
+			t.Fatal("fill exceeded risk budget including commission")
+		}
+		opened, err := newPaperService(c.Now(), guard).ReconcileTicketFillAtMarket(ctx, entryReq)
+		if err != nil || opened.FillStats.Inserted != 1 || opened.PositionStats.Inserted != 1 || !opened.Position.Quantity.Equal(first.Evaluation.Audit.Decision.FinalQuantity) {
+			t.Fatalf("entry %+v %v", opened, err)
+		}
+		// Prepare another pending ticket so revocation is tested before any fill exists.
+		market.SignalID += "_pending"
+		if _, err := generation.GenerateAndRecord(ctx, f.Approval.Grant.ApprovalID, market); err != nil {
+			t.Fatal(err)
+		}
+		pendingReq := req
+		pendingReq.SignalID = market.SignalID
+		pending, err := submissions.Submit(ctx, pendingReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		calculated, err := backtest.EvaluateFill(backtest.FillInput{Direction: backtest.DirectionLong, Role: backtest.FillRoleEntry, Time: c.Now(), MidPrice: decimal.NewFromInt(100), Quantity: pending.Ticket.Quantity, Liquidity: backtest.LiquidityTaker, Costs: costs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fillReq := apppaper.RecordOrderFillRequest{FillID: "signal_lifecycle_blocked_fill", TicketID: pending.Ticket.TicketID, ValidationID: pending.Ticket.ValidationID, Liquidity: backtest.LiquidityTaker,
+			MidPrice: calculated.MidPrice, ExecutedPrice: calculated.ExecutedPrice, Fee: calculated.Fee, FeeBPS: calculated.FeeBPS, SpreadBPS: calculated.SpreadBPS, SlippageBPS: calculated.SlippageBPS, FilledAt: c.Now()}
+		if err := guard.AuthorizePaperEntry(ctx, pending.Ticket, fillReq); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := approvals.Revoke(ctx, f.Approval.Grant.ApprovalID, "operator", "stop new entries"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newPaperService(c.Now(), guard).RecordOrderFill(ctx, fillReq); !errors.Is(err, strategy.ErrApprovalUnavailable) {
+			t.Fatalf("revoked fill: %v", err)
+		}
+		// Simulate revocation between application authorization and the INSERT.
+		direct, err := paper.NewOrderFill(paper.OrderFillInput{FillID: fillReq.FillID, Ticket: pending.Ticket, Liquidity: fillReq.Liquidity, MidPrice: fillReq.MidPrice, ExecutedPrice: fillReq.ExecutedPrice, Fee: fillReq.Fee, FeeBPS: fillReq.FeeBPS, SpreadBPS: fillReq.SpreadBPS, SlippageBPS: fillReq.SlippageBPS, FilledAt: fillReq.FilledAt, RecordedAt: c.Now()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := postgres.NewPaperOrderFillRepository(db).RecordOrderFill(ctx, direct); err == nil {
+			t.Fatal("database accepted a new fill after revocation")
+		}
+		// A recorded fill represents existing exposure: recovery is allowed after
+		// revocation/staleness, and must preserve its original audit timestamps.
+		recovered, err := newPaperService(c.Now().Add(time.Hour), guard).ReconcileTicketFillAtMarket(ctx, entryReq)
+		if err != nil || recovered.FillStats.Skipped != 1 || recovered.PositionStats.Skipped != 1 || !recovered.Fill.RecordedAt.Equal(opened.Fill.RecordedAt) || !recovered.Position.RecordedAt.Equal(opened.Position.RecordedAt) {
+			t.Fatalf("late recovery %+v %v", recovered, err)
+		}
+		settled, err := newPaperService(c.Now().Add(time.Hour), guard).SettlePositionAtMarket(ctx, apppaper.SettlePositionAtMarketRequest{EventID: "signal_lifecycle_equity", CloseID: "signal_lifecycle_close", PositionID: entryReq.PositionID, ValidationID: entryReq.ValidationID,
+			Liquidity: backtest.LiquidityTaker, ExitMidPrice: decimal.NewFromInt(108), Costs: costs, CloseReason: paper.PositionCloseReasonManual, ClosedAt: c.Now().Add(time.Hour)})
+		if err != nil || settled.CloseStats.Inserted != 1 || settled.EquityStats.Inserted != 1 || !settled.Event.EquityAfter.Equal(settled.Event.EquityBefore.Add(settled.Close.NetPnL)) || !settled.Close.NetPnL.IsPositive() {
+			t.Fatalf("settlement %+v %v", settled, err)
+		}
+	})
+	t.Run("concurrent signal submissions create one ticket", func(t *testing.T) {
+		f := seedSignal(t, "_ticket_concurrency")
+		c := clock.FixedClock{Time: f.Approval.Now}
+		approvals, err := appstrategy.NewApprovalService(grants, c, f.Approval.Policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engine, err := risk.NewTradeRiskEngine(f.Policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		evaluations, err := appstrategy.NewPaperRiskService(signals, approvals, repo, postgres.NewRiskKillSwitchRepository(db), engine, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := appstrategy.NewPaperSignalSubmissionService(evaluations, approvals, postgres.NewPaperOrderTicketRepository(db), c)
+		req := appstrategy.EvaluatePaperSignalRequest{SignalID: f.Signal.Signal.SignalID, ApprovalID: f.Approval.Grant.ApprovalID, Regime: f.Regime, Account: f.Input.Account, Market: f.Input.Market, Runtime: f.Input.Runtime}
+		var wg sync.WaitGroup
+		errs := make(chan error, 6)
+		for i := 0; i < 6; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); _, err := s.Submit(ctx, req); errs <- err }()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, decisionID := strategy.PaperRiskIDs(req.SignalID)
+		rows, err := postgres.NewPaperOrderTicketRepository(db).ListOrderTickets(ctx, paper.OrderTicketQuery{DecisionID: decisionID})
+		if err != nil || len(rows) != 1 || rows[0].SourceSignalID != req.SignalID || rows[0].SourceApprovalID != req.ApprovalID {
+			t.Fatalf("concurrent tickets %+v %v", rows, err)
 		}
 	})
 	t.Run("rejected decisions round trip", func(t *testing.T) {

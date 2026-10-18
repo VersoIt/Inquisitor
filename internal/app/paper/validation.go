@@ -23,24 +23,33 @@ type ResultRepository interface {
 }
 
 type Service struct {
-	runs        RunRepository
-	results     ResultRepository
-	records     domainpaper.ValidationRecordRepository
-	trades      domainpaper.ValidationTradeRepository
-	tickets     domainpaper.OrderTicketRepository
-	fills       domainpaper.OrderFillRepository
-	positions   domainpaper.OpenPositionRepository
-	closes      domainpaper.PositionCloseRepository
-	equity      domainpaper.EquityEventRepository
-	killSwitch  domainrisk.KillSwitchRepository
-	performance domainpaper.DailyPerformanceRepository
-	orderbooks  marketdata.OrderbookSnapshotRepository
-	generator   SimulationTradeGenerator
-	clock       clock.Clock
-	idGenerator IDGenerator
+	runs               RunRepository
+	results            ResultRepository
+	records            domainpaper.ValidationRecordRepository
+	trades             domainpaper.ValidationTradeRepository
+	tickets            domainpaper.OrderTicketRepository
+	fills              domainpaper.OrderFillRepository
+	positions          domainpaper.OpenPositionRepository
+	closes             domainpaper.PositionCloseRepository
+	equity             domainpaper.EquityEventRepository
+	killSwitch         domainrisk.KillSwitchRepository
+	entryAuthorization EntryAuthorization
+	performance        domainpaper.DailyPerformanceRepository
+	orderbooks         marketdata.OrderbookSnapshotRepository
+	generator          SimulationTradeGenerator
+	clock              clock.Clock
+	idGenerator        IDGenerator
 }
 
 type Option func(*Service)
+
+type EntryAuthorization interface {
+	AuthorizePaperEntry(context.Context, domainpaper.OrderTicket, RecordOrderFillRequest) error
+}
+
+func WithEntryAuthorization(value EntryAuthorization) Option {
+	return func(service *Service) { service.entryAuthorization = value }
+}
 
 type IDGenerator interface {
 	NewID() (string, error)

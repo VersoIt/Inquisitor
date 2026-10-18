@@ -14,10 +14,13 @@ import (
 	"github.com/shopspring/decimal"
 
 	apppaper "github.com/VersoIt/Inquisitor/internal/app/paper"
+	appstrategy "github.com/VersoIt/Inquisitor/internal/app/strategy"
 	domainbacktest "github.com/VersoIt/Inquisitor/internal/backtest"
+	"github.com/VersoIt/Inquisitor/internal/clock"
 	"github.com/VersoIt/Inquisitor/internal/config"
 	"github.com/VersoIt/Inquisitor/internal/logger"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
+	"github.com/VersoIt/Inquisitor/internal/research"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
@@ -99,6 +102,12 @@ func main() {
 	defer db.Close()
 
 	research := postgres.NewResearchRunRepository(db)
+	entryAuthorization, err := paperSignalEntryAuthorization(cfg, db)
+	if err != nil {
+		// Read/exit operations must remain available even when new strategy entries
+		// cannot be authorized. Source-backed fills fail closed without this guard.
+		log.Warn("signal-backed paper entries unavailable", "error", err)
+	}
 	service := apppaper.NewService(
 		research,
 		research,
@@ -110,6 +119,7 @@ func main() {
 		apppaper.WithEquityEventRepository(postgres.NewPaperEquityEventRepository(db)),
 		apppaper.WithKillSwitchRepository(postgres.NewRiskKillSwitchRepository(db)),
 		apppaper.WithOrderbookSnapshotRepository(postgres.NewOrderbookSnapshotRepository(db)),
+		apppaper.WithEntryAuthorization(entryAuthorization),
 	)
 
 	switch actionName {
@@ -508,6 +518,21 @@ func main() {
 		log.Error("unsupported paper execution action", "action", *action)
 		os.Exit(1)
 	}
+}
+
+func paperSignalEntryAuthorization(cfg *config.Config, db *sql.DB) (*appstrategy.PaperEntryAuthorization, error) {
+	policy, err := cfg.TradeRiskPolicy()
+	if err != nil {
+		return nil, err
+	}
+	c := clock.SystemClock{}
+	approvalPolicy := research.ResultGatePolicy{Enabled: true, MinTrades: cfg.Research.MinTrades, MinProfitFactor: decimal.NewFromFloat(cfg.Research.MinProfitFactor), MinExpectancy: decimal.NewFromFloat(cfg.Research.MinExpectancyR), MaxDrawdownPct: cfg.Research.MaxDrawdownPct,
+		RequireOutOfSample: cfg.Research.RequireOutOfSample, RequireWalkForward: cfg.Research.RequireWalkForward, RequireRegimeAnalysis: cfg.Research.RequireRegimeAnalysis, RequireCosts: true}
+	approvals, err := appstrategy.NewApprovalService(postgres.NewStrategyApprovalRepository(db), c, approvalPolicy)
+	if err != nil {
+		return nil, err
+	}
+	return appstrategy.NewPaperEntryAuthorization(approvals, postgres.NewPaperSignalRiskRepository(db), c, policy, cfg.Trading.Enabled), nil
 }
 
 func actionRequiresCosts(action string) bool {

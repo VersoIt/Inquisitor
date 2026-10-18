@@ -61,15 +61,20 @@ func (s *Service) OpenPosition(ctx context.Context, req OpenPositionRequest) (Op
 	if record.Status != domainpaper.ValidationStatusRunning {
 		return OpenPositionResult{}, fmt.Errorf("paper open position requires RUNNING validation status")
 	}
-	if err := s.ensureFillNotOpenedByAnotherPosition(ctx, fill.ValidationID, fill.FillID, req.PositionID); err != nil {
+	existing, found, err := s.ensureFillNotOpenedByAnotherPosition(ctx, fill.ValidationID, fill.FillID, req.PositionID)
+	if err != nil {
 		return OpenPositionResult{}, err
+	}
+	recordedAt := s.clock.Now()
+	if found {
+		recordedAt = existing.RecordedAt
 	}
 
 	position, err := domainpaper.NewOpenPosition(domainpaper.OpenPositionInput{
 		PositionID: req.PositionID,
 		Ticket:     ticket,
 		Fill:       fill,
-		RecordedAt: s.clock.Now(),
+		RecordedAt: recordedAt,
 	})
 	if err != nil {
 		return OpenPositionResult{}, err
@@ -110,23 +115,23 @@ func (s *Service) loadOrderFill(ctx context.Context, validationID string, fillID
 	return fills[0], nil
 }
 
-func (s *Service) ensureFillNotOpenedByAnotherPosition(ctx context.Context, validationID string, fillID string, positionID string) error {
+func (s *Service) ensureFillNotOpenedByAnotherPosition(ctx context.Context, validationID string, fillID string, positionID string) (domainpaper.OpenPosition, bool, error) {
 	existing, err := s.positions.ListOpenPositions(ctx, domainpaper.OpenPositionQuery{
 		ValidationID: validationID,
 		FillID:       fillID,
 		Limit:        2,
 	})
 	if err != nil {
-		return fmt.Errorf("check paper order fill %q position journal: %w", fillID, err)
+		return domainpaper.OpenPosition{}, false, fmt.Errorf("check paper order fill %q position journal: %w", fillID, err)
 	}
 	if len(existing) == 0 {
-		return nil
+		return domainpaper.OpenPosition{}, false, nil
 	}
 	if len(existing) > 1 {
-		return fmt.Errorf("paper order fill %q has an inconsistent position journal", fillID)
+		return domainpaper.OpenPosition{}, false, fmt.Errorf("paper order fill %q has an inconsistent position journal", fillID)
 	}
 	if existing[0].PositionID != strings.TrimSpace(positionID) {
-		return fmt.Errorf("paper order fill %q already opened position %q", fillID, existing[0].PositionID)
+		return domainpaper.OpenPosition{}, false, fmt.Errorf("paper order fill %q already opened position %q", fillID, existing[0].PositionID)
 	}
-	return nil
+	return existing[0], true, nil
 }

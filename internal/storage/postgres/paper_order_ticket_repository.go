@@ -62,8 +62,10 @@ func (r *PaperOrderTicketRepository) ListOrderTickets(ctx context.Context, query
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT ticket_id, validation_id, decision_id, intent_id, exchange, category, symbol, interval,
 		       side, quantity::text, entry_price::text, stop_loss::text, take_profit::text,
-		       leverage::text, max_loss::text, confidence, reason, created_at
+		       leverage::text, max_loss::text, confidence, reason, created_at,
+		       COALESCE(signal_id, ''), COALESCE(approval_id, '')
 		FROM paper_order_tickets
+		LEFT JOIN paper_signal_risk_evaluations USING (decision_id)
 		WHERE ($1::text = '' OR ticket_id = $1)
 		  AND ($2::text = '' OR validation_id = $2)
 		  AND ($3::text = '' OR decision_id = $3)
@@ -175,6 +177,8 @@ func scanPaperOrderTicket(scanner interface{ Scan(dest ...any) error }) (domainp
 		&ticket.Confidence,
 		&ticket.Reason,
 		&ticket.CreatedAt,
+		&ticket.SourceSignalID,
+		&ticket.SourceApprovalID,
 	); err != nil {
 		return domainpaper.OrderTicket{}, fmt.Errorf("scan paper order ticket: %w", err)
 	}

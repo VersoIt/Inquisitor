@@ -11,9 +11,9 @@ Passing unit tests does not establish deployment readiness or strategy profitabi
 | 3: Features/regime | Price/trend/volatility/volume/microstructure/quality features, regime detection and storage | Full feature inventory against specification, derivative inputs, operational acceptance |
 | 4: Research/backtest | Hypothesis import, experiments, rule evaluation, cost-aware fixed-horizon backtests, OOS, reports | Full metrics/report inventory and execution-model acceptance beyond fixed horizons |
 | 5: Validation | Chronological walk-forward, regime analysis, candidate/rejection gates | Parameter-stability report and full approval lifecycle alignment |
-| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings, source-backed authorization and linked risk evaluation | Operator commands, connecting evaluated signals to guarded paper execution, exact strategy/config validation provenance |
+| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings, linked risk evaluation and guarded paper ticket submission | Operator runner, exact strategy/config validation provenance, autonomous market/account context sourcing |
 | 7: Risk/Kill Switch | Decimal sizing, trade limits, market filters, persistent decisions and manual Kill Switch | Audit all automatic Kill Switch triggers and recovery paths against specification |
-| 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, reports | Connect market-to-signal-to-risk-to-paper cycle and complete sustained paper acceptance |
+| 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, signal-backed ticket admission/fill guards, reports and database-tested strategy-to-equity path | Operator runner with current account/market sourcing, portfolio reservations and sustained paper acceptance |
 | 9: Live micro | Explicit startup gates, submission journals, Bybit private adapters, reconciliation, operator commands | Complete live lifecycle including partial fills/exits/balance synchronization and acceptance after paper validation |
 | 10: Edge/meta | Selector accepts an explicit disabled/decayed flag | Rolling performance checks, baseline comparisons, persisted actions, automatic disabling and performance-aware selection |
 | 11: Portfolio | Risk engine checks supplied total/correlated exposure and position count | Portfolio calculation, open-risk aggregation, strategy exposure and allocation constraints |
@@ -68,7 +68,8 @@ strategy path is intended for evaluation immediately after a candle closes.
 Domain strategies have no storage, order submission or worker loop. The application
 generation service now persists trade signals and `NO_TRADE` reasons before returning
 a usable result. The authorized wrapper loads PAPER approval, and the stored-signal
-use case now records linked risk evaluations. Paper execution remains to be connected.
+use case records linked risk evaluations. Signal submission now connects those
+evaluations to guarded paper tickets and the existing execution/settlement path.
 Strategy parameters and technical triggers are implementation choices to research;
 they do not establish an edge and cannot replace validation.
 
@@ -174,7 +175,52 @@ evaluation, round trips, rollback, concurrency, conflicts and revocation.
 This is historical evaluation evidence, not an execution permit, reservation,
 autonomous trading loop or portfolio-state calculation. Account/market/regime
 snapshots still come from the caller; the numeric policy is recorded, but an exact
-strategy/Risk Engine code version is not. The next execution boundary must source current state,
-revalidate freshness/authorization, prevent overcommitted exposure, and atomically
-link any paper ticket. In particular, an old approved replay must not be treated
-as a fresh permission to trade. No LIVE path is enabled by this use case.
+strategy/Risk Engine code version is not. The ticket boundary below now checks
+freshness and authorization; autonomous context sourcing and prevention of
+overcommitted portfolio exposure remain outstanding. No LIVE path is enabled.
+
+## Signal-Backed Paper Entries
+
+`PaperSignalSubmissionService.Submit` evaluates a persisted signal and creates a
+deterministically identified ticket only for an approved, still-fresh calculation
+and a matching current approval. Rejected risk decisions remain journaled without
+a ticket. Existing unique decision/ticket constraints prevent duplicate tickets;
+concurrent inserts or ambiguous write failures can be recovered only by reading an
+exact matching persisted ticket. A historical ticket retry preserves its first
+creation time, but does not authorize a new fill.
+
+Ticket reads project source signal/approval IDs from migration 028's immutable
+decision linkage. The caller cannot strip that provenance by choosing another
+ticket ID. All new source-backed fills through the paper service require an entry
+authorization adapter. `cmd/paper-execute` wires it from the current configuration;
+missing/invalid authorization fails closed for these entries without removing
+read/exit capabilities. Legacy manually sourced tickets retain their old path.
+
+The guard reloads current approval evidence, checks every ticket field against
+the risk result, requires unchanged risk policy and trading enabled, rejects stale
+calculations and future/backdated invocation tricks, and bounds actual spread,
+slippage and stop-loss distance plus entry fee against the original trade budget.
+Insufficient rounding headroom rejects the fill rather than silently increasing
+risk. This does not yet reserve future exit fees or model stop-execution gaps;
+cost-aware proposal sizing remains necessary to avoid avoidable rejected entries.
+
+The mandatory persistent kill-switch check remains in the paper fill service.
+The PostgreSQL fill INSERT also locks the linked approval/validation rows and
+requires an unrevoked grant and RUNNING validation. A revocation that commits
+before the INSERT's authorization lock cannot be bypassed using an earlier
+application check. This final SQL guard is not a replacement for the full
+application evidence/policy checks.
+
+Recovery of an already persisted identical fill is not new exposure and does not
+require renewed entry authorization. Fill and open-position retries now preserve
+their original recorded-at times even when retried later. Changed execution
+payloads still conflict. Exits/accounting are not blocked by strategy revocation.
+
+Table-driven tests cover admission/authorization failures, decimal budget and age
+boundaries, both directions, ambiguous writes, and recovery. A PostgreSQL test
+exercises real authorized trend generation, risk evaluation, concurrent ticket
+submission, rejected costly fills, guarded fill/open, revocation before INSERT,
+late recovery, close and equity accounting. It is a deterministic simulated
+lifecycle, not a sustained autonomous market-data deployment test. Account/regime
+snapshots still come from callers, portfolio-wide reservations are not implemented,
+and the grant/generation/submission operator runner remains to be added.
