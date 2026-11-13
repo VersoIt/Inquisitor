@@ -29,10 +29,10 @@ This is diagnostic evidence, not a retuned candidate or new trading permission.
 | 5: Validation | Chronological walk-forward, regime analysis, candidate/rejection gates | Parameter-stability report and full approval lifecycle alignment |
 | 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings with grant/show/revoke CLI, linked risk evaluation, guarded paper ticket submission and bounded application signal cycle | Signal-cycle operator CLI/worker, exact strategy/config validation provenance, autonomous market/account context sourcing |
 | 7: Risk/Kill Switch | Decimal sizing, trade limits, market filters, persistent decisions and manual Kill Switch | Audit all automatic Kill Switch triggers and recovery paths against specification |
-| 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, signal-backed ticket admission/fill guards, reports and database-tested strategy-to-equity path | Operator runner with current account/market sourcing, portfolio reservations and sustained paper acceptance |
+| 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, signal-backed ticket admission/fill guards, reports, reconciled flat-account source/inspection CLI and database-tested strategy-to-equity path | Operator runner with market sourcing, marked open-account context, portfolio reservations and sustained paper acceptance |
 | 9: Live micro | Explicit startup gates, submission journals, Bybit private adapters, reconciliation, operator commands | Complete live lifecycle including partial fills/exits/balance synchronization and acceptance after paper validation |
 | 10: Edge/meta | Selector accepts an explicit disabled/decayed flag | Rolling performance checks, baseline comparisons, persisted actions, automatic disabling and performance-aware selection |
-| 11: Portfolio | Risk engine checks supplied total/correlated exposure and position count | Portfolio calculation, open-risk aggregation, strategy exposure and allocation constraints |
+| 11: Portfolio | Risk engine checks supplied exposure/position count; validation-local realized account and flat-inventory reconciliation | Marked/global portfolio calculation, open-risk aggregation, reservations, strategy exposure and allocation constraints |
 | 12: Read-only API | CLI/report and domain/repository boundaries | Read-only API for hypotheses, reports, paper/live state, risk events and edge status |
 
 ## Strategy Contract
@@ -276,3 +276,20 @@ The PostgreSQL lifecycle now tests fresh/replayed cycle persistence and abstenti
 alongside its guarded execution/settlement checks. See `docs/paper-signal-cycle.md`.
 This adds no CLI/worker, autonomous account context, portfolio reservation or LIVE
 permission; those acceptance gaps remain open.
+
+## Paper Account Source
+
+`AccountSnapshotService` and `cmd/paper-account` now derive validation-local account
+facts from one read-only REPEATABLE READ database snapshot. Source balances are not
+CLI inputs. Equity events are reconciled with their closes and complete sequence;
+inventory checks catch pending tickets, unopened fills, active positions and
+unaccounted closes. Future/corrupt/partial reads fail rather than producing balance.
+
+A RUNNING, positive-equity, fully flat ledger exposes risk account fields: realized
+equity/peak, UTC day/week start balances, conservative gross realized loss budgets
+and losing streak. An exposed/blocked ledger omits `Account` entirely. This does
+not yet calculate marked equity or correlated exposure for active positions, combine
+capital across validations, reserve risk, or make a snapshot an entry permit.
+The PostgreSQL signal-cycle integration now sources its initial account through
+this service. The production signal-cycle CLI/worker and mandatory admission wiring
+remain open; see `docs/paper-account.md` for the verified contract and limits.

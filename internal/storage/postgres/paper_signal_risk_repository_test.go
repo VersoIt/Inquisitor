@@ -350,7 +350,11 @@ func TestPaperSignalRiskRepositoryIntegration(t *testing.T) {
 		ticketRepo := postgres.NewPaperOrderTicketRepository(db)
 		submissions := appstrategy.NewPaperSignalSubmissionService(s, approvals, ticketRepo, c)
 		cycle := appstrategy.NewPaperSignalCycleService(generation, submissions, postgres.NewRiskKillSwitchRepository(db), c)
-		cycleReq := appstrategy.RunPaperSignalCycleRequest{ApprovalID: req.ApprovalID, Market: market, Account: req.Account, RiskMarket: req.Market}
+		account, err := apppaper.NewAccountSnapshotService(postgres.NewPaperAccountRepository(db), c).Snapshot(ctx, f.Approval.Grant.ValidationID)
+		if err != nil || !account.FlatLedgerReady || account.Account == nil {
+			t.Fatalf("source flat account for signal cycle: %+v %v", account, err)
+		}
+		cycleReq := appstrategy.RunPaperSignalCycleRequest{ApprovalID: req.ApprovalID, Market: market, Account: *account.Account, RiskMarket: req.Market}
 		cycled, err := cycle.Run(ctx, cycleReq)
 		if err != nil || cycled.Submission == nil || cycled.Outcome != appstrategy.PaperSignalCycleTicketRecorded || cycled.Generation.Stats.Skipped != 1 || cycled.Submission.Ticket.SourceSignalID != req.SignalID {
 			t.Fatalf("signal cycle %+v %v", cycled, err)

@@ -45,6 +45,10 @@ A bounded [paper signal cycle](docs/paper-signal-cycle.md) now connects authoriz
 signal journaling, risk evaluation and paper-ticket persistence at the application
 layer. It does not fill orders; operator/runtime adapters remain to be completed.
 
+`cmd/paper-account` now [inspects a reconciled paper account](docs/paper-account.md)
+from persisted journals. Risk-account fields are supplied only for a RUNNING,
+fully flat ledger; open/pending or inconsistent state cannot become a fake balance.
+
 ## Current Scope
 
 This repository has progressed from the Phase 1 market-data foundation through research and paper-validation lifecycle slices, and has started the Phase 7 risk boundary:

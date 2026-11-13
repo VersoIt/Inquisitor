@@ -3,14 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net/url"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -27,47 +22,8 @@ import (
 )
 
 func TestApprovalCommandPostgresLifecycle(t *testing.T) {
-	dsn := os.Getenv("POSTGRES_TEST_DSN")
-	if dsn == "" {
-		t.Skip("set POSTGRES_TEST_DSN to an isolated disposable test database")
-	}
 	ctx := context.Background()
-	root, err := postgres.Open(ctx, config.DatabaseConfig{DSN: dsn, MaxOpenConns: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = root.Close() })
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatal(err)
-	}
-	schema := "paper_approval_cli_" + hex.EncodeToString(suffix[:])
-	if _, err := root.ExecContext(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, err := root.ExecContext(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); err != nil {
-			t.Error(err)
-		}
-	})
-	scopedDSN := dsn
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		u, err := url.Parse(dsn)
-		if err != nil {
-			t.Fatal(err)
-		}
-		q := u.Query()
-		q.Set("search_path", schema)
-		u.RawQuery = q.Encode()
-		scopedDSN = u.String()
-	} else {
-		scopedDSN += " search_path=" + schema
-	}
-	db, err := postgres.Open(ctx, config.DatabaseConfig{DSN: scopedDSN, MaxOpenConns: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db, scopedDSN := testutil.IsolatedPostgres(t)
 	if _, err := postgres.ApplyMigrations(ctx, db, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatal(err)
 	}

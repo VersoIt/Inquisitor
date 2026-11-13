@@ -70,6 +70,32 @@ func TestPaperEquityEventRepositoryIntegrationTableDriven(t *testing.T) {
 	if _, err := validationRepo.TransitionValidation(ctx, runningValidation, domainpaper.ValidationStatusPlanned); err != nil {
 		t.Fatalf("transition paper validation fixture: %v", err)
 	}
+	assertAccount := func(t *testing.T, blocker string, expectedEquity decimal.Decimal) {
+		t.Helper()
+		q := domainpaper.AccountLedgerQuery{ValidationID: runningValidation.ValidationID, AsOf: plannedAt.Add(24 * time.Hour)}
+		ledger, err := postgres.NewPaperAccountRepository(db).LoadPaperAccountLedger(ctx, q)
+		if err != nil {
+			t.Fatalf("read account at %q: %v", blocker, err)
+		}
+		snapshot, err := domainpaper.BuildAccountSnapshot(ledger, q.AsOf)
+		if err != nil || !snapshot.RealizedEquity.Equal(expectedEquity) {
+			t.Fatalf("account at %q: %+v %v", blocker, snapshot, err)
+		}
+		if blocker == "" {
+			if !snapshot.FlatLedgerReady || snapshot.Account == nil || !snapshot.Account.Equity.Equal(expectedEquity) {
+				t.Fatalf("flat ledger not ready: %+v", snapshot)
+			}
+		} else {
+			found := false
+			for _, b := range snapshot.Blockers {
+				found = found || b == blocker
+			}
+			if snapshot.FlatLedgerReady || snapshot.Account != nil || !found {
+				t.Fatalf("unsafe account not blocked by %q: %+v", blocker, snapshot)
+			}
+		}
+	}
+	assertAccount(t, "", runningValidation.InitialBalance)
 	decision := testRiskDecisionAuditRecord(plannedAt.Add(4 * time.Hour))
 	if _, err := postgres.NewRiskDecisionRepository(db).RecordDecision(ctx, decision); err != nil {
 		t.Fatalf("insert risk decision fixture: %v", err)
@@ -90,6 +116,7 @@ func TestPaperEquityEventRepositoryIntegrationTableDriven(t *testing.T) {
 	if _, err := postgres.NewPaperOrderTicketRepository(db).RecordOrderTicket(ctx, ticket); err != nil {
 		t.Fatalf("insert paper order ticket fixture: %v", err)
 	}
+	assertAccount(t, "pending_tickets", runningValidation.InitialBalance)
 
 	fill := testPaperOrderFill(plannedAt.Add(6 * time.Hour))
 	fill.TicketID = ticket.TicketID
@@ -102,6 +129,7 @@ func TestPaperEquityEventRepositoryIntegrationTableDriven(t *testing.T) {
 	if _, err := postgres.NewPaperOrderFillRepository(db).RecordOrderFill(ctx, fill); err != nil {
 		t.Fatalf("insert paper order fill fixture: %v", err)
 	}
+	assertAccount(t, "unopened_fills", runningValidation.InitialBalance)
 
 	position := testPaperOpenPosition(plannedAt.Add(7 * time.Hour))
 	position.FillID = fill.FillID
@@ -122,6 +150,7 @@ func TestPaperEquityEventRepositoryIntegrationTableDriven(t *testing.T) {
 	if _, err := postgres.NewPaperOpenPositionRepository(db).RecordOpenPosition(ctx, position); err != nil {
 		t.Fatalf("insert paper open position fixture: %v", err)
 	}
+	assertAccount(t, "active_positions_require_marked_accounting", runningValidation.InitialBalance)
 
 	close := testPaperPositionClose(plannedAt.Add(8 * time.Hour))
 	close.PositionID = position.PositionID
@@ -139,6 +168,7 @@ func TestPaperEquityEventRepositoryIntegrationTableDriven(t *testing.T) {
 	if _, err := postgres.NewPaperPositionCloseRepository(db).RecordPositionClose(ctx, close); err != nil {
 		t.Fatalf("insert paper position close fixture: %v", err)
 	}
+	assertAccount(t, "unaccounted_closes", runningValidation.InitialBalance)
 
 	repo := postgres.NewPaperEquityEventRepository(db)
 	event := testPaperEquityEvent(plannedAt.Add(9 * time.Hour))
@@ -231,6 +261,44 @@ func TestPaperEquityEventRepositoryIntegrationTableDriven(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, tt.run)
 	}
+	assertAccount(t, "", event.EquityAfter)
+	t.Run("account does not hide future records", func(t *testing.T) {
+		if ledger, err := postgres.NewPaperAccountRepository(db).LoadPaperAccountLedger(ctx, domainpaper.AccountLedgerQuery{ValidationID: runningValidation.ValidationID, AsOf: plannedAt.Add(4 * time.Hour)}); err == nil || ledger.Validation.ValidationID != "" {
+			t.Fatalf("future ledger returned usable balance: %+v %v", ledger, err)
+		}
+	})
+	t.Run("account rejects mismatched source PnL", func(t *testing.T) {
+		if _, err := db.ExecContext(ctx, "UPDATE paper_equity_events SET net_pnl=net_pnl+1,equity_after=equity_after+1 WHERE event_id=$1", event.EventID); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := db.ExecContext(ctx, "UPDATE paper_equity_events SET net_pnl=net_pnl-1,equity_after=equity_after-1 WHERE event_id=$1", event.EventID); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := postgres.NewPaperAccountRepository(db).LoadPaperAccountLedger(ctx, domainpaper.AccountLedgerQuery{ValidationID: runningValidation.ValidationID, AsOf: plannedAt.Add(24 * time.Hour)}); err == nil {
+			t.Fatal("well-formed but source-mismatched equity accepted")
+		}
+	})
+	t.Run("account reads are repeatable read and read only", func(t *testing.T) {
+		// The view exposes the existing event only with the required transaction
+		// settings. A weaker/mutable transaction would return an incomplete ledger.
+		if _, err := db.ExecContext(ctx, "ALTER TABLE paper_equity_events RENAME TO paper_account_isolation_events"); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := db.ExecContext(ctx, "DROP VIEW IF EXISTS paper_equity_events"); err != nil {
+				t.Error(err)
+			}
+			if _, err := db.ExecContext(ctx, "ALTER TABLE paper_account_isolation_events RENAME TO paper_equity_events"); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := db.ExecContext(ctx, `CREATE VIEW paper_equity_events AS SELECT * FROM paper_account_isolation_events WHERE current_setting('transaction_isolation')='repeatable read' AND current_setting('transaction_read_only')='on'`); err != nil {
+			t.Fatal(err)
+		}
+		assertAccount(t, "", event.EquityAfter)
+	})
 }
 
 func cleanupPaperEquityEvents(t *testing.T, ctx context.Context, db *sql.DB) {
