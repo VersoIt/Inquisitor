@@ -41,6 +41,10 @@ Reviewed PAPER bindings can now be granted, displayed and revoked through
 `cmd/paper-approval`. See the [operator commands](docs/paper-approval-operator.md).
 These commands do not start trading or approve the rejected experiment.
 
+A bounded [paper signal cycle](docs/paper-signal-cycle.md) now connects authorized
+signal journaling, risk evaluation and paper-ticket persistence at the application
+layer. It does not fill orders; operator/runtime adapters remain to be completed.
+
 ## Current Scope
 
 This repository has progressed from the Phase 1 market-data foundation through research and paper-validation lifecycle slices, and has started the Phase 7 risk boundary:

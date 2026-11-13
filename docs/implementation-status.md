@@ -27,7 +27,7 @@ This is diagnostic evidence, not a retuned candidate or new trading permission.
 | 3: Features/regime | Price/trend/volatility/volume/microstructure/quality features, regime detection and storage | Full feature inventory against specification, derivative inputs, operational acceptance |
 | 4: Research/backtest | Hypothesis import, experiments, rule evaluation, cost-aware fixed-horizon backtests, OOS, reports | Full metrics/report inventory and execution-model acceptance beyond fixed horizons |
 | 5: Validation | Chronological walk-forward, regime analysis, candidate/rejection gates | Parameter-stability report and full approval lifecycle alignment |
-| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings with grant/show/revoke CLI, linked risk evaluation and guarded paper ticket submission | Generation/submission operator runner, exact strategy/config validation provenance, autonomous market/account context sourcing |
+| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings with grant/show/revoke CLI, linked risk evaluation, guarded paper ticket submission and bounded application signal cycle | Signal-cycle operator CLI/worker, exact strategy/config validation provenance, autonomous market/account context sourcing |
 | 7: Risk/Kill Switch | Decimal sizing, trade limits, market filters, persistent decisions and manual Kill Switch | Audit all automatic Kill Switch triggers and recovery paths against specification |
 | 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, signal-backed ticket admission/fill guards, reports and database-tested strategy-to-equity path | Operator runner with current account/market sourcing, portfolio reservations and sustained paper acceptance |
 | 9: Live micro | Explicit startup gates, submission journals, Bybit private adapters, reconciliation, operator commands | Complete live lifecycle including partial fills/exits/balance synchronization and acceptance after paper validation |
@@ -257,5 +257,22 @@ submission, rejected costly fills, guarded fill/open, revocation before INSERT,
 late recovery, close and equity accounting. It is a deterministic simulated
 lifecycle, not a sustained autonomous market-data deployment test. Account/regime
 snapshots still come from callers, portfolio-wide reservations are not implemented,
-and the generation/submission operator runner remains to be added; reviewed grants
+and the signal-cycle operator CLI/worker remains to be added; reviewed grants
 are now managed through the separate operator CLI described above.
+
+## Bounded Paper Signal Cycle
+
+`PaperSignalCycleService.Run` now connects current Kill Switch inspection,
+authorized signal generation/journaling and stored-signal risk/ticket submission.
+It processes one supplied observation, using one regime/runtime snapshot for both
+generation and risk. `NO_TRADE` stops before risk; a journaled risk rejection stops
+before ticket creation. `TICKET_RECORDED` means persistence, not fill authorization.
+
+Each stage retains its existing immutable/idempotent journal contract. Errors and
+cancellation return no usable cycle result despite possible partial commits;
+identical retries recover committed stages. Tests cover failures before/after
+writes, changed retries, late historical replay and safety changes between stages.
+The PostgreSQL lifecycle now tests fresh/replayed cycle persistence and abstention
+alongside its guarded execution/settlement checks. See `docs/paper-signal-cycle.md`.
+This adds no CLI/worker, autonomous account context, portfolio reservation or LIVE
+permission; those acceptance gaps remain open.

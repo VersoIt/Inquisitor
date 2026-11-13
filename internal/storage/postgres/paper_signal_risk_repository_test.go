@@ -349,13 +349,36 @@ func TestPaperSignalRiskRepositoryIntegration(t *testing.T) {
 		req.Account.OpenPositions--
 		ticketRepo := postgres.NewPaperOrderTicketRepository(db)
 		submissions := appstrategy.NewPaperSignalSubmissionService(s, approvals, ticketRepo, c)
-		submitted, err := submissions.Submit(ctx, req)
-		if err != nil || submitted.Ticket.SourceSignalID != req.SignalID {
-			t.Fatalf("submit ticket %+v %v", submitted, err)
+		cycle := appstrategy.NewPaperSignalCycleService(generation, submissions, postgres.NewRiskKillSwitchRepository(db), c)
+		cycleReq := appstrategy.RunPaperSignalCycleRequest{ApprovalID: req.ApprovalID, Market: market, Account: req.Account, RiskMarket: req.Market}
+		cycled, err := cycle.Run(ctx, cycleReq)
+		if err != nil || cycled.Submission == nil || cycled.Outcome != appstrategy.PaperSignalCycleTicketRecorded || cycled.Generation.Stats.Skipped != 1 || cycled.Submission.Ticket.SourceSignalID != req.SignalID {
+			t.Fatalf("signal cycle %+v %v", cycled, err)
 		}
-		repeated, err := submissions.Submit(ctx, req)
-		if err != nil || !repeated.Replayed || repeated.Ticket.TicketID != submitted.Ticket.TicketID {
-			t.Fatalf("submit retry %+v %v", repeated, err)
+		submitted := *cycled.Submission
+		repeated, err := cycle.Run(ctx, cycleReq)
+		if err != nil || repeated.Submission == nil || !repeated.Submission.Replayed || repeated.Submission.Ticket.TicketID != submitted.Ticket.TicketID || repeated.Generation.Stats.Skipped != 1 {
+			t.Fatalf("signal cycle retry %+v %v", repeated, err)
+		}
+		freshReq := cycleReq
+		freshReq.Market.SignalID += "_cycle_fresh"
+		fresh, err := cycle.Run(ctx, freshReq)
+		if err != nil || fresh.Generation.Stats.Inserted != 1 || fresh.Submission == nil || fresh.Submission.Ticket.SourceSignalID != freshReq.Market.SignalID || fresh.Submission.Replayed {
+			t.Fatalf("fresh signal-to-ticket cycle %+v %v", fresh, err)
+		}
+		freshRows, err := signals.ListSignals(ctx, strategy.SignalQuery{SignalID: freshReq.Market.SignalID, Limit: 2})
+		if err != nil || len(freshRows) != 1 || freshRows[0].Features["approval.id"] != freshReq.ApprovalID {
+			t.Fatalf("cycle signal provenance %+v %v", freshRows, err)
+		}
+		abstainReq := cycleReq
+		abstainReq.Market.SignalID += "_cycle_no_trade"
+		abstainReq.Market.TradingEnabled = false
+		abstained, err := cycle.Run(ctx, abstainReq)
+		if err != nil || abstained.Outcome != appstrategy.PaperSignalCycleNoTrade || abstained.Submission != nil {
+			t.Fatalf("cycle abstention %+v %v", abstained, err)
+		}
+		if _, err := repo.LoadPaperRiskEvaluation(ctx, abstainReq.Market.SignalID); !errors.Is(err, strategy.ErrPaperRiskNotFound) {
+			t.Fatalf("NO_TRADE reached risk journal: %v", err)
 		}
 		guard := appstrategy.NewPaperEntryAuthorization(approvals, repo, c, f.Policy, true)
 		newPaperService := func(at time.Time, authorization apppaper.EntryAuthorization, equityOverride ...paper.EquityEventRepository) *apppaper.Service {
@@ -405,6 +428,15 @@ func TestPaperSignalRiskRepositoryIntegration(t *testing.T) {
 		}
 		if _, err := approvals.Revoke(ctx, f.Approval.Grant.ApprovalID, "operator", "stop new entries"); err != nil {
 			t.Fatal(err)
+		}
+		blockedCycleReq := cycleReq
+		blockedCycleReq.Market.SignalID += "_cycle_revoked"
+		if _, err := cycle.Run(ctx, blockedCycleReq); !errors.Is(err, strategy.ErrApprovalUnavailable) {
+			t.Fatalf("revoked cycle: %v", err)
+		}
+		blockedSignals, err := signals.ListSignals(ctx, strategy.SignalQuery{SignalID: blockedCycleReq.Market.SignalID, Limit: 2})
+		if err != nil || len(blockedSignals) != 0 {
+			t.Fatalf("revoked cycle persisted a new signal: %+v %v", blockedSignals, err)
 		}
 		if _, err := newPaperService(c.Now(), guard).RecordOrderFill(ctx, fillReq); !errors.Is(err, strategy.ErrApprovalUnavailable) {
 			t.Fatalf("revoked fill: %v", err)
