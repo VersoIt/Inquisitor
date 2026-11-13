@@ -51,6 +51,9 @@ validation remains the immediate priority, not expanding unrelated modules.
 
 ## Evidence
 
+Follow-up: [development-only ledger diagnostics](trend-spot-btc-1h-v1-development-diagnostics.md)
+decompose 2024 costs without altering this result or retuning on 2025.
+
 - Full machine-readable report with all model trades: [result JSON](trend-spot-btc-1h-v1-result.json).
 - Frozen assumptions and command: [plan](trend-spot-btc-1h-v1-plan.md).
 - Local immutable candle cache: `tmp/experiments/trend-v1-candles.json` (18,288 hourly candles, December 2023 through December 2025).

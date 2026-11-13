@@ -24,6 +24,10 @@ First measured result: [the frozen v1 candidate was rejected](docs/experiments/t
 Its 2025 validation returned -7.11% in the model after costs; no trading approval
 was issued and the thresholds were not loosened.
 
+[Development-only diagnostics](docs/experiments/trend-spot-btc-1h-v1-development-diagnostics.md)
+reconcile the frozen 2024 ledger into price movement, execution impact and fees,
+without tuning or using validation trades. Run offline with `go run ./cmd/trend-diagnose`.
+
 ## Current Scope
 
 This repository has progressed from the Phase 1 market-data foundation through research and paper-validation lifecycle slices, and has started the Phase 7 risk boundary:

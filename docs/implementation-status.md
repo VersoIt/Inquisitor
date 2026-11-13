@@ -13,6 +13,10 @@ not a persisted PAPER/LIVE approval. The complete specification remains backlog.
 The first real-history run is complete: `trend-spot-btc-1h-v1` was REJECTED
 (2025 validation: 108 trades, net -71.12 on simulated initial equity 1000).
 See `docs/experiments/trend-spot-btc-1h-v1-result.md`; no approval was granted.
+Development-only cost/exit/month/holding-time attribution is now reproducible via
+`cmd/trend-diagnose`; all partitions reconcile with the original 2024 ledger.
+See `docs/experiments/trend-spot-btc-1h-v1-development-diagnostics.md`.
+This is diagnostic evidence, not a retuned candidate or new trading permission.
 
 | Phase | Existing implementation | Outstanding work |
 | --- | --- | --- |
