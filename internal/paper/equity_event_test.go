@@ -221,3 +221,50 @@ func nextEquityEvent(t *testing.T, previous paper.EquityEvent) paper.EquityEvent
 	}
 	return event
 }
+
+func TestEquityEventMustMatchItsSourceClose(t *testing.T) {
+	close := validPositionClose()
+	for _, tc := range []struct {
+		name   string
+		mutate func(*paper.EquityEvent)
+	}{
+		{"validation", func(e *paper.EquityEvent) { e.ValidationID += "_other" }},
+		{"close", func(e *paper.EquityEvent) { e.CloseID += "_other" }},
+		{"position", func(e *paper.EquityEvent) { e.PositionID += "_other" }},
+		{"exchange", func(e *paper.EquityEvent) { e.Exchange = "other" }},
+		{"category", func(e *paper.EquityEvent) { e.Category = "spot" }},
+		{"symbol", func(e *paper.EquityEvent) { e.Symbol = "ETHUSDT" }},
+		{"interval", func(e *paper.EquityEvent) { e.Interval = "60" }},
+		{"pnl", func(e *paper.EquityEvent) {
+			e.NetPnL = e.NetPnL.Add(decimal.NewFromInt(1))
+			e.EquityAfter = e.EquityBefore.Add(e.NetPnL)
+		}},
+		{"fees", func(e *paper.EquityEvent) { e.Fees = e.Fees.Add(decimal.NewFromInt(1)) }},
+		{"time", func(e *paper.EquityEvent) { e.OccurredAt = e.OccurredAt.Add(-time.Second) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := validEquityEvent()
+			tc.mutate(&event)
+			if err := paper.ValidateEquityEvent(event); err != nil {
+				t.Fatalf("test must isolate a valid but mismatched event: %v", err)
+			}
+			if err := paper.ValidateEquityEventForClose(event, close); err == nil {
+				t.Fatal("mismatched accounting source accepted")
+			}
+		})
+	}
+	event := validEquityEvent()
+	event.OccurredAt = event.OccurredAt.In(time.FixedZone("offset", 3*3600))
+	if err := paper.ValidateEquityEventForClose(event, close); err != nil {
+		t.Fatalf("equivalent instant rejected: %v", err)
+	}
+	invalidEvent := event
+	invalidEvent.Sequence = 0
+	if err := paper.ValidateEquityEventForClose(invalidEvent, close); err == nil {
+		t.Fatal("invalid event accepted")
+	}
+	close.NetPnL = decimal.Zero
+	if err := paper.ValidateEquityEventForClose(event, close); err == nil {
+		t.Fatal("invalid source close accepted")
+	}
+}

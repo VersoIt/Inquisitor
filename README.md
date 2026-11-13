@@ -4,7 +4,12 @@ Inquisitor is being built as a research-first crypto quant platform, not as a mo
 
 ## Immediate Priority
 
-Validate one economic hypothesis before expanding the platform. The first frozen
+Complete the original platform specification in tested vertical slices, while
+keeping implementation readiness separate from strategy profitability. Remaining
+work is tracked in [implementation status](docs/implementation-status.md); no
+completed module can substitute for a validated edge or authorize live trading.
+
+The first frozen
 [experiment plan](docs/experiments/trend-spot-btc-1h-v1-plan.md) runs the existing
 trend entry logic against public BTCUSDT spot hourly candles with next-open
 execution, modeled stops, fees/spread/slippage, untouched-by-tuning 2025 validation,
@@ -27,6 +32,10 @@ was issued and the thresholds were not loosened.
 [Development-only diagnostics](docs/experiments/trend-spot-btc-1h-v1-development-diagnostics.md)
 reconcile the frozen 2024 ledger into price movement, execution impact and fees,
 without tuning or using validation trades. Run offline with `go run ./cmd/trend-diagnose`.
+
+Paper settlement now preserves first-write audit times across delayed retries
+and verifies accounting events against their source close. See the
+[recovery contract](docs/paper-settlement-recovery.md) for tested failures and limits.
 
 ## Current Scope
 

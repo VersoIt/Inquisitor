@@ -28,6 +28,22 @@ import (
 
 var paperRiskColumns = []string{"signal_id", "approval_id", "context_json", "decision_id", "intent_id", "mode", "hypothesis_id", "strategy_name", "symbol", "side", "entry_price", "leverage", "confidence", "intent_reason", "intent_created_at", "approved", "final_quantity", "max_loss", "stop_loss", "take_profit", "reason", "checks_json", "created_at", "recorded_at"}
 
+var errPaperSettlementInterrupted = errors.New("simulated settlement connection loss")
+
+type interruptedPaperEquityWrite struct {
+	paper.EquityEventRepository
+	afterCommit bool
+}
+
+func (r interruptedPaperEquityWrite) RecordEquityEvent(ctx context.Context, event paper.EquityEvent) (paper.EquityEventStats, error) {
+	if r.afterCommit {
+		if _, err := r.EquityEventRepository.RecordEquityEvent(ctx, event); err != nil {
+			return paper.EquityEventStats{}, err
+		}
+	}
+	return paper.EquityEventStats{}, errPaperSettlementInterrupted
+}
+
 func paperRiskContextJSON(t *testing.T, e strategy.PaperRiskEvaluation) string {
 	t.Helper()
 	raw, err := json.Marshal(e.Context)
@@ -342,10 +358,14 @@ func TestPaperSignalRiskRepositoryIntegration(t *testing.T) {
 			t.Fatalf("submit retry %+v %v", repeated, err)
 		}
 		guard := appstrategy.NewPaperEntryAuthorization(approvals, repo, c, f.Policy, true)
-		newPaperService := func(at time.Time, authorization apppaper.EntryAuthorization) *apppaper.Service {
+		newPaperService := func(at time.Time, authorization apppaper.EntryAuthorization, equityOverride ...paper.EquityEventRepository) *apppaper.Service {
+			var equity paper.EquityEventRepository = postgres.NewPaperEquityEventRepository(db)
+			if len(equityOverride) > 0 {
+				equity = equityOverride[0]
+			}
 			return apppaper.NewService(runs, runs, apppaper.WithClock(clock.FixedClock{Time: at}), apppaper.WithValidationRecordRepository(validations), apppaper.WithOrderTicketRepository(ticketRepo),
 				apppaper.WithOrderFillRepository(postgres.NewPaperOrderFillRepository(db)), apppaper.WithOpenPositionRepository(postgres.NewPaperOpenPositionRepository(db)),
-				apppaper.WithPositionCloseRepository(postgres.NewPaperPositionCloseRepository(db)), apppaper.WithEquityEventRepository(postgres.NewPaperEquityEventRepository(db)),
+				apppaper.WithPositionCloseRepository(postgres.NewPaperPositionCloseRepository(db)), apppaper.WithEquityEventRepository(equity),
 				apppaper.WithKillSwitchRepository(postgres.NewRiskKillSwitchRepository(db)), apppaper.WithEntryAuthorization(authorization))
 		}
 		costs := backtest.CostModel{MakerFeeBPS: decimal.NewFromInt(1), TakerFeeBPS: decimal.NewFromInt(1), SpreadBPS: decimal.NewFromInt(1), SlippageBPS: decimal.NewFromInt(1), SlippageConservativeFactor: decimal.NewFromInt(1)}
@@ -403,10 +423,68 @@ func TestPaperSignalRiskRepositoryIntegration(t *testing.T) {
 		if err != nil || recovered.FillStats.Skipped != 1 || recovered.PositionStats.Skipped != 1 || !recovered.Fill.RecordedAt.Equal(opened.Fill.RecordedAt) || !recovered.Position.RecordedAt.Equal(opened.Position.RecordedAt) {
 			t.Fatalf("late recovery %+v %v", recovered, err)
 		}
-		settled, err := newPaperService(c.Now().Add(time.Hour), guard).SettlePositionAtMarket(ctx, apppaper.SettlePositionAtMarketRequest{EventID: "signal_lifecycle_equity", CloseID: "signal_lifecycle_close", PositionID: entryReq.PositionID, ValidationID: entryReq.ValidationID,
-			Liquidity: backtest.LiquidityTaker, ExitMidPrice: decimal.NewFromInt(108), Costs: costs, CloseReason: paper.PositionCloseReasonManual, ClosedAt: c.Now().Add(time.Hour)})
-		if err != nil || settled.CloseStats.Inserted != 1 || settled.EquityStats.Inserted != 1 || !settled.Event.EquityAfter.Equal(settled.Event.EquityBefore.Add(settled.Close.NetPnL)) || !settled.Close.NetPnL.IsPositive() {
+		settlementReq := apppaper.SettlePositionAtMarketRequest{EventID: "signal_lifecycle_equity", CloseID: "signal_lifecycle_close", PositionID: entryReq.PositionID, ValidationID: entryReq.ValidationID,
+			Liquidity: backtest.LiquidityTaker, ExitMidPrice: decimal.NewFromInt(108), Costs: costs, CloseReason: paper.PositionCloseReasonManual, ClosedAt: c.Now().Add(time.Hour + 789*time.Nanosecond)}
+		equityRepo := postgres.NewPaperEquityEventRepository(db)
+		// The first attempt commits the close, then fails before accounting.
+		if _, err := newPaperService(c.Now().Add(time.Hour+999*time.Nanosecond), guard, interruptedPaperEquityWrite{EquityEventRepository: equityRepo}).SettlePositionAtMarket(ctx, settlementReq); !errors.Is(err, errPaperSettlementInterrupted) {
+			t.Fatalf("expected interrupted accounting: %v", err)
+		}
+		// Recovery occurs on a later process clock; accounting commits but its
+		// acknowledgement is lost. A third attempt must reuse both journal rows.
+		if _, err := newPaperService(c.Now().Add(2*time.Hour+999*time.Nanosecond), guard, interruptedPaperEquityWrite{EquityEventRepository: equityRepo, afterCommit: true}).SettlePositionAtMarket(ctx, settlementReq); !errors.Is(err, errPaperSettlementInterrupted) {
+			t.Fatalf("expected lost accounting acknowledgement: %v", err)
+		}
+		settled, err := newPaperService(c.Now().Add(3*time.Hour), guard).SettlePositionAtMarket(ctx, settlementReq)
+		if err != nil || settled.CloseStats.Skipped != 1 || settled.EquityStats.Skipped != 1 || !settled.Event.EquityAfter.Equal(settled.Event.EquityBefore.Add(settled.Close.NetPnL)) || !settled.Close.NetPnL.IsPositive() || !settled.Close.RecordedAt.Equal(c.Now().Add(time.Hour)) || !settled.Event.RecordedAt.Equal(c.Now().Add(2*time.Hour)) {
 			t.Fatalf("settlement %+v %v", settled, err)
+		}
+		for _, tc := range []struct {
+			name   string
+			mutate func(*apppaper.SettlePositionAtMarketRequest)
+		}{
+			{"price", func(r *apppaper.SettlePositionAtMarketRequest) { r.ExitMidPrice = decimal.NewFromInt(109) }},
+			{"fee", func(r *apppaper.SettlePositionAtMarketRequest) { r.Costs.TakerFeeBPS = decimal.NewFromInt(2) }},
+			{"reason", func(r *apppaper.SettlePositionAtMarketRequest) { r.CloseReason = paper.PositionCloseReasonTakeProfit }},
+			{"time", func(r *apppaper.SettlePositionAtMarketRequest) { r.ClosedAt = r.ClosedAt.Add(time.Second) }},
+			{"close id", func(r *apppaper.SettlePositionAtMarketRequest) { r.CloseID += "_changed" }},
+			{"event id", func(r *apppaper.SettlePositionAtMarketRequest) { r.EventID += "_changed" }},
+		} {
+			t.Run("settlement conflict/"+tc.name, func(t *testing.T) {
+				changed := settlementReq
+				tc.mutate(&changed)
+				if _, err := newPaperService(c.Now().Add(4*time.Hour), guard).SettlePositionAtMarket(ctx, changed); err == nil {
+					t.Fatal("changed settlement accepted")
+				}
+			})
+		}
+		var recovery sync.WaitGroup
+		recoveryErrors := make(chan error, 4)
+		for i := 0; i < 4; i++ {
+			recovery.Add(1)
+			go func(i int) {
+				defer recovery.Done()
+				result, err := newPaperService(c.Now().Add(time.Duration(5+i)*time.Hour), guard).SettlePositionAtMarket(ctx, settlementReq)
+				if err == nil && (result.CloseStats.Skipped != 1 || result.EquityStats.Skipped != 1) {
+					err = errors.New("concurrent recovery wrote new settlement")
+				}
+				recoveryErrors <- err
+			}(i)
+		}
+		recovery.Wait()
+		close(recoveryErrors)
+		for err := range recoveryErrors {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		ledger, err := equityRepo.ListEquityEvents(ctx, paper.EquityEventQuery{ValidationID: entryReq.ValidationID})
+		if err != nil || len(ledger) != 1 || !ledger[0].EquityAfter.Equal(settled.Event.EquityAfter) || !ledger[0].RecordedAt.Equal(settled.Event.RecordedAt) {
+			t.Fatalf("settlement double-counted or replaced equity: %+v %v", ledger, err)
+		}
+		closes, err := postgres.NewPaperPositionCloseRepository(db).ListPositionCloses(ctx, paper.PositionCloseQuery{ValidationID: entryReq.ValidationID})
+		if err != nil || len(closes) != 1 || !closes[0].RecordedAt.Equal(settled.Close.RecordedAt) {
+			t.Fatalf("duplicate/replaced close: %+v %v", closes, err)
 		}
 	})
 	t.Run("concurrent signal submissions create one ticket", func(t *testing.T) {

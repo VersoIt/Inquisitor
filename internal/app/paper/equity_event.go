@@ -61,6 +61,9 @@ func (s *Service) AccountPositionClose(ctx context.Context, req AccountPositionC
 	if existing, ok, err := s.loadExistingEquityEventForClose(ctx, close.ValidationID, close.CloseID, req.EventID); err != nil {
 		return AccountPositionCloseResult{}, err
 	} else if ok {
+		if err := domainpaper.ValidateEquityEventForClose(existing, close); err != nil {
+			return AccountPositionCloseResult{}, err
+		}
 		stats, err := s.equity.RecordEquityEvent(ctx, existing)
 		if err != nil {
 			return AccountPositionCloseResult{}, fmt.Errorf("record paper equity event %q: %w", existing.EventID, err)
@@ -91,7 +94,7 @@ func (s *Service) AccountPositionClose(ctx context.Context, req AccountPositionC
 		Close:        close,
 		Sequence:     sequence,
 		EquityBefore: equityBefore,
-		RecordedAt:   s.clock.Now(),
+		RecordedAt:   s.clock.Now().UTC().Truncate(time.Microsecond),
 	})
 	if err != nil {
 		return AccountPositionCloseResult{}, err

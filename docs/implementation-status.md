@@ -4,8 +4,10 @@ Scope: the full original Master Technical Specification v2.0, including phases 1
 This is a code inventory, not a claim that all phase acceptance checks have passed.
 Passing unit tests does not establish deployment readiness or strategy profitability.
 
-Immediate priority: one pre-registered economic experiment rather than more
-platform expansion. `cmd/trend-experiment` replays existing trend entry logic on
+Delivery priority: finish the original specification in verified vertical slices,
+without confusing completed infrastructure with a profitable strategy. Admission
+to paper/live remains subject to the original research and safety gates.
+`cmd/trend-experiment` replays existing trend entry logic on
 spot OHLC candles with modeled protective exits and cost-aware cash sizing.
 The fixed plan, limitations and acceptance gates are in
 `docs/experiments/trend-spot-btc-1h-v1-plan.md`. Its output is research evidence,
@@ -229,6 +231,15 @@ Recovery of an already persisted identical fill is not new exposure and does not
 require renewed entry authorization. Fill and open-position retries now preserve
 their original recorded-at times even when retried later. Changed execution
 payloads still conflict. Exits/accounting are not blocked by strategy revocation.
+
+Position-close retries also preserve their first recorded-at time. Close and
+equity writes use UTC microsecond journal precision, preventing nanosecond inputs
+from conflicting after a PostgreSQL round trip. Settlement can resume after a
+committed close without accounting, or a committed equity event with a lost
+acknowledgement. An existing event must match its source close's identity, market,
+PnL, fees and occurrence time before it is replayed. Changed payloads still fail;
+close/accounting continue to require RUNNING validation. See
+`docs/paper-settlement-recovery.md` for the tested contract and remaining limits.
 
 Table-driven tests cover admission/authorization failures, decimal budget and age
 boundaries, both directions, ambiguous writes, and recovery. A PostgreSQL test

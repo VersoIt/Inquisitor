@@ -66,8 +66,15 @@ func (s *Service) ClosePosition(ctx context.Context, req ClosePositionRequest) (
 	if record.Status != domainpaper.ValidationStatusRunning {
 		return ClosePositionResult{}, fmt.Errorf("paper close position requires RUNNING validation status")
 	}
-	if err := s.ensurePositionNotClosedByAnotherClose(ctx, position.ValidationID, position.PositionID, req.CloseID); err != nil {
+	existing, found, err := s.ensurePositionNotClosedByAnotherClose(ctx, position.ValidationID, position.PositionID, req.CloseID)
+	if err != nil {
 		return ClosePositionResult{}, err
+	}
+	// Use the journal's PostgreSQL precision on both first writes and retries.
+	recordedAt := s.clock.Now().UTC().Truncate(time.Microsecond)
+	if found {
+		// A retry must preserve the first audit time, not become a new payload.
+		recordedAt = existing.RecordedAt
 	}
 
 	close, err := domainpaper.NewPositionClose(domainpaper.PositionCloseInput{
@@ -81,8 +88,8 @@ func (s *Service) ClosePosition(ctx context.Context, req ClosePositionRequest) (
 		SpreadBPS:    req.SpreadBPS,
 		SlippageBPS:  req.SlippageBPS,
 		CloseReason:  req.CloseReason,
-		ClosedAt:     req.ClosedAt,
-		RecordedAt:   s.clock.Now(),
+		ClosedAt:     req.ClosedAt.UTC().Truncate(time.Microsecond),
+		RecordedAt:   recordedAt,
 	})
 	if err != nil {
 		return ClosePositionResult{}, err
@@ -122,23 +129,23 @@ func (s *Service) loadOpenPosition(ctx context.Context, validationID string, pos
 	return positions[0], nil
 }
 
-func (s *Service) ensurePositionNotClosedByAnotherClose(ctx context.Context, validationID string, positionID string, closeID string) error {
+func (s *Service) ensurePositionNotClosedByAnotherClose(ctx context.Context, validationID string, positionID string, closeID string) (domainpaper.PositionClose, bool, error) {
 	existing, err := s.closes.ListPositionCloses(ctx, domainpaper.PositionCloseQuery{
 		ValidationID: validationID,
 		PositionID:   positionID,
 		Limit:        2,
 	})
 	if err != nil {
-		return fmt.Errorf("check paper position %q close journal: %w", positionID, err)
+		return domainpaper.PositionClose{}, false, fmt.Errorf("check paper position %q close journal: %w", positionID, err)
 	}
 	if len(existing) == 0 {
-		return nil
+		return domainpaper.PositionClose{}, false, nil
 	}
 	if len(existing) > 1 {
-		return fmt.Errorf("paper position %q has an inconsistent close journal", positionID)
+		return domainpaper.PositionClose{}, false, fmt.Errorf("paper position %q has an inconsistent close journal", positionID)
 	}
 	if existing[0].CloseID != strings.TrimSpace(closeID) {
-		return fmt.Errorf("paper position %q already has close %q", positionID, existing[0].CloseID)
+		return domainpaper.PositionClose{}, false, fmt.Errorf("paper position %q already has close %q", positionID, existing[0].CloseID)
 	}
-	return nil
+	return existing[0], true, nil
 }

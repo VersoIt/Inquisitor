@@ -162,6 +162,23 @@ func ValidateEquityEvents(events []EquityEvent) error {
 	return nil
 }
 
+// ValidateEquityEventForClose prevents a valid-looking replay from silently
+// accounting a different source position, market, fee or realized result.
+func ValidateEquityEventForClose(event EquityEvent, close PositionClose) error {
+	if err := ValidatePositionClose(close); err != nil {
+		return err
+	}
+	if err := ValidateEquityEvent(event); err != nil {
+		return err
+	}
+	if event.ValidationID != close.ValidationID || event.CloseID != close.CloseID || event.PositionID != close.PositionID ||
+		event.Exchange != close.Exchange || event.Category != close.Category || event.Symbol != close.Symbol || event.Interval != close.Interval ||
+		!event.NetPnL.Equal(close.NetPnL) || !event.Fees.Equal(close.Fees) || !event.OccurredAt.Equal(close.ClosedAt) {
+		return fmt.Errorf("paper equity event %q does not match source close %q", event.EventID, close.CloseID)
+	}
+	return nil
+}
+
 func ValidateEquityEventSequence(validationID string, initialEquity decimal.Decimal, events []EquityEvent) error {
 	validationID = strings.TrimSpace(validationID)
 	if validationID == "" {
