@@ -37,6 +37,10 @@ Paper settlement now preserves first-write audit times across delayed retries
 and verifies accounting events against their source close. See the
 [recovery contract](docs/paper-settlement-recovery.md) for tested failures and limits.
 
+Reviewed PAPER bindings can now be granted, displayed and revoked through
+`cmd/paper-approval`. See the [operator commands](docs/paper-approval-operator.md).
+These commands do not start trading or approve the rejected experiment.
+
 ## Current Scope
 
 This repository has progressed from the Phase 1 market-data foundation through research and paper-validation lifecycle slices, and has started the Phase 7 risk boundary:

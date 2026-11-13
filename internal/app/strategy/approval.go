@@ -93,21 +93,7 @@ func (s *ApprovalService) Revoke(ctx context.Context, id, reviewedBy, reason str
 	if s == nil || s.repository == nil || s.clock == nil {
 		return strategy.ApprovalStats{}, fmt.Errorf("approval service is required")
 	}
-	if id == "" || id != strings.TrimSpace(id) {
-		return strategy.ApprovalStats{}, fmt.Errorf("approval ID must be nonempty and trimmed")
-	}
-	r := strategy.ApprovalRevocation{RevokedAt: s.clock.Now().UTC().Truncate(time.Microsecond), RevokedBy: reviewedBy, Reason: reason}
-	if err := strategy.ValidateApprovalRevocation(r); err != nil {
-		return strategy.ApprovalStats{}, err
-	}
-	stats, err := s.repository.RevokePaperApproval(ctx, id, r)
-	if err != nil {
-		return strategy.ApprovalStats{}, err
-	}
-	if !validApprovalStats(stats) {
-		return strategy.ApprovalStats{}, fmt.Errorf("invalid revocation write acknowledgement")
-	}
-	return stats, nil
+	return NewApprovalRevocationService(s.repository, s.clock).Revoke(ctx, id, reviewedBy, reason)
 }
 
 func validApprovalStats(s strategy.ApprovalStats) bool {

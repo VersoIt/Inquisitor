@@ -20,7 +20,6 @@ import (
 	"github.com/VersoIt/Inquisitor/internal/config"
 	"github.com/VersoIt/Inquisitor/internal/logger"
 	domainpaper "github.com/VersoIt/Inquisitor/internal/paper"
-	"github.com/VersoIt/Inquisitor/internal/research"
 	"github.com/VersoIt/Inquisitor/internal/storage/postgres"
 )
 
@@ -526,8 +525,10 @@ func paperSignalEntryAuthorization(cfg *config.Config, db *sql.DB) (*appstrategy
 		return nil, err
 	}
 	c := clock.SystemClock{}
-	approvalPolicy := research.ResultGatePolicy{Enabled: true, MinTrades: cfg.Research.MinTrades, MinProfitFactor: decimal.NewFromFloat(cfg.Research.MinProfitFactor), MinExpectancy: decimal.NewFromFloat(cfg.Research.MinExpectancyR), MaxDrawdownPct: cfg.Research.MaxDrawdownPct,
-		RequireOutOfSample: cfg.Research.RequireOutOfSample, RequireWalkForward: cfg.Research.RequireWalkForward, RequireRegimeAnalysis: cfg.Research.RequireRegimeAnalysis, RequireCosts: true}
+	approvalPolicy, err := cfg.PaperApprovalPolicy()
+	if err != nil {
+		return nil, err
+	}
 	approvals, err := appstrategy.NewApprovalService(postgres.NewStrategyApprovalRepository(db), c, approvalPolicy)
 	if err != nil {
 		return nil, err
