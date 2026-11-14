@@ -27,6 +27,22 @@ func IsolatedPostgres(t testing.TB) (*sql.DB, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = root.Close() })
+	// Extensions are database-wide, not schema-local. Serialize their setup and
+	// keep them out of disposable schemas so parallel cleanup cannot remove them.
+	tx, err := root.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(context.Background(), "SELECT pg_advisory_xact_lock(82492027)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(context.Background(), "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		t.Fatal(err)

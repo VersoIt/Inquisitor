@@ -49,6 +49,10 @@ layer. It does not fill orders; operator/runtime adapters remain to be completed
 from persisted journals. Risk-account fields are supplied only for a RUNNING,
 fully flat ledger; open/pending or inconsistent state cannot become a fake balance.
 
+`cmd/paper-market` now [inspects sourced paper market data](docs/paper-market.md)
+from a coherent database snapshot, recomputing causal features and band-limited
+book liquidity. It rejects stale/corrupt sources and does not start trading.
+
 ## Current Scope
 
 This repository has progressed from the Phase 1 market-data foundation through research and paper-validation lifecycle slices, and has started the Phase 7 risk boundary:

@@ -27,9 +27,9 @@ This is diagnostic evidence, not a retuned candidate or new trading permission.
 | 3: Features/regime | Price/trend/volatility/volume/microstructure/quality features, regime detection and storage | Full feature inventory against specification, derivative inputs, operational acceptance |
 | 4: Research/backtest | Hypothesis import, experiments, rule evaluation, cost-aware fixed-horizon backtests, OOS, reports | Full metrics/report inventory and execution-model acceptance beyond fixed horizons |
 | 5: Validation | Chronological walk-forward, regime analysis, candidate/rejection gates | Parameter-stability report and full approval lifecycle alignment |
-| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings with grant/show/revoke CLI, linked risk evaluation, guarded paper ticket submission and bounded application signal cycle | Signal-cycle operator CLI/worker, exact strategy/config validation provenance, autonomous market/account context sourcing |
+| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings with grant/show/revoke CLI, linked risk evaluation, guarded paper ticket submission, bounded application signal cycle and DB-backed market/flat-account sources | Signal-cycle operator CLI/worker, exact strategy/config validation provenance, mandatory source/admission wiring and stable persisted cycle inputs |
 | 7: Risk/Kill Switch | Decimal sizing, trade limits, market filters, persistent decisions and manual Kill Switch | Audit all automatic Kill Switch triggers and recovery paths against specification |
-| 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, signal-backed ticket admission/fill guards, reports, reconciled flat-account source/inspection CLI and database-tested strategy-to-equity path | Operator runner with market sourcing, marked open-account context, portfolio reservations and sustained paper acceptance |
+| 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, signal-backed ticket admission/fill guards, reports, reconciled flat-account and causal market sources/inspection CLIs and database-tested strategy-to-equity path | Operator runner with mandatory sourcing/admission, marked open-account context, portfolio reservations and sustained paper acceptance |
 | 9: Live micro | Explicit startup gates, submission journals, Bybit private adapters, reconciliation, operator commands | Complete live lifecycle including partial fills/exits/balance synchronization and acceptance after paper validation |
 | 10: Edge/meta | Selector accepts an explicit disabled/decayed flag | Rolling performance checks, baseline comparisons, persisted actions, automatic disabling and performance-aware selection |
 | 11: Portfolio | Risk engine checks supplied exposure/position count; validation-local realized account and flat-inventory reconciliation | Marked/global portfolio calculation, open-risk aggregation, reservations, strategy exposure and allocation constraints |
@@ -293,3 +293,19 @@ capital across validations, reserve risk, or make a snapshot an entry permit.
 The PostgreSQL signal-cycle integration now sources its initial account through
 this service. The production signal-cycle CLI/worker and mandatory admission wiring
 remain open; see `docs/paper-account.md` for the verified contract and limits.
+
+## Paper Market Source
+
+`PaperMarketService` and `cmd/paper-market` read 256 closed candles, the corresponding
+latest regime, latest book and instrument in one read-only REPEATABLE READ snapshot.
+Features are recomputed causally with explicit configs; prior range/compression/
+volume cannot consume the current candle. Top/spread and sorted unique book levels
+are checked; liquidity uses the weaker side inside a bounded mid-price band.
+Stale, future, foreign, malformed, oversized or incomplete sources fail closed,
+without newest-row fallback or refreshing input age via calculation time.
+
+The PostgreSQL integration now connects both real sources through authorized
+generation, stored-signal risk and idempotent paper-ticket creation without fills.
+This does not add a signal-cycle operator/worker, stable persisted input bundle,
+mandatory admission or reservations. Exact regime/strategy provenance and marked
+open/global account state remain open. See `docs/paper-market.md` for limits.
