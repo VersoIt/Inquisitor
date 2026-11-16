@@ -27,9 +27,9 @@ This is diagnostic evidence, not a retuned candidate or new trading permission.
 | 3: Features/regime | Price/trend/volatility/volume/microstructure/quality features, regime detection and storage | Full feature inventory against specification, derivative inputs, operational acceptance |
 | 4: Research/backtest | Hypothesis import, experiments, rule evaluation, cost-aware fixed-horizon backtests, OOS, reports | Full metrics/report inventory and execution-model acceptance beyond fixed horizons |
 | 5: Validation | Chronological walk-forward, regime analysis, candidate/rejection gates | Parameter-stability report and full approval lifecycle alignment |
-| 6: Strategies/selector | Trade-signal boundary, Strategy interface, NoTradeStrategy, regime selector, TrendStrategy, MeanReversionStrategy, BreakoutStrategy, durable signal audit, reviewed PAPER bindings with grant/show/revoke CLI, linked risk evaluation, guarded paper ticket submission, bounded application signal cycle and DB-backed market/flat-account sources | Signal-cycle operator CLI/worker, exact strategy/config validation provenance, mandatory source/admission wiring and stable persisted cycle inputs |
+| 6: Strategies/selector | Trade-signal boundary, strategies/selector, durable signal audit, reviewed PAPER binding CLI, linked risk/tickets, DB-backed market/flat-account sources and bounded trend operator with frozen inputs/recovery receipts | Autonomous worker, other operator strategy profiles, exact research-to-code/config provenance and universal admission wiring |
 | 7: Risk/Kill Switch | Decimal sizing, trade limits, market filters, persistent decisions and manual Kill Switch | Audit all automatic Kill Switch triggers and recovery paths against specification |
-| 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, signal-backed ticket admission/fill guards, reports, reconciled flat-account and causal market sources/inspection CLIs and database-tested strategy-to-equity path | Operator runner with mandatory sourcing/admission, marked open-account context, portfolio reservations and sustained paper acceptance |
+| 8: Paper | Order/fill/position/equity journals, costs, settlement, bounded execution cycle, signal-backed guards/reports, source inspection CLIs and explicitly armed sourced trend operator with validation-local lock and durable retry inputs | Unified entry/exit orchestration, universal admission fencing, marked open-account context, portfolio reservations and sustained paper acceptance |
 | 9: Live micro | Explicit startup gates, submission journals, Bybit private adapters, reconciliation, operator commands | Complete live lifecycle including partial fills/exits/balance synchronization and acceptance after paper validation |
 | 10: Edge/meta | Selector accepts an explicit disabled/decayed flag | Rolling performance checks, baseline comparisons, persisted actions, automatic disabling and performance-aware selection |
 | 11: Portfolio | Risk engine checks supplied exposure/position count; validation-local realized account and flat-inventory reconciliation | Marked/global portfolio calculation, open-risk aggregation, reservations, strategy exposure and allocation constraints |
@@ -274,8 +274,8 @@ identical retries recover committed stages. Tests cover failures before/after
 writes, changed retries, late historical replay and safety changes between stages.
 The PostgreSQL lifecycle now tests fresh/replayed cycle persistence and abstention
 alongside its guarded execution/settlement checks. See `docs/paper-signal-cycle.md`.
-This adds no CLI/worker, autonomous account context, portfolio reservation or LIVE
-permission; those acceptance gaps remain open.
+The bounded sourced trend operator now wraps this cycle; autonomous scheduling,
+portfolio reservations and LIVE permission remain outside it.
 
 ## Paper Account Source
 
@@ -291,8 +291,8 @@ and losing streak. An exposed/blocked ledger omits `Account` entirely. This does
 not yet calculate marked equity or correlated exposure for active positions, combine
 capital across validations, reserve risk, or make a snapshot an entry permit.
 The PostgreSQL signal-cycle integration now sources its initial account through
-this service. The production signal-cycle CLI/worker and mandatory admission wiring
-remain open; see `docs/paper-account.md` for the verified contract and limits.
+this service. The bounded trend CLI now uses it too; autonomous workers and
+universal admission remain open. See `docs/paper-account.md` for source limits.
 
 ## Paper Market Source
 
@@ -306,6 +306,23 @@ without newest-row fallback or refreshing input age via calculation time.
 
 The PostgreSQL integration now connects both real sources through authorized
 generation, stored-signal risk and idempotent paper-ticket creation without fills.
-This does not add a signal-cycle operator/worker, stable persisted input bundle,
-mandatory admission or reservations. Exact regime/strategy provenance and marked
-open/global account state remain open. See `docs/paper-market.md` for limits.
+The new bounded trend operator persists these inputs, but universal admission,
+reservations, exact regime/strategy provenance and marked open/global account
+state remain open. See `docs/paper-market.md` for source limits.
+
+## Sourced Trend Operator
+
+Migration 029 and `cmd/paper-signal` add one explicitly armed, validation-scoped
+trend evaluation. The operator sources market/account facts itself, verifies
+current binding, freezes checksummed inputs before any signal write, and journals
+a stable receipt after the existing signal/risk/ticket path. A cooperative
+transaction advisory lock serializes its runs across all validation symbols.
+Completed retries return historical receipts only; unfinished retries cannot
+refresh their inputs, policy or account, except to recover their own unique
+unfilled ticket. Other pending/exposed/changed inventory is refused.
+
+Database-backed CLI tests verify ordinary/disabled/stopped runs, current research
+gates, revoked/missing bindings, stale data, blocked account, interrupted ticket/
+completion writes, late recovery and no fills. Worker scheduling, other strategy
+profiles, universal admission/execution fencing, marked/global portfolios and
+exact research provenance remain open. See `docs/paper-signal-runner.md`.

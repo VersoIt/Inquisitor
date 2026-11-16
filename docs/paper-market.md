@@ -68,10 +68,11 @@ CLI tests verify real DB inspection, stale-data refusal and no signal writes.
 Parallel isolated-schema tests install the shared pgcrypto extension in public
 under a transaction advisory lock, outside disposable schemas.
 
-This is not a production signal-cycle runner. Mandatory operator/runtime wiring,
-persisted stable cycle inputs, admission locking, portfolio reservations and
-marked/global open-account context remain outstanding. Account and market reads
-are individually coherent, not one cross-source atomic reservation.
+The bounded `cmd/paper-signal` trend runner now consumes this source with frozen
+inputs and a cooperative validation lock; see `docs/paper-signal-runner.md`.
+Autonomous scheduling, universal admission, portfolio reservations and marked/global
+open-account context remain outstanding. Account and market reads are individually
+coherent, not one cross-source atomic reservation.
 
 The persisted regime is validated, not recomputed with an exact input/code/config
 provenance proof. The fixed 256-candle EMA initialization is not a full-history

@@ -43,7 +43,7 @@ These commands do not start trading or approve the rejected experiment.
 
 A bounded [paper signal cycle](docs/paper-signal-cycle.md) now connects authorized
 signal journaling, risk evaluation and paper-ticket persistence at the application
-layer. It does not fill orders; operator/runtime adapters remain to be completed.
+layer. It does not fill orders; the bounded operator path is described below.
 
 `cmd/paper-account` now [inspects a reconciled paper account](docs/paper-account.md)
 from persisted journals. Risk-account fields are supplied only for a RUNNING,
@@ -52,6 +52,11 @@ fully flat ledger; open/pending or inconsistent state cannot become a fake balan
 `cmd/paper-market` now [inspects sourced paper market data](docs/paper-market.md)
 from a coherent database snapshot, recomputing causal features and band-limited
 book liquidity. It rejects stale/corrupt sources and does not start trading.
+
+`cmd/paper-signal` now [runs one explicitly armed trend paper evaluation](docs/paper-signal-runner.md)
+from these sources, with frozen inputs, a validation-wide cooperative lock and
+recoverable receipts. It can journal one approved paper ticket, never a fill or
+exchange order. Autonomous scheduling and universal portfolio admission remain open.
 
 ## Current Scope
 

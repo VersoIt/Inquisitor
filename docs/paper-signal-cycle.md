@@ -64,8 +64,10 @@ fresh generation-to-ticket persistence, exact replay and `NO_TRADE`, and confirm
 that revocation prevents a new signal. Its existing guarded fill/open/close/equity
 checks remain active. The data and candidate are synthetic test fixtures only.
 
-This is an application-level cycle, not yet an operator CLI, autonomous worker or
-validated trading strategy. Remaining work includes the CLI adapter, trustworthy
-current market/account context sourcing, exact implementation/config provenance,
-portfolio reservations and sustained live-data paper acceptance. The rejected
-historical experiment remains rejected; this code grants it no permission.
+The bounded `cmd/paper-signal` trend operator now wraps this application-level cycle
+with actual market/flat-account sources, immutable run inputs, recovery receipts
+and a cooperative validation lock. See `docs/paper-signal-runner.md`. This does
+not make the lower-level supplied-input cycle a universal admission boundary.
+Autonomous scheduling, exact research-to-implementation/config provenance, marked/
+global accounting, portfolio reservations and sustained live-data paper acceptance
+remain open. The rejected historical experiment remains rejected.
